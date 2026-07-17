@@ -1,0 +1,20 @@
+{
+  "name": "ocr",
+  "description": "Shift code review quality gates left with customizable multi-agent review. Define your reviewer team composition, run parallel reviews with redundancy, and let reviewers debate findings before synthesis. Works with specs, proposals, and project standards.",
+  "version": "2.4.0",
+  "author": {
+    "name": "Spencer Marx",
+    "email": "spencer@aclarify.com"
+  },
+  "homepage": "https://github.com/spencermarx/open-code-review",
+  "repository": "https://github.com/spencermarx/open-code-review",
+  "license": "Apache-2.0",
+  "keywords": [
+    "code-review",
+    "multi-agent",
+    "ai",
+    "spec-driven",
+    "quality",
+    "architecture"
+  ]
+}
