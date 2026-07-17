@@ -1,0 +1,71 @@
+{
+  "schema_version": 1,
+  "sources": [
+    {
+      "id": "alibaba-open-code-review",
+      "repository": "alibaba/open-code-review",
+      "commit": "17049fb1e3d6a96a8554e7576a6013cb8266635d",
+      "license": "Apache-2.0",
+      "expected_imported_files": 45,
+      "expected_catalog_origins": 50,
+      "license_paths": ["LICENSE"],
+      "include": [
+        "skills/*/SKILL.md",
+        "plugins/open-code-review/skills/*/SKILL.md",
+        ".claude/commands/open-code-review.md",
+        "plugins/open-code-review/claude-code/commands/*.md",
+        "plugins/open-code-review/.codex-plugin/plugin.json",
+        "plugins/open-code-review/.cursor-plugin/plugin.json",
+        "plugins/open-code-review/claude-code/.claude-plugin/plugin.json",
+        "internal/config/template/task_template.json",
+        "internal/config/template/prompts/*.md",
+        "internal/config/template/scan_template.json",
+        "internal/config/rules/system_rules.json",
+        "internal/config/rules/rule_docs/*.md"
+      ]
+    },
+    {
+      "id": "project-codeguard",
+      "repository": "cosai-oasis/project-codeguard",
+      "commit": "0b558228ae70dd6ce1a8ccd565821ea229ec0505",
+      "license": "CC-BY-4.0",
+      "expected_imported_files": 152,
+      "expected_catalog_origins": 143,
+      "license_paths": ["LICENSE.md"],
+      "include": [
+        "sources/rules/core/*.md",
+        "sources/rules/core/*.template",
+        "sources/rules/owasp/*.md",
+        "skills/codeguard/SKILL.md",
+        "skills/codeguard/rules/*.md",
+        "sources/agents/codeguard-reviewer/AGENT.md",
+        "sources/skills/security-review/**",
+        "sources/skills/memory-safe-migration/**",
+        "sources/templates/*.example",
+        "src/codeguard-mcp/.agents/skills/codeguard-mcp-meta/SKILL.md",
+        "src/language_mappings.py",
+        "src/tag_mappings.py",
+        "src/artifact_targets.py",
+        "src/emit_agents.py",
+        ".claude-plugin/plugin.json",
+        ".claude-plugin/marketplace.json",
+        "pyproject.toml"
+      ]
+    },
+    {
+      "id": "spencer-open-code-review",
+      "repository": "spencermarx/open-code-review",
+      "commit": "d8dfa3be5234c575bf02e2d122be8f798052deb9",
+      "license": "Apache-2.0",
+      "expected_imported_files": 62,
+      "expected_catalog_origins": 56,
+      "license_paths": ["LICENSE"],
+      "include": [
+        "packages/agents/skills/ocr/**",
+        "packages/agents/commands/*.md",
+        "packages/agents/.claude-plugin/plugin.json",
+        "packages/agents/package.json"
+      ]
+    }
+  ]
+}
