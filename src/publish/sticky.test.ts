@@ -111,6 +111,7 @@ test("renderProgress: caps items at 50 but counts the full total in the header",
 // ── sanitizeTodo (marker-spoof defence) ────────────────────────────────────────
 test("sanitizeTodo: strips HTML comments, collapses whitespace, clamps to 200", () => {
   expect(sanitizeTodo("foo <!-- cchp-action:evil --> bar")).toBe("foo bar")
+  expect(sanitizeTodo("foo <!<!--x-->-- cchp-action:nested-spoof --> bar")).toBe("foo bar")
   expect(sanitizeTodo("a\n\n b\tc")).toBe("a b c")
   expect(sanitizeTodo("x".repeat(250)).length).toBe(200)
   expect(sanitizeTodo(null)).toBe("")

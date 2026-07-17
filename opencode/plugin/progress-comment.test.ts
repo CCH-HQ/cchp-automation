@@ -59,7 +59,7 @@ describe("progress-comment plugin", () => {
     expect(typeof after).toBe("function")
 
     await after({ tool: "todowrite", sessionID: "root", args: { todos: [
-      { content: "step one <!-- cchp-bot:evil -->", status: "completed" },
+      { content: "step one <!-- cchp-bot:evil --> <!<!--x-->-- cchp-action:nested-spoof -->", status: "completed" },
       { content: "step two", status: "in_progress" },
       { content: "step three", status: "pending" },
     ] } })
@@ -73,6 +73,7 @@ describe("progress-comment plugin", () => {
     expect(text).toContain("- [x] step one")
     expect(text).toContain("**step two** ⏳")
     expect(text).not.toContain("cchp-bot:evil")
+    expect(text).not.toContain("cchp-action:nested-spoof")
     expect(text).not.toContain("child noise")
     expect((text.match(/--method (PATCH|POST)/g) || []).length).toBe(1)
   })

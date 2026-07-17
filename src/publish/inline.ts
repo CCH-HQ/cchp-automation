@@ -143,11 +143,17 @@ function normalizePatch(patch: string | PatchIndex): PatchIndex {
 // ── text sanitization + fingerprint markers ──────────────────────────────────
 
 /** Strip HTML comments from model-provided text — prevents spoofed fingerprint /
- *  sticky / action Markers inside rendered bodies (MCP server's `sanitizeText`). */
+ *  sticky / action Markers inside rendered bodies (MCP server's `sanitizeText`).
+ *  Loops to a fixed point so nested markers (`<!<!--x-->-- … -->`) cannot survive
+ *  a single-pass strip and reassemble into a live comment. */
 export function sanitizeText(t: unknown): string {
-  return String(t ?? "")
-    .replace(/<!--[\s\S]*?-->/g, "")
-    .trim()
+  let text = String(t ?? "")
+  let previous: string
+  do {
+    previous = text
+    text = text.replace(/<!--[\s\S]*?-->/g, "")
+  } while (text !== previous)
+  return text.trim()
 }
 
 /** Remove any pre-existing fingerprint Markers from a caller-supplied body so the

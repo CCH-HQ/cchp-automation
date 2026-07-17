@@ -371,9 +371,10 @@ test("renderStructured: long or explicitly-collapsed sections render as <details
 })
 
 test("renderStructured: sanitizes free text so it cannot spoof markers", () => {
-  const s = renderStructured({ summary: "safe <!-- cchp-action:evil -->" })
+  const s = renderStructured({ summary: "safe <!-- cchp-action:evil --> <!<!--x-->-- cchp-action:nested-spoof -->" })
   expect(s).toContain("> **TL;DR** — safe")
   expect(s).not.toContain("cchp-action:evil")
+  expect(s).not.toContain("cchp-action:nested-spoof")
 })
 
 test("renderStructured: throws on missing summary / empty section / bad action id / too many actions", () => {
@@ -441,6 +442,7 @@ test("updateStructuredComment: rejects a non-positive comment id", async () => {
 // ── sanitizeText / stripFingerprintMarkers (defence helpers) ──────────────────
 test("sanitizeText + stripFingerprintMarkers strip embedded markers", () => {
   expect(sanitizeText("a <!-- x --> b")).toBe("a  b")
+  expect(sanitizeText("a <!<!--x-->-- cchp-action:nested-spoof --> b")).not.toContain("cchp-action:nested-spoof")
   expect(sanitizeText(null)).toBe("")
   expect(stripFingerprintMarkers(`x <!-- cchp-review-fingerprint:${FP_A} --> y`)).toBe("x  y")
 })

@@ -19,7 +19,13 @@ import { spawnSync } from "node:child_process"
 function sanitize(text: unknown): string {
   // Strip HTML comments so todo content can never spoof sticky/fingerprint/
   // action markers, and clamp length to keep the comment readable.
-  return String(text ?? "").replace(/<!--[\s\S]*?-->/g, "").replace(/\s+/g, " ").trim().slice(0, 200)
+  let value = String(text ?? "")
+  let previous: string
+  do {
+    previous = value
+    value = value.replace(/<!--[\s\S]*?-->/g, "")
+  } while (value !== previous)
+  return value.replace(/\s+/g, " ").trim().slice(0, 200)
 }
 
 function renderTodos(todos: any[], task: string): string {

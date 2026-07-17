@@ -22,13 +22,16 @@ export interface Todo {
 
 /** Strip HTML comments so todo content can never spoof a sticky / fingerprint /
  *  action Marker, collapse whitespace, and clamp length — verbatim port of the
- *  progress plugin's `sanitize`. */
+ *  progress plugin's `sanitize`. Loops to a fixed point so nested markers
+ *  (`<!<!--x-->-- … -->`) cannot survive a single-pass strip. */
 export function sanitizeTodo(text: unknown): string {
-  return String(text ?? "")
-    .replace(/<!--[\s\S]*?-->/g, "")
-    .replace(/\s+/g, " ")
-    .trim()
-    .slice(0, 200)
+  let value = String(text ?? "")
+  let previous: string
+  do {
+    previous = value
+    value = value.replace(/<!--[\s\S]*?-->/g, "")
+  } while (value !== previous)
+  return value.replace(/\s+/g, " ").trim().slice(0, 200)
 }
 
 /** Normalize a raw `BOT_TASK` into the marker/heading slug the progress plugin
