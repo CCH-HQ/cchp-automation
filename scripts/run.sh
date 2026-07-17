@@ -139,6 +139,43 @@ if ! jq -e --arg p "${MAIN_PROVIDER}" --arg m "${MAIN_MODEL}" '
   exit 2
 fi
 
+# ── Agent 工具链探测 —— prepare-env.sh best-effort 装完后,这里探测装成功与否再接入。
+# 装失败即优雅降级:缺失的 MCP/插件不写进配置,绝不让一个缺失的二进制拖垮整场 run。
+command -v fff-mcp         >/dev/null 2>&1 && HAVE_FFF=1    || HAVE_FFF=0
+command -v serena          >/dev/null 2>&1 && HAVE_SERENA=1 || HAVE_SERENA=0
+command -v oh-my-openagent >/dev/null 2>&1 && HAVE_OMOA=1   || HAVE_OMOA=0
+command -v context-mode    >/dev/null 2>&1 && HAVE_CTX=1    || HAVE_CTX=0
+# context-mode 暴露 ctx_execute 等沙箱执行工具(经 MCP,不受 opencode bash/edit 权限约束)。
+# 审查未信任 PR 的路径(pr_opened / 受限 fork 任务)一律不挂 context-mode,免得在带凭据的
+# runner 上给未信任代码开出执行面;其余任务按官方全局启用。
+CTX_ACTIVE="${HAVE_CTX}"
+case "${BOT_TASK:-}" in pr_opened) CTX_ACTIVE=0 ;; esac
+if [[ "${BOT_PR_IS_FORK:-0}" == "1" ]] && \
+   { [[ "${BOT_TASK:-}" == "lgtm_merge" ]] || [[ "${BOT_TASK:-}" == "engage" ]]; }; then
+  CTX_ACTIVE=0
+fi
+# 协调 agent:装上 oh-my-openagent 时用 Sisyphus(西西弗斯)统领全部任务(含 pr_opened 的
+# Ultra 审查)。Ultra 流水线(review 叶子子代理 / ultra_review_task / finalize 闸门 / 会话级
+# 只读权限)结构不变 —— 仅把协调者从 build 换成 sisyphus。装失败则回落 build。
+COORD_AGENT=build
+[[ "${HAVE_OMOA}" == "1" ]] && COORD_AGENT=sisyphus
+
+# oh-my-openagent 逐 agent/category 显式钉死 model + 思考预算 = 主模型(variant max)。否则其
+# 子代理会自作主张用便宜回退模型,且那些默认模型不在本仓 providers 里会直接失败。同时关掉会
+# 外泄未信任 PR 代码的远端 MCP(websearch/context7/grep_app)、遥测、自更新。写到用户级 opencode
+# 配置目录,与 OPENCODE_CONFIG_CONTENT 独立生效(oh-my-openagent.jsonc 自有加载器)。
+if [[ "${HAVE_OMOA}" == "1" ]]; then
+  mkdir -p "${HOME}/.config/opencode"
+  jq -n --arg model "${CCHP_BOT_MODEL}" \
+     --argjson agents '["sisyphus","hephaestus","prometheus","atlas","oracle","librarian","explore","multimodal-looker","metis","momus","sisyphus-junior"]' \
+     --argjson cats   '["quick","deep","ultrabrain","visual-engineering","writing","unspecified-low","unspecified-high"]' '
+     { telemetry: false, auto_update: false,
+       disabled_mcps: ["websearch", "context7", "grep_app"],
+       agents:     ($agents | map({ (.): { model: $model, variant: "max" } }) | add),
+       categories: ($cats   | map({ (.): { model: $model, variant: "max" } }) | add) }
+  ' > "${HOME}/.config/opencode/oh-my-openagent.jsonc"
+fi
+
 # ── 合成 OpenCode 配置(providers/model/instructions/mcp/agent/command/plugin)──
 # Synthesize the OpenCode config. Mapping rules (unchanged from the source):
 #   format → npm 包;vision → attachment+modalities;compact_threshold →
@@ -165,6 +202,10 @@ OPENCODE_CONFIG_CONTENT="$(jq -nc \
   --arg workdir "${BOT_WORKDIR}" \
   --arg killswitch "${CCHP_DISABLE_AUTO_APPROVE:-}" \
   --argjson external_directory_permission "${EXTERNAL_DIRECTORY_PERMISSION}" \
+  --arg have_fff "${HAVE_FFF}" \
+  --arg have_serena "${HAVE_SERENA}" \
+  --arg have_ctx "${CTX_ACTIVE}" \
+  --arg have_omoa "${HAVE_OMOA}" \
   --arg opencodedir "${OPENCODE_DIR}" '
   def npm_of($f):
     {"anthropic": "@ai-sdk/anthropic",
@@ -213,7 +254,7 @@ OPENCODE_CONFIG_CONTENT="$(jq -nc \
     # Extra instructions may add context, but the Ultra protocol remains the
     # final review instruction and cannot be weakened by a variable override.
     instructions: ([$sysprompt] + $extra),
-    mcp: { github_inline_comment: {
+    mcp: ({ github_inline_comment: {
       type: "local", command: ["bun", $mcp], enabled: true,
       environment: ({ BOT_REPO: $botrepo, BOT_PR_NUMBER: $botpr,
                       BOT_ISSUE_NUMBER: $botissue, BOT_TASK: $task,
@@ -223,7 +264,19 @@ OPENCODE_CONFIG_CONTENT="$(jq -nc \
                       BOT_REVIEW_FINALIZER: $review_finalizer,
                       BOT_REVIEW_FINALIZED_MARKER: $finalized_marker,
                       GH_TOKEN: "{env:GH_TOKEN}" }
-        + (if $killswitch != "" then { CCHP_DISABLE_AUTO_APPROVE: $killswitch } else {} end)) } },
+        + (if $killswitch != "" then { CCHP_DISABLE_AUTO_APPROVE: $killswitch } else {} end)) } }
+      # fff-mcp:超快文件/内容搜索(grep / find_files / multi_grep),只读。
+      + (if $have_fff == "1" then
+          { fff: { type: "local", enabled: true, command: ["fff-mcp", "--no-update-check"] } }
+        else {} end)
+      # serena:LSP 语义代码检索(find_symbol / references / overview / …)。只读锁在
+      # ~/.serena/serena_config.yml 的 excluded_tools;--context ide + dashboard off。
+      + (if $have_serena == "1" then
+          { serena: { type: "local", enabled: true,
+            command: ["serena", "start-mcp-server", "--context", "ide", "--project-from-cwd",
+                      "--enable-web-dashboard", "false", "--mode", "no-onboarding"],
+            environment: { SERENA_USAGE_REPORTING: "false" } } }
+        else {} end) ),
     # 思考强度:主线程编排、planner、finder、verifier 全部固定 max。
     # reasoning effort is pinned to max for the coordinator + planner + all reviewers.
     agent: ((if $mainvariant then
@@ -243,7 +296,7 @@ OPENCODE_CONFIG_CONTENT="$(jq -nc \
     + { planner: ({
       model: $model,
       mode: "subagent",
-      description: "Deep planning specialist. MUST be called FIRST, before any code-modifying work: explores the repo in parallel, drafts a plan, verifies every referenced file, writes the final plan to ctx/plan.md and returns it in full.",
+      description: "Deep planning specialist. Called AFTER initial exploration (explore first), before any non-trivial code-modifying work: explores the repo in parallel, drafts a plan, verifies every referenced file, writes the final plan to ctx/plan.md and returns it in full.",
       prompt: ("{file:" + $opencodedir + "/agent/planner.md}\n\nPlan file (absolute path — the ONLY file you may write): " + $workdir + "/ctx/plan.md"),
       permission: {
         edit: { "*": "deny", ($workdir + "/ctx/plan.md"): "allow" },
@@ -259,7 +312,7 @@ OPENCODE_CONFIG_CONTENT="$(jq -nc \
     command: { "code-review": {
       description: "Independent multi-perspective PR review pass (subagent fan-out + inline comments)",
       template: ("{file:" + $opencodedir + "/command/code-review.md}") } },
-    plugin: [
+    plugin: ([
       ("file://" + $opencodedir + "/plugin/ultra-review-runner.ts"),
       ("file://" + $opencodedir + "/plugin/review-artifact-guard.ts"),
       ("file://" + $opencodedir + "/plugin/review-reference-library.ts"),
@@ -267,12 +320,18 @@ OPENCODE_CONFIG_CONTENT="$(jq -nc \
       ("file://" + $opencodedir + "/plugin/progress-comment.ts"),
       "@dietrichgebert/ponytail@4.8.4"
     ]
+    # context-mode:上下文优化器(ctx_* 沙箱/知识库)。opencode 官方接入是插件而非 MCP;
+    # 仅在非未信任审查路径挂载(见 CTX_ACTIVE)。oh-my-openagent:Sisyphus 等编排 agent。
+    + (if $have_ctx == "1" then ["context-mode"] else [] end)
+    + (if $have_omoa == "1" then ["oh-my-openagent@latest"] else [] end))
   }
   + (if $small != "" then { small_model: $small } else {} end)
   + (if $mainm.context then
       { compaction: { reserved:
           (($mainm.context * (1 - ($mainm.compact_threshold // 0.9))) | round) } }
     else {} end)
+  # 装上 oh-my-openagent 时把默认 agent 也设为 Sisyphus(与 --agent 显式传参双保险)。
+  + (if $have_omoa == "1" then { default_agent: "sisyphus" } else {} end)
 ')"
 export OPENCODE_CONFIG_CONTENT
 
@@ -310,9 +369,15 @@ export OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS=true   # allow parallel backgr
 export OPENCODE_DISABLE_SHARE=true                       # CI sessions never share externally
 export CCHP_REVIEW_MAX_PARALLEL=10                       # Ultra runner hard cap
 export CCHP_REVIEW_AGENT_TIMEOUT_SECONDS=1800            # single reviewer max 30min
+# 外部工具链运行期开关:context-mode 落盘到 ctx/(runner 可写、克隆外);rtk 关遥测。
+mkdir -p "${CTX_DIR}/context-mode"
+export CONTEXT_MODE_DIR="${CTX_DIR}/context-mode"
+export CONTEXT_MODE_PROJECT_DIR="${REPO_DIR}"
+export RTK_TELEMETRY_DISABLED=1
 
 log "model=${CCHP_BOT_MODEL} small=${CCHP_BOT_SMALL_MODEL:-<main>} can_write=${BOT_CAN_WRITE:-0} cwd=${REPO_DIR}"
 log "providers=$(jq -r 'keys | join(",")' <<<"${CCHP_BOT_PROVIDERS}")"
+log "coordinator=${COORD_AGENT} fff=${HAVE_FFF} serena=${HAVE_SERENA} context-mode=${CTX_ACTIVE} oh-my-openagent=${HAVE_OMOA}"
 
 cd "${REPO_DIR}"
 # Prompt is passed on stdin so arbitrary issue/PR text can't break arg parsing.
@@ -323,7 +388,7 @@ cd "${REPO_DIR}"
 # ultra-review-runner, which cancels it independently.
 rc=0
 timeout --signal=TERM --kill-after=30s "${BOT_OPENCODE_TIMEOUT:-43200}" \
-  opencode run --auto --agent build --variant max < "${BOT_PROMPT_FILE}" || rc=$?
+  opencode run --auto --agent "${COORD_AGENT}" --variant max < "${BOT_PROMPT_FILE}" || rc=$?
 if [[ "${rc}" -eq 124 || "${rc}" -eq 137 ]]; then
   log "ERROR: opencode run exceeded ${BOT_OPENCODE_TIMEOUT:-43200}s and was killed — likely the model gateway hung (check the provider format matches what the gateway actually implements)."
 fi

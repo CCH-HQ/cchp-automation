@@ -258,4 +258,167 @@ if [[ -n "${BOT_PR_NUMBER:-}" && "${BOT_SKIP_PR_INSPECT:-0}" != "1" ]] && comman
   fi
 fi
 
+# ── 10. Agent 搜索/编排工具链(fff / serena / rtk / context-mode / oh-my-openagent)──
+# 全部 best-effort:与 §7/§8 同款,任何失败只 warn,绝不中断 env-prep。装成功与否由
+# run.sh 事后用 `command -v` 探测,再决定是否接入 opencode 配置 —— 装失败即优雅降级,
+# 绝不让一个缺失的二进制/插件拖垮整场 run。版本策略:按用户明确要求硬编码 latest
+# (fff/rtk 取最新 release,serena/context-mode/oh-my-openagent 取 npm/git latest;
+# 大型开源项目,风险可控)。详见 docs/ci/agent-toolchain.md。
+verify_sha256() { # $1=文件 $2=sha256 文件(`<hash>  <name>` 或裸 hash)
+  local want got
+  want="$(awk '{print $1; exit}' "$2" 2>/dev/null)"; [[ -n "${want}" ]] || want="$(tr -d '[:space:]' <"$2" 2>/dev/null)"
+  got="$(sha256sum "$1" 2>/dev/null | awk '{print $1}')"
+  [[ -n "${want}" && "${want}" == "${got}" ]]
+}
+
+# fff-mcp:超快文件/内容搜索 MCP(grep / find_files / multi_grep)。静态 musl 二进制。
+install_fff_mcp() {
+  local target asset dir
+  case "$(uname -m)" in
+    x86_64|amd64)  target=x86_64-unknown-linux-musl ;;
+    aarch64|arm64) target=aarch64-unknown-linux-musl ;;
+    *) warn "fff-mcp: unsupported arch $(uname -m)"; return 0 ;;
+  esac
+  asset="fff-mcp-${target}"
+  dir="${BOT_WORKDIR}/fffdl"; mkdir -p "${dir}" "${HOME}/.local/bin"
+  # TODO(cchp: route via engine CLI — DESIGN §6): release asset download of fff-mcp.
+  if gh release download --repo dmtrKovalenko/fff \
+        --pattern "${asset}" --pattern "${asset}.sha256" --dir "${dir}" --clobber >/dev/null 2>&1 \
+     && verify_sha256 "${dir}/${asset}" "${dir}/${asset}.sha256" \
+     && install -m 0755 "${dir}/${asset}" "${HOME}/.local/bin/fff-mcp"; then
+    log "fff-mcp (latest) -> ~/.local/bin/fff-mcp"
+  else
+    warn "fff-mcp install failed (fast file search MCP unavailable)"
+  fi
+}
+
+# uv:serena 唯一前置。缺则装(astral 官方脚本,落 ~/.local/bin,已在 PATH)。
+ensure_uv() {
+  command -v uv >/dev/null 2>&1 && return 0
+  if curl -fsSL https://astral.sh/uv/install.sh | env INSTALLER_NO_MODIFY_PATH=1 sh >/dev/null 2>&1 \
+     && command -v uv >/dev/null 2>&1; then
+    log "uv -> $(command -v uv)"; return 0
+  fi
+  warn "uv install failed (serena semantic search unavailable)"; return 1
+}
+
+# serena:语义代码检索 MCP(LSP 驱动的 symbol/引用/实现导航)。硬锁只读 —— MCP 工具
+# 不受 opencode 的 bash/edit 权限约束,审查未信任 PR 时必须在 serena 侧禁掉一切写/执行
+# 工具(见 write_serena_readonly_config)。装 git main = 永远 latest;uv 缓存让自建
+# runner 二次装很快;--force 保证每场 env-prep 都刷新到最新源。
+write_serena_readonly_config() {
+  mkdir -p "${HOME}/.serena"
+  # 部分配置即可:缺失键回落 dataclass 默认,未知键忽略;仅 `projects` 为必需键。
+  cat > "${HOME}/.serena/serena_config.yml" <<'YAML'
+# cchp-automation 生成:serena 锁死为只读代码检索。MCP 工具不经 opencode 权限层,
+# 审查未信任 fork PR 时,这里的 excluded_tools 是唯一能挡住写文件/执行 shell 的闸门。
+projects: []
+web_dashboard: false
+web_dashboard_open_on_launch: false
+gui_log_window: false
+record_tool_usage_stats: false
+excluded_tools:
+  - create_text_file
+  - replace_content
+  - replace_in_files
+  - delete_lines
+  - replace_lines
+  - insert_at_line
+  - replace_symbol_body
+  - insert_after_symbol
+  - insert_before_symbol
+  - rename_symbol
+  - safe_delete_symbol
+  - execute_shell_command
+  - write_memory
+  - edit_memory
+  - delete_memory
+  - rename_memory
+  - remove_project
+YAML
+}
+install_serena() {
+  ensure_uv || return 0
+  if timeout "${BOT_SERENA_INSTALL_TIMEOUT:-420}" uv tool install --force --python 3.13 \
+        "git+https://github.com/oraios/serena@main" >/dev/null 2>&1 \
+     && command -v serena >/dev/null 2>&1; then
+    write_serena_readonly_config
+    log "serena (git main, latest, read-only) -> $(command -v serena)"
+  else
+    warn "serena install failed/timed out (semantic code search unavailable)"
+  fi
+}
+
+# rtk:把 ~100+ 冗长命令(git/gh/cargo/pytest/…)的输出压缩后再喂给模型,省 token。
+# 二进制 + opencode 全局插件(tool.execute.before 钩子透明重写 bash 命令)。
+install_rtk() {
+  local target asset dir
+  case "$(uname -m)" in
+    x86_64|amd64)  target=x86_64-unknown-linux-musl ;;
+    aarch64|arm64) target=aarch64-unknown-linux-gnu ;;   # 上游 arm64 只发 gnu
+    *) warn "rtk: unsupported arch $(uname -m)"; return 0 ;;
+  esac
+  asset="rtk-${target}.tar.gz"
+  dir="${BOT_WORKDIR}/rtkdl"; mkdir -p "${dir}" "${HOME}/.local/bin"
+  # TODO(cchp: route via engine CLI — DESIGN §6): release asset download of rtk.
+  if gh release download --repo rtk-ai/rtk \
+        --pattern "${asset}" --pattern "checksums.txt" --dir "${dir}" --clobber >/dev/null 2>&1 \
+     && ( cd "${dir}" && grep " ${asset}\$" checksums.txt | sha256sum -c - ) >/dev/null 2>&1 \
+     && tar -xzf "${dir}/${asset}" -C "${dir}" >/dev/null 2>&1 \
+     && install -m 0755 "${dir}/rtk" "${HOME}/.local/bin/rtk"; then
+    log "rtk (latest) -> ~/.local/bin/rtk"
+    # opencode 全局插件目录(singular `plugin/`,opencode 约定的自动加载路径)。
+    mkdir -p "${HOME}/.config/opencode/plugin"
+    if curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/master/hooks/opencode/rtk.ts \
+          -o "${HOME}/.config/opencode/plugin/rtk.ts" 2>/dev/null; then
+      log "rtk opencode plugin -> ~/.config/opencode/plugin/rtk.ts"
+    else
+      warn "rtk opencode plugin fetch failed (rtk usable via bash only)"
+    fi
+  else
+    warn "rtk install failed (verbose-command compaction unavailable)"
+  fi
+}
+
+# npm 全局装到 ~/.local(用户可写前缀,避开 EACCES;bin 落 ~/.local/bin,已在 PATH)。
+npm_global_latest() { # $1=包名
+  timeout "${BOT_NPM_INSTALL_TIMEOUT:-300}" \
+    npm install -g --prefix "${HOME}/.local" "$1@latest" >/dev/null 2>&1
+}
+# context-mode:上下文窗口优化器(ctx_* 沙箱执行 + FTS5 知识库)。opencode 官方接入是
+# 插件而非 MCP。需 Node ≥ 22.5(Linux 硬性要求)。
+install_context_mode() {
+  if node --version >/dev/null 2>&1; then
+    local nodemaj nodemin
+    nodemaj="$(node -p 'process.versions.node.split(".")[0]' 2>/dev/null || echo 0)"
+    nodemin="$(node -p 'process.versions.node.split(".")[1]' 2>/dev/null || echo 0)"
+    if (( nodemaj < 22 || (nodemaj == 22 && nodemin < 5) )); then
+      warn "context-mode needs Node ≥ 22.5 (have $(node --version)); skipping"
+      return 0
+    fi
+  fi
+  if npm_global_latest context-mode && command -v context-mode >/dev/null 2>&1; then
+    log "context-mode (latest) -> ~/.local/bin/context-mode"
+  else
+    warn "context-mode install failed (ctx_* context optimizer unavailable)"
+  fi
+}
+# oh-my-openagent:提供 Sisyphus(西西弗斯)等编排 agent 的 opencode 插件。硬编码 latest。
+install_omoa() {
+  if npm_global_latest oh-my-openagent && command -v oh-my-openagent >/dev/null 2>&1; then
+    log "oh-my-openagent (latest) -> ~/.local/bin/oh-my-openagent"
+  else
+    warn "oh-my-openagent install failed (Sisyphus coordinator unavailable; run.sh falls back to build agent)"
+  fi
+}
+
+if [[ "${BOT_SKIP_AGENT_TOOLCHAIN:-0}" != "1" ]]; then
+  log "installing agent toolchain (fff / serena / rtk / context-mode / oh-my-openagent)"
+  install_fff_mcp     || true
+  install_serena      || true
+  install_rtk         || true
+  install_context_mode || true
+  install_omoa        || true
+fi
+
 log "environment ready at ${REPO_DIR}"

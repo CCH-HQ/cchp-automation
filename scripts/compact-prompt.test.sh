@@ -32,7 +32,13 @@ grep -Fq 'AGENT_TIMEOUT_MS = 30 * 60 * 1000' "${ULTRA_PLUGIN}"
 grep -Fq 'ultra_review_task' "${ULTRA_PLUGIN}"
 grep -Fq 'reasoningEffort: "max"' "${SCRIPT_DIR}/run.sh"
 grep -Fq 'variant: "max"' "${SCRIPT_DIR}/run.sh"
-grep -Fq 'opencode run --auto --agent build --variant max' "${SCRIPT_DIR}/run.sh"
+# Coordinator agent is now selectable: Sisyphus when oh-my-openagent installed,
+# else the built-in build agent. Ultra pipeline (review subagents / ultra_review_task
+# / finalize gates / session-level read-only perms) is unchanged — only the
+# coordinating agent type differs.
+grep -Fq 'opencode run --auto --agent "${COORD_AGENT}" --variant max' "${SCRIPT_DIR}/run.sh"
+grep -Fq 'COORD_AGENT=build' "${SCRIPT_DIR}/run.sh"
+grep -Fq 'COORD_AGENT=sisyphus' "${SCRIPT_DIR}/run.sh"
 # run.sh builds these from ${OPENCODE_DIR} (= $ENGINE_DIR/opencode), so only the
 # path suffix is a stable literal there.
 grep -Fq '/review/ultra-protocol.md' "${SCRIPT_DIR}/run.sh"
@@ -107,6 +113,54 @@ env HOME="${config_smoke}/home" PATH="${config_smoke}/bin:${PATH}" \
   CAPTURE_CONFIG="${config_smoke}/metadata-opencode.json" \
   bash "${SCRIPT_DIR}/run.sh"
 jq -e --arg ultra "${ULTRA_PROTOCOL}" '(.instructions | index($ultra)) == null' "${config_smoke}/metadata-opencode.json" >/dev/null
+
+# ── agent toolchain wiring: with fff / serena / oh-my-openagent / context-mode
+# "installed" (PATH stubs), assert they get wired into the synthesized config,
+# the coordinator becomes Sisyphus, every oh-my-openagent agent is pinned to the
+# main model + variant max, and context-mode is gated OFF on the untrusted
+# pr_opened review path (fff/serena, being read-only, stay).
+tc="${tmp}/toolchain-smoke"
+mkdir -p "${tc}/home/.local/bin" "${tc}/repo" "${tc}/bin"
+printf 'TASK: toolchain smoke\n' > "${tc}/prompt.md"
+cat > "${tc}/bin/timeout" <<'MOCK'
+#!/usr/bin/env bash
+printf '%s' "${OPENCODE_CONFIG_CONTENT:?}" > "${CAPTURE_CONFIG:?}"
+MOCK
+chmod +x "${tc}/bin/timeout"
+for t in fff-mcp serena oh-my-openagent context-mode; do
+  printf '#!/usr/bin/env bash\n' > "${tc}/bin/${t}"; chmod +x "${tc}/bin/${t}"
+done
+tc_run() { # $1=task  $2=capture-file
+  env HOME="${tc}/home" PATH="${tc}/bin:${PATH}" \
+    BOT_WORKDIR="${tc}" REPO_DIR="${tc}/repo" BOT_PROMPT_FILE="${tc}/prompt.md" \
+    BOT_SYSTEM_PROMPT="${ENGINE_ROOT}/opencode/system-prompt.md" BOT_TASK="$1" BOT_SKIP_PR_INSPECT=1 \
+    BOT_CAN_WRITE=1 BOT_REPO=example/repo BOT_PR_NUMBER=7 \
+    BOT_HEAD_SHA=0123456789abcdef0123456789abcdef01234567 \
+    CCHP_BOT_MODEL=relay/gpt-5.6-sol \
+    CCHP_BOT_PROVIDERS='{"relay":{"format":"openai-responses","base_url":"https://example.invalid/v1","models":{"gpt-5.6-sol":{"context":500000,"output":128000}}}}' \
+    CAPTURE_CONFIG="$2" bash "${SCRIPT_DIR}/run.sh" >/dev/null
+}
+tc_run engage "${tc}/engage.json"
+jq -e '
+  (.mcp | has("fff")) and (.mcp | has("serena")) and
+  (.mcp.serena.command | index("--enable-web-dashboard")) != null and
+  (.plugin | index("context-mode")) != null and
+  (.plugin | index("oh-my-openagent@latest")) != null and
+  .default_agent == "sisyphus"
+' "${tc}/engage.json" >/dev/null
+# every oh-my-openagent agent + category pinned to the main model + variant max
+jq -e '
+  (.agents | length) == 11 and
+  (.agents | to_entries | all(.value == {model: "relay/gpt-5.6-sol", variant: "max"})) and
+  (.categories | length) == 7 and
+  (.disabled_mcps | index("websearch")) != null and
+  .telemetry == false and .auto_update == false
+' "${tc}/home/.config/opencode/oh-my-openagent.jsonc" >/dev/null
+tc_run pr_opened "${tc}/review.json"
+jq -e '
+  (.plugin | index("context-mode")) == null and
+  (.mcp | has("fff")) and (.mcp | has("serena"))
+' "${tc}/review.json" >/dev/null
 
 small="${tmp}/small"
 mkdir -p "$small"

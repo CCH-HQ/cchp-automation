@@ -158,14 +158,13 @@ jobs:
       - name: Install OpenCode CLI
         if: steps.route.outputs.act == 'true'
         env:
-          BOT_OPENCODE_VERSION: ${{ vars.CCHP_BOT_OPENCODE_VERSION }}
           GH_TOKEN: ${{ steps.base.outputs.token }}
         run: |
           set -euo pipefail
-          if [ -z "${BOT_OPENCODE_VERSION:-}" ]; then
-            BOT_OPENCODE_VERSION="$(gh release view --repo anomalyco/opencode --json tagName --jq '.tagName | ltrimstr("v")')"
-          fi
-          echo "installing opencode ${BOT_OPENCODE_VERSION}"
+          # 硬编码 latest:忽略任何版本 pin,始终安装最新 release(用户明确要求;
+          # opencode 是大型开源项目,风险可控)。
+          BOT_OPENCODE_VERSION="$(gh release view --repo anomalyco/opencode --json tagName --jq '.tagName | ltrimstr("v")')"
+          echo "installing opencode ${BOT_OPENCODE_VERSION} (latest)"
           installer="$(mktemp)"
           trap 'rm -f "${installer}"' EXIT
           curl -fsSL https://opencode.ai/install -o "${installer}"

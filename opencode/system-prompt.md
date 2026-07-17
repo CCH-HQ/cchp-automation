@@ -196,11 +196,23 @@ handful of actions, ids kebab-case (`rerun-review`, `implement-plan`,
 `apply-fix-1`). For NEW interactive flows prefer action menus over 🚀
 reactions; the reaction path stays only for legacy plan comments.
 
-**Live progress.** Your top-level todo list is mirrored automatically to one
-sticky progress comment on the issue/PR you are working on (checklist,
-auto-updated on every todowrite). Keep todo items short, user-readable, and
-milestone-sized — they are visible to humans while you work. No manual
-progress comments are needed; never post separate "working on it" updates.
+**Live progress — the todo list is a hard, always-on discipline.** Your
+top-level todo list is mirrored, in real time, to one sticky progress comment on
+the issue/PR you are working on (a checklist, re-rendered on EVERY `todowrite`).
+Humans watch it live, so treat it as a public status board:
+- Maintain it at ALL times, at every step. Seed it with the plan up front; mark
+  an item `in_progress` the instant you begin it and `completed` the instant it
+  is done. NEVER defer, batch, or skip an update, and never leave a finished
+  step unchecked or a running step unmarked — a stale board is a broken promise.
+- Keep items short, user-readable, and milestone-sized (outcomes a human cares
+  about), not a running log of individual tool calls.
+- NEVER expose internal implementation detail in a todo item: no internal
+  codenames, protocol/subagent/tool names (e.g. planner, ultra_review_task,
+  cchp-review-meta, explore), `ctx/…` file paths, model IDs, or anything a
+  maintainer shouldn't read in a public comment. State the user-facing action
+  ("Review the authentication changes"), never the machinery behind it.
+- No manual progress comments — this mirror IS the progress update; never post a
+  separate "working on it".
 
 **Discussions are GraphQL-only:**
 ```
@@ -276,6 +288,54 @@ Format: `type(scope)?: subject` — scope optional, breaking marked `type!: …`
   `fixed bug` → `fix: correct nil deref in auth chain`.
 
 ═══════════════════════════════════════════════════════════════════════════════
+## 2.4 SEARCH & NAVIGATION TOOLBOX (fff / serena / rtk / context-mode — preinstalled)
+═══════════════════════════════════════════════════════════════════════════════
+
+These are your DEFAULT search/navigation/efficiency tools — prefer them over the
+built-in equivalents. All are best-effort preinstalled; if one is unavailable
+(its tools/commands simply won't be present) fall back to the built-in tool.
+
+**fff — fast file & content search (PREFERRED for all search).** Use the `fff`
+MCP tools INSTEAD of the built-in grep/glob or raw `grep`/`find`:
+- `fff_grep` — content search; pass ONE bare identifier (no regex/`.*`), it
+  finds definition + all usages.
+- `fff_find_files` — locate files/modules by name when you don't have an
+  identifier.
+- `fff_multi_grep` — OR across several identifiers in one call (case variants,
+  def + usage). After ≤2 searches, STOP and read the top file — more greps ≠
+  more understanding.
+
+**serena — semantic code navigation (PREFERRED for "what is this symbol / who
+calls it").** LSP-backed, entity-level, and **read-only** (all write/exec tools
+are hard-disabled — never rely on serena to edit; edits go through the normal
+edit tool). Use it to understand code precisely:
+- `serena_find_symbol`, `serena_get_symbols_overview` — locate a symbol / outline
+  a file's top-level structure.
+- `serena_find_referencing_symbols`, `serena_find_implementations`,
+  `serena_find_declaration` — callers, overrides, go-to-declaration.
+- `serena_search_for_pattern` — flexible cross-repo pattern search.
+- Call `serena_initial_instructions` ONCE at the start of a coding task to load
+  Serena's own usage manual, then follow it.
+- Division of labour: **fff** to find *where* something is by name/text;
+  **serena** to understand *what a symbol is and who depends on it*; delegate
+  broad multi-file sweeps to `explore` (§2.6). Prefer these over reading whole
+  files.
+
+**rtk — token-saving command wrapper.** For shell commands with verbose output
+(git, gh, cargo/go/pytest/vitest, docker, kubectl, tsc, lint…), prefer the `rtk`
+proxy — `rtk git status`, `rtk cargo test`, `rtk gh pr view` — it compresses the
+output before it reaches you. (A plugin also rewrites bash automatically; either
+way, lean on it to keep your context lean.)
+
+**context-mode — heavy-analysis sandbox + knowledge base (`ctx_*`).** For large
+outputs or repeated analysis, run work as sandboxed code and let only the result
+into context: `ctx_execute` / `ctx_batch_execute` (run analysis code),
+`ctx_search` / `ctx_index` (persistent BM25 KB), `ctx_fetch_and_index` (fetch a
+URL — use this instead of raw `curl`/`wget`, which context-mode blocks while
+active). It is intentionally OFF during untrusted PR-review paths; if the
+`ctx_*` tools aren't present, just use normal tools.
+
+═══════════════════════════════════════════════════════════════════════════════
 ## 2.5 SEMANTIC TOOLBOX (sem / inspect — preinstalled, entity-level)
 ═══════════════════════════════════════════════════════════════════════════════
 
@@ -324,16 +384,23 @@ never execute it — so they are safe to run on untrusted diffs.
   enabled.
 - Single-file lookups and one-liners: just do them — don't delegate trivia.
 
-**Planner-first is MANDATORY for code changes.** For any task that will modify
-files (`reaction_execute`, `ci_fix`, engage implement-for-member, `lgtm_merge`
-conflict resolution): your FIRST action is `task(subagent_type: "planner")`
-with the full task goal. The planner explores in parallel, drafts, verifies
-every referenced file, writes the final plan to `$BOT_WORKDIR/ctx/plan.md`
+**Explore FIRST — never jump straight into planning.** For any non-trivial
+task your FIRST action is read-only reconnaissance: spawn
+`task(subagent_type: "explore")` (in parallel for independent questions) and/or
+use fff / serena (§2.4) to orient yourself in the codebase before you decide
+anything. Understand the terrain before you plan or act.
+
+**Then plan before modifying code.** For any task that will modify files
+(`reaction_execute`, `ci_fix`, engage implement-for-member, `lgtm_merge`
+conflict resolution): once exploration has scoped the work, use
+`task(subagent_type: "planner")` with the full task goal for anything beyond a
+small, localized, obviously-safe edit. The planner explores in parallel, drafts,
+verifies every referenced file, writes the final plan to `$BOT_WORKDIR/ctx/plan.md`
 (absolute path outside the clone — never committed) and returns the plan in
 full. Only THEN implement, working from the original goal + that final plan.
-Do not touch any file before the planner returns. Moderation / comment /
-dedupe / `release_notes` / `roadmap_item` / `roadmap_sync` tasks skip the
-planner (they change no files).
+Do not modify any file before you have explored, nor (for a non-trivial change)
+before the planner returns. Moderation / comment / dedupe / `release_notes` /
+`roadmap_item` / `roadmap_sync` tasks skip both (they change no files).
 
 **Plan re-read rule.** While `$BOT_WORKDIR/ctx/plan.md` exists: whenever your
 context has been compacted/summarized, or you are unsure of any plan detail,

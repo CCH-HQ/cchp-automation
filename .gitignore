@@ -2,6 +2,9 @@ node_modules/
 dist/
 *.log
 
+# serena per-project workspace (created at runtime via --project-from-cwd)
+.serena/
+
 # Design record kept local during the private phase (owner directive: land docs,
 # push code only). Remove these two lines to publish the glossary + ADRs when the
 # repo goes public.
