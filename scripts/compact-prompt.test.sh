@@ -162,6 +162,112 @@ jq -e '
   (.mcp | has("fff")) and (.mcp | has("serena"))
 ' "${tc}/review.json" >/dev/null
 
+# ── token-rotation sidecar smoke: with App creds in env, run.sh must start the
+# (mocked) refresher, wait for the token file, wire the token FILE PATH into the
+# MCP environment, install the gh wrapper + git credential helper — and the App
+# private key must NEVER reach OPENCODE_CONFIG_CONTENT or the opencode env
+# (hard security invariant: run.sh unsets the creds before config assembly).
+grep -Fq 'unset CCHP_APP_PRIVATE_KEY CCHP_APP_CLIENT_ID' "${SCRIPT_DIR}/run.sh"
+grep -Fq 'gh-token-refresher.ts' "${SCRIPT_DIR}/run.sh"
+grep -Fq '.gh-token-refresher.pid' "${SCRIPT_DIR}/cleanup.sh"
+rot="${tmp}/rotation-smoke"
+mkdir -p "${rot}/home/.local/bin" "${rot}/repo" "${rot}/bin"
+printf 'TASK: rotation smoke\n' > "${rot}/prompt.md"
+cat > "${rot}/bin/timeout" <<'MOCK'
+#!/usr/bin/env bash
+printf '%s' "${OPENCODE_CONFIG_CONTENT:?}" > "${CAPTURE_CONFIG:?}"
+env > "${CAPTURE_ENV:?}"
+MOCK
+chmod +x "${rot}/bin/timeout"
+# mock bun: stands in for `bun gh-token-refresher.ts` — records the requested
+# scope, writes a fake token (atomically, like the real sidecar), then idles
+# until run.sh's exit trap kills it.
+cat > "${rot}/bin/bun" <<'MOCK'
+#!/usr/bin/env bash
+[[ "${1:-}" == *gh-token-refresher.ts ]] || exit 0
+: "${CCHP_APP_PRIVATE_KEY:?}" "${CCHP_APP_CLIENT_ID:?}"
+printf '%s\n' "${CCHP_TOKEN_SCOPE:-}" > "${SCOPE_OUT:?}"
+printf 'ghs_rotated_fake_token' > "${CCHP_GH_TOKEN_FILE:?}.tmp"
+mv "${CCHP_GH_TOKEN_FILE}.tmp" "${CCHP_GH_TOKEN_FILE}"
+exec sleep 300
+MOCK
+chmod +x "${rot}/bin/bun"
+# mock "real" gh on PATH (outside the fake HOME/.local/bin) for wrapper baking
+printf '#!/usr/bin/env bash\nexit 0\n' > "${rot}/bin/gh"; chmod +x "${rot}/bin/gh"
+rot_fake_key='-----BEGIN RSA PRIVATE KEY-----FAKEKEYMATERIALFAKEKEYMATERIAL-----END RSA PRIVATE KEY-----'
+env HOME="${rot}/home" PATH="${rot}/bin:${PATH}" \
+  BOT_WORKDIR="${rot}" REPO_DIR="${rot}/repo" BOT_PROMPT_FILE="${rot}/prompt.md" \
+  BOT_SYSTEM_PROMPT="${ENGINE_ROOT}/opencode/system-prompt.md" BOT_TASK=engage BOT_SKIP_PR_INSPECT=1 \
+  BOT_CAN_WRITE=1 BOT_REPO=example/repo BOT_PR_NUMBER=7 \
+  GH_TOKEN=static-fallback-token \
+  CCHP_APP_CLIENT_ID=Iv1.fakeclientid CCHP_APP_PRIVATE_KEY="${rot_fake_key}" \
+  CCHP_NEEDS_WRITE=true CCHP_TOKEN_WAIT_SECONDS=10 \
+  CCHP_BOT_MODEL=relay/gpt-5.6-sol \
+  CCHP_BOT_PROVIDERS='{"relay":{"format":"openai-responses","base_url":"https://example.invalid/v1","models":{"gpt-5.6-sol":{"context":500000,"output":128000}}}}' \
+  SCOPE_OUT="${rot}/scope.txt" CAPTURE_CONFIG="${rot}/opencode.json" CAPTURE_ENV="${rot}/opencode.env" \
+  bash "${SCRIPT_DIR}/run.sh" >/dev/null
+# SECURITY INVARIANT: private-key material must be absent from the synthesized
+# config AND from the env the opencode process was launched with.
+if grep -q 'FAKEKEYMATERIAL' "${rot}/opencode.json"; then
+  echo "App private key leaked into OPENCODE_CONFIG_CONTENT" >&2
+  exit 1
+fi
+if grep -qE 'FAKEKEYMATERIAL|CCHP_APP_PRIVATE_KEY|CCHP_APP_CLIENT_ID' "${rot}/opencode.env"; then
+  echo "App credentials leaked into the opencode launch env" >&2
+  exit 1
+fi
+# rotation wiring: token file minted + MCP env points at the FILE PATH (not the
+# token), GH_TOKEN env-ref kept as static fallback, write scope mirrors run.yml
+[[ "$(cat "${rot}/.gh-token")" == "ghs_rotated_fake_token" ]]
+[[ "$(cat "${rot}/scope.txt")" == "write" ]]
+jq -e --arg tf "${rot}/.gh-token" '
+  .mcp.github_inline_comment.environment.CCHP_GH_TOKEN_FILE == $tf and
+  .mcp.github_inline_comment.environment.GH_TOKEN == "{env:GH_TOKEN}"
+' "${rot}/opencode.json" >/dev/null
+grep -q '^CCHP_GH_TOKEN_FILE=' "${rot}/opencode.env"
+# gh wrapper baked with the real gh path + token file; credential helper global
+[[ -x "${rot}/home/.local/bin/gh" ]]
+grep -Fq "${rot}/.gh-token" "${rot}/home/.local/bin/gh"
+grep -Fq "${rot}/bin/gh" "${rot}/home/.local/bin/gh"
+grep -Fq 'x-access-token' "${rot}/home/.gitconfig"
+grep -Fq "${rot}/.gh-token" "${rot}/home/.gitconfig"
+# run.sh's exit trap must tear the sidecar down (pid recorded for cleanup.sh)
+[[ -f "${rot}/.gh-token-refresher.pid" ]]
+rot_pid="$(cat "${rot}/.gh-token-refresher.pid")"
+for _ in $(seq 1 20); do
+  kill -0 "${rot_pid}" 2>/dev/null || break
+  sleep 0.1
+done
+if kill -0 "${rot_pid}" 2>/dev/null; then
+  echo "token refresher sidecar was not stopped by run.sh's exit trap" >&2
+  exit 1
+fi
+
+# fallback smoke: refresher dies instantly → run.sh must degrade to the static
+# GH_TOKEN (no token-file wiring, no gh wrapper) and still exit 0.
+rotf="${tmp}/rotation-fallback"
+mkdir -p "${rotf}/home/.local/bin" "${rotf}/repo" "${rotf}/bin"
+printf 'TASK: rotation fallback smoke\n' > "${rotf}/prompt.md"
+cp "${rot}/bin/timeout" "${rotf}/bin/timeout"
+printf '#!/usr/bin/env bash\nexit 1\n' > "${rotf}/bin/bun"; chmod +x "${rotf}/bin/bun"
+env HOME="${rotf}/home" PATH="${rotf}/bin:${PATH}" \
+  BOT_WORKDIR="${rotf}" REPO_DIR="${rotf}/repo" BOT_PROMPT_FILE="${rotf}/prompt.md" \
+  BOT_SYSTEM_PROMPT="${ENGINE_ROOT}/opencode/system-prompt.md" BOT_TASK=engage BOT_SKIP_PR_INSPECT=1 \
+  BOT_CAN_WRITE=1 BOT_REPO=example/repo BOT_PR_NUMBER=7 \
+  GH_TOKEN=static-fallback-token \
+  CCHP_APP_CLIENT_ID=Iv1.fakeclientid CCHP_APP_PRIVATE_KEY="${rot_fake_key}" \
+  CCHP_NEEDS_WRITE=true CCHP_TOKEN_WAIT_SECONDS=2 \
+  CCHP_BOT_MODEL=relay/gpt-5.6-sol \
+  CCHP_BOT_PROVIDERS='{"relay":{"format":"openai-responses","base_url":"https://example.invalid/v1","models":{"gpt-5.6-sol":{"context":500000,"output":128000}}}}' \
+  CAPTURE_CONFIG="${rotf}/opencode.json" CAPTURE_ENV="${rotf}/opencode.env" \
+  bash "${SCRIPT_DIR}/run.sh" >/dev/null
+jq -e '.mcp.github_inline_comment.environment | has("CCHP_GH_TOKEN_FILE") | not' "${rotf}/opencode.json" >/dev/null
+[[ ! -e "${rotf}/home/.local/bin/gh" ]]
+if grep -qE 'FAKEKEYMATERIAL|CCHP_APP_PRIVATE_KEY|CCHP_APP_CLIENT_ID' "${rotf}/opencode.env"; then
+  echo "App credentials leaked into the opencode launch env (fallback path)" >&2
+  exit 1
+fi
+
 small="${tmp}/small"
 mkdir -p "$small"
 printf 'small prompt\n' > "${small}/prompt.md"

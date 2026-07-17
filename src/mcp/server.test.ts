@@ -311,3 +311,24 @@ test("main() fails fast without BOT_REPO / GH_TOKEN", async () => {
   await expect(main({})).rejects.toThrow("BOT_REPO is required")
   await expect(main({ BOT_REPO: REPO })).rejects.toThrow("GH_TOKEN is required")
 })
+
+test("resolveTokenSource prefers the rotating token file and falls back to GH_TOKEN", async () => {
+  const { resolveTokenSource } = await import("./server")
+  const { mkdtempSync, rmSync, writeFileSync } = await import("node:fs")
+  const { tmpdir } = await import("node:os")
+  const { join } = await import("node:path")
+  const dir = mkdtempSync(join(tmpdir(), "cchp-mcp-tok-"))
+  const file = join(dir, ".gh-token")
+  writeFileSync(file, "ghs_rotated\n")
+  // 配置了 token 文件 → 返回 getter,每次调用现读(sidecar 轮换后即刻生效)
+  const src = resolveTokenSource({ CCHP_GH_TOKEN_FILE: file, GH_TOKEN: "ghs_static" })
+  expect(typeof src).toBe("function")
+  expect((src as () => string)()).toBe("ghs_rotated")
+  writeFileSync(file, "ghs_rotated_2\n")
+  expect((src as () => string)()).toBe("ghs_rotated_2")
+  rmSync(file)
+  expect((src as () => string)()).toBe("ghs_static") // 文件消失 → 静态回退
+  // 未配置文件 → 保持原静态 GH_TOKEN 行为
+  expect(resolveTokenSource({ GH_TOKEN: "ghs_static" })).toBe("ghs_static")
+  expect(() => resolveTokenSource({})).toThrow("GH_TOKEN is required")
+})

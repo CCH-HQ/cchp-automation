@@ -193,6 +193,16 @@ jobs:
         if: steps.route.outputs.act == 'true'
         env:
           GH_TOKEN: ${{ steps.write.outputs.token || steps.base.outputs.token }}
+          # Token-rotation sidecar (installation tokens hard-expire at 1h; long runs
+          # outlive them): run.sh alone consumes the App credentials — it starts
+          # scripts/gh-token-refresher.ts with them, then UNSETS both before any
+          # opencode config is assembled, so the model/MCP only ever see the minted
+          # short-lived token file. GH_TOKEN above stays as the static fallback when
+          # rotation cannot start. CCHP_NEEDS_WRITE mirrors the write/base token
+          # choice above so the sidecar mints the SAME permission set (never wider).
+          CCHP_APP_CLIENT_ID: ${{ secrets.app-client-id }}
+          CCHP_APP_PRIVATE_KEY: ${{ secrets.app-private-key }}
+          CCHP_NEEDS_WRITE: ${{ steps.route.outputs.needs_write }}
           REPO_DIR: ${{ env.BOT_WORKDIR }}/repo
           BOT_PROMPT_FILE: ${{ env.BOT_WORKDIR }}/prompt.md
           BOT_SYSTEM_PROMPT: ${{ env.ENGINE_DIR }}/opencode/system-prompt.md

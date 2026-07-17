@@ -35,7 +35,7 @@ import {
   type Tool,
 } from "@modelcontextprotocol/sdk/types.js"
 import { splitRepo } from "../context"
-import { makeOctokit, type GitHubClient } from "../github/client"
+import { fileTokenGetter, makeOctokit, type GitHubClient, type TokenSource } from "../github/client"
 import {
   CHECK_ACTIONS,
   type CheckAction,
@@ -769,13 +769,22 @@ export function createServer(deps: ServerDeps): { server: Server; tools: ToolEnt
   return { server, tools }
 }
 
+/** Prefer the sidecar-rotated token file (CCHP_GH_TOKEN_FILE, path injected by
+ *  run.sh) so a >1h session never authenticates with an expired token; fall back
+ *  to the original static GH_TOKEN behaviour when no file is configured. */
+export function resolveTokenSource(env: Record<string, string | undefined>): TokenSource {
+  const file = env.CCHP_GH_TOKEN_FILE
+  const token = env.GH_TOKEN
+  if (file) return fileTokenGetter(file, token)
+  if (!token) throw new Error("GH_TOKEN is required")
+  return token
+}
+
 /** Runnable entry: build the one Octokit client for BOT_REPO and serve over stdio. */
 export async function main(env: Record<string, string | undefined> = process.env): Promise<void> {
   const repo = env.BOT_REPO
   if (!repo) throw new Error("BOT_REPO is required")
-  const token = env.GH_TOKEN
-  if (!token) throw new Error("GH_TOKEN is required")
-  const octokit = makeOctokit(token)
+  const octokit = makeOctokit(resolveTokenSource(env))
   const { server } = createServer({ octokit, repo, env })
   await server.connect(new StdioServerTransport())
   process.stderr.write(`[cchp-mcp] ${SERVER_NAME} server ready\n`)
