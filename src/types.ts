@@ -40,13 +40,23 @@ export interface BotEnv {
   BOT_PR_IS_FORK?: "0" | "1"
 }
 
+/** What the agent is being asked to do: the task plus the values to interpolate
+ *  into its prompt. The prompt *text* is rendered downstream (assembly slice) so
+ *  the routing decision stays pure + testable. */
+export interface PromptIntent {
+  task: Task
+  vars: Record<string, string | number | boolean>
+}
+
 /** The outcome of routing one event: whether to act, whether write access is
- *  needed, the BOT_* env to export, and the prompt to hand the agent. */
+ *  needed, the BOT_* env to export, the prompt intent, and the reaction ack. */
 export interface RouteResult {
   act: boolean
   needsWrite: boolean
   env: Partial<BotEnv>
-  prompt?: string
+  intent?: PromptIntent
+  /** Reaction to add so a human sees the bot picked the event up. */
+  ack?: { kind: "rest" | "node"; target: string }
   /** Human-readable reason when act === false. */
   reason?: string
 }
