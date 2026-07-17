@@ -84,13 +84,36 @@ SKILL_SOURCES=(
   "https://github.com/anthropics/skills/tree/main/skills/skill-creator"
   "https://github.com/anthropics/claude-plugins-official/tree/main/plugins/claude-md-management/skills/claude-md-improver"
 )
+skills_failed=0
 for src in "${SKILL_SOURCES[@]}"; do
   log "  skills add ${src}"
   # </dev/null:自建 runner 无 tty,若 skills/bunx 遇「覆盖已存在?」之类交互
   # 提示会永久 hang;显式关掉 stdin 让它走非交互默认。timeout 兜底单个源卡死。
   timeout 180 bunx skills add "${src}" --global --all </dev/null >/dev/null 2>&1 \
-    || warn "  skills add failed/timed out: ${src} (continuing)"
+    || { warn "  skills add failed/timed out: ${src} (continuing)"; skills_failed=$((skills_failed + 1)); }
 done
+
+# ADR-0007 consumption side: skills install at latest; on source failure fall
+# back to the Engine Backup (skills-backup/skills/, refreshed by the scheduled
+# skills-backup.yml) and report the degradation instead of failing. Copy is
+# non-destructive: only fills skill dirs the live install did not place.
+if (( skills_failed > 0 )); then
+  backup_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/skills-backup/skills"
+  if [[ -d "${backup_dir}" ]]; then
+    mkdir -p "${HOME}/.claude/skills"
+    restored=0
+    for d in "${backup_dir}"/*/; do
+      [[ -d "$d" ]] || continue
+      name="$(basename "$d")"
+      if [[ ! -d "${HOME}/.claude/skills/${name}" ]]; then
+        cp -r "$d" "${HOME}/.claude/skills/${name}" && restored=$((restored + 1))
+      fi
+    done
+    warn "skills degraded: ${skills_failed} source(s) failed; restored ${restored} skill(s) from Engine Backup"
+  else
+    warn "skills degraded: ${skills_failed} source(s) failed and no Engine Backup present (skills-backup/skills/)"
+  fi
+fi
 
 # ── 5. Web dependencies (HeroUI Pro postinstall) ────────────────────────────
 # timeout 兜底:多个 bot run 并发时共享 runner 的 bun 缓存锁会把单次 install 从
