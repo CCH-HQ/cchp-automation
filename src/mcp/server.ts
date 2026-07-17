@@ -172,9 +172,14 @@ function schema(properties: Record<string, object>, required: string[]): Tool["i
 const STRUCTURED_PROPS: Record<string, object> = {
   title: strProp("Optional heading"),
   summary: strProp("One-paragraph TL;DR rendered first (required)"),
+  tone: {
+    type: "string",
+    enum: ["note", "tip", "important", "warning", "caution"],
+    description: "TL;DR alert tone (GitHub Alert kind); default note",
+  },
   metadata: {
     type: "array",
-    description: "Key metadata rendered as a compact two-column table",
+    description: "Key metadata rendered as a compact inline chip row",
     items: { type: "object", properties: { label: { type: "string" }, value: { type: "string" } }, required: ["label", "value"] },
   },
   sections: {
@@ -223,6 +228,7 @@ function structuredInput(a: Args): StructuredInput {
   return {
     title: optStr(a, "title"),
     summary: reqStr(a, "summary"),
+    tone: optStr(a, "tone"),
     metadata: a.metadata as StructuredInput["metadata"],
     sections: a.sections as StructuredInput["sections"],
     actions: a.actions as StructuredInput["actions"],

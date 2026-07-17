@@ -28,6 +28,16 @@ function sanitize(text: unknown): string {
   return value.replace(/\s+/g, " ").trim().slice(0, 200)
 }
 
+// Branding (kept in sync with src/publish/inline.ts / sticky.ts renderers).
+const LOGO_URL = "https://raw.githubusercontent.com/CCH-HQ/cchp-automation/main/assets/cchp-logo.svg"
+const LOGO_HEADING = `<img src="${LOGO_URL}" width="22" height="22" alt="CCHP" align="top">`
+const BRAND_FOOTER_PREFIX = `<img src="${LOGO_URL}" width="14" height="14" alt="" align="top"> <b>CCHP Automation</b>`
+
+function progressBar(done: number, total: number): string {
+  const filled = total > 0 ? Math.round((Math.min(done, total) / total) * 10) : 0
+  return "▰".repeat(filled) + "▱".repeat(10 - filled)
+}
+
 function renderTodos(todos: any[], task: string): string {
   const items = todos.slice(0, 50).map((t) => {
     const content = sanitize(t?.content) || "(untitled)"
@@ -38,14 +48,14 @@ function renderTodos(todos: any[], task: string): string {
   })
   const done = todos.filter((t) => t?.status === "completed").length
   return [
-    `### 🤖 Live progress — \`${task}\``,
+    `### ${LOGO_HEADING} Live progress — \`${task}\``,
     "",
-    `> ${done}/${todos.length} steps completed`,
+    `\`${progressBar(done, todos.length)}\` **${done}/${todos.length}**`,
     "",
     ...items,
     "",
     "---",
-    "<sub>Auto-updated from the agent's task list while it works. This comment is informational; findings and replies are posted separately.</sub>",
+    `<sub>${BRAND_FOOTER_PREFIX} · Auto-updated from the agent's task list while it works. This comment is informational; findings and replies are posted separately.</sub>`,
   ].join("\n")
 }
 

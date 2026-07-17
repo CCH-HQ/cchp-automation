@@ -354,13 +354,24 @@ test("renderStructured: TL;DR, metadata table, section, actions with markers, fo
     ],
     footnotes: ["auto-generated"],
   })
-  expect(s).toContain("### Review")
-  expect(s).toContain("> **TL;DR** — looks good")
-  expect(s).toContain("| **Verdict** | APPROVE |")
+  expect(s).toContain("### ") // branded heading (logo img + title)
+  expect(s).toContain("cchp-logo.svg")
+  expect(s).toContain("Review")
+  expect(s).toContain("> [!NOTE]\n> **TL;DR** — looks good") // default tone = note
+  expect(s).toContain("**Verdict** APPROVE") // inline chip row
   expect(s).toContain("#### Notes\n\nsmall stuff") // short → not collapsed
   expect(s).toContain("- [ ] Apply fixes <!-- cchp-action:apply -->")
   expect(s).toContain("- [x] Re-review <!-- cchp-action:rerun -->")
-  expect(s).toContain("<sub>auto-generated</sub>")
+  expect(s).toContain("<b>CCHP Automation</b>") // brand footer always present
+  expect(s).toContain("auto-generated") // custom footnote appended to footer
+})
+
+test("renderStructured: tone maps to the GitHub Alert kind; unknown falls back to NOTE", () => {
+  expect(renderStructured({ summary: "s", tone: "warning" })).toContain("> [!WARNING]")
+  expect(renderStructured({ summary: "s", tone: "tip" })).toContain("> [!TIP]")
+  expect(renderStructured({ summary: "s", tone: "bogus" })).toContain("> [!NOTE]")
+  // brand footer renders even without footnotes
+  expect(renderStructured({ summary: "s" })).toContain("<b>CCHP Automation</b>")
 })
 
 test("renderStructured: long or explicitly-collapsed sections render as <details>", () => {

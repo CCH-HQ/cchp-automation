@@ -37,6 +37,25 @@ const ACTION_ID_RE = /^[a-z0-9][a-z0-9._-]{0,63}$/
 const STICKY_KEY_RE = /^[a-z0-9][a-z0-9:._-]{0,63}$/
 const COLLAPSE_THRESHOLD = 1200
 
+// ── branding ─────────────────────────────────────────────────────────────────
+/** CCHP brand mark (vector: beige disc, charcoal brackets, coral dot) served
+ *  from this public repo; GitHub proxies it via camo and renders it in comments. */
+const LOGO_URL = "https://raw.githubusercontent.com/CCH-HQ/cchp-automation/main/assets/cchp-logo.svg"
+export const LOGO_HEADING = `<img src="${LOGO_URL}" width="22" height="22" alt="CCHP" align="top">`
+const LOGO_FOOTER = `<img src="${LOGO_URL}" width="14" height="14" alt="" align="top">`
+/** Fixed brand line every structured comment ends with (small print). */
+export const BRAND_FOOTER_PREFIX = `${LOGO_FOOTER} <b>CCHP Automation</b>`
+
+/** TL;DR tone → GitHub Alert kind (colored bar + icon). Unknown tones fall
+ *  back to NOTE at the render layer; the MCP schema enumerates valid values. */
+const TONE_ALERTS: Record<string, string> = {
+  note: "NOTE",
+  tip: "TIP",
+  important: "IMPORTANT",
+  warning: "WARNING",
+  caution: "CAUTION",
+}
+
 // ── patch anchoring (trusted current PR patch) ───────────────────────────────
 
 /** A parsed unified-diff patch: path → { LEFT, RIGHT } maps of commentable line
@@ -380,6 +399,8 @@ export async function postReviewBatch(octokit: GitHubClient, repo: string, opts:
 export interface StructuredInput {
   title?: string
   summary: string
+  /** TL;DR alert tone: note | tip | important | warning | caution (default note). */
+  tone?: string
   metadata?: { label: string; value: string }[]
   sections?: { title: string; body: string; collapsed?: boolean }[]
   actions?: { id: string; label: string; checked?: boolean }[]
@@ -394,13 +415,16 @@ export interface StructuredInput {
  *  / invalid action id / too many actions. */
 export function renderStructured(a: StructuredInput): string {
   const parts: string[] = []
-  if (a.title) parts.push(`### ${sanitizeText(a.title)}`)
+  if (a.title) parts.push(`### ${LOGO_HEADING} ${sanitizeText(a.title)}`)
   const summary = sanitizeText(a.summary)
   if (!summary) throw new Error("summary is required")
-  parts.push(`> **TL;DR** — ${summary}`)
+  // TL;DR as a GitHub Alert (colored bar + icon); tone picks the alert kind.
+  const alert = TONE_ALERTS[a.tone ?? "note"] ?? "NOTE"
+  parts.push(`> [!${alert}]\n> **TL;DR** — ${summary}`)
   if (Array.isArray(a.metadata) && a.metadata.length) {
-    const rows = a.metadata.map((m) => `| **${sanitizeText(m.label)}** | ${sanitizeText(m.value)} |`)
-    parts.push(["|    |    |", "| --- | --- |", ...rows].join("\n"))
+    // Compact inline chip row (keeps markdown like `code` in values working,
+    // unlike a raw-HTML table; wraps naturally when long).
+    parts.push(a.metadata.map((m) => `**${sanitizeText(m.label)}** ${sanitizeText(m.value)}`).join(" · "))
   }
   for (const s of a.sections || []) {
     const title = sanitizeText(s.title)
@@ -423,9 +447,10 @@ export function renderStructured(a: StructuredInput): string {
       `#### Actions\n\n${items.join("\n")}\n\n<sub>☑️ Check a box and the bot picks it up automatically (repo members only). Completed items reset so they can be re-triggered.</sub>`,
     )
   }
-  if (Array.isArray(a.footnotes) && a.footnotes.length) {
-    parts.push(`---\n${a.footnotes.map((f) => `<sub>${sanitizeText(f)}</sub>`).join("\n<br>")}`)
-  }
+  // Brand footer (always rendered): small logo + product name, custom
+  // footnotes appended as further small-print segments.
+  const notes = (a.footnotes ?? []).map((f) => sanitizeText(f)).filter(Boolean)
+  parts.push(`---\n<sub>${[BRAND_FOOTER_PREFIX, ...notes].join(" · ")}</sub>`)
   return parts.join("\n\n")
 }
 

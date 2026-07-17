@@ -87,8 +87,9 @@ test("renderProgress: renders the checklist with status glyphs + a done/total he
     { content: "abandoned", status: "cancelled" },
   ]
   const s = renderProgress(todos, "pr_opened")
-  expect(s).toContain("### 🤖 Live progress — `pr_opened`")
-  expect(s).toContain("> 1/4 steps completed")
+  expect(s).toContain("Live progress — `pr_opened`")
+  expect(s).toContain("cchp-logo.svg") // branded heading
+  expect(s).toContain("`▰▰▰▱▱▱▱▱▱▱` **1/4**") // 10-cell bar, full-list total
   expect(s).toContain("- [x] step one")
   expect(s).toContain("- [ ] **step two** ⏳")
   expect(s).toContain("- [ ] step three")
@@ -103,7 +104,7 @@ test("renderProgress: empty content falls back to (untitled)", () => {
 test("renderProgress: caps items at 50 but counts the full total in the header", () => {
   const todos: Todo[] = Array.from({ length: 60 }, (_, i) => ({ content: `item-${i}`, status: "pending" }))
   const s = renderProgress(todos, "big")
-  expect(s).toContain("> 0/60 steps completed")
+  expect(s).toContain("`▱▱▱▱▱▱▱▱▱▱` **0/60**")
   expect(s).toContain("- [ ] item-49") // 50th (index 49) rendered
   expect(s).not.toContain("item-50") // 51st (index 50) dropped
 })

@@ -33,8 +33,10 @@ Do not reach around it.
 
 **Publish**
 - `upsert_sticky_comment` — upsert one bot Sticky/Progress comment by `sticky_key`.
-- `post_structured_comment` — top-level structured comment (TL;DR + table +
-  collapsible sections + action checklist); optional `sticky_key` to upsert.
+- `post_structured_comment` — top-level structured comment (TL;DR alert with
+  optional `tone` note/tip/important/warning/caution + metadata chips +
+  collapsible sections + action checklist + branded footer); optional
+  `sticky_key` to upsert.
 - `update_structured_comment` — re-render/replace an existing bot comment by id.
 - `post_inline_review` — post verified inline Findings as ONE review (event=COMMENT).
 - `submit_pr_review` — the formal Verdict (COMMENT / REQUEST_CHANGES / APPROVE).

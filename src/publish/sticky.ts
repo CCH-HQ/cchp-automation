@@ -11,6 +11,7 @@
 // they live in the OpenCode plugin loop, not in this publish operation.
 import { splitRepo } from "../context"
 import type { GitHubClient } from "../github/client"
+import { BRAND_FOOTER_PREFIX, LOGO_HEADING } from "./inline"
 import { findByMarker, hidden, MARKER } from "../types"
 
 /** One task-list entry mirrored from the agent's `todowrite` (structural shape;
@@ -46,6 +47,12 @@ export function sanitizeTaskName(raw: string | undefined): string {
  *  progress plugin's `renderTodos`: first 50 items (checked/cancelled/in-progress
  *  glyphs), a `done/total` progress line counting the FULL list, and the fixed
  *  informational footer. Deterministic + pure, so it is unit-tested directly. */
+/** Ten-cell unicode progress bar: `▰▰▰▱▱▱▱▱▱▱` for 30%. */
+export function progressBar(done: number, total: number): string {
+  const filled = total > 0 ? Math.round((Math.min(done, total) / total) * 10) : 0
+  return "▰".repeat(filled) + "▱".repeat(10 - filled)
+}
+
 export function renderProgress(todos: readonly Todo[], task: string): string {
   const items = todos.slice(0, 50).map((t) => {
     const content = sanitizeTodo(t?.content) || "(untitled)"
@@ -56,14 +63,14 @@ export function renderProgress(todos: readonly Todo[], task: string): string {
   })
   const done = todos.filter((t) => t?.status === "completed").length
   return [
-    `### 🤖 Live progress — \`${task}\``,
+    `### ${LOGO_HEADING} Live progress — \`${task}\``,
     "",
-    `> ${done}/${todos.length} steps completed`,
+    `\`${progressBar(done, todos.length)}\` **${done}/${todos.length}**`,
     "",
     ...items,
     "",
     "---",
-    "<sub>Auto-updated from the agent's task list while it works. This comment is informational; findings and replies are posted separately.</sub>",
+    `<sub>${BRAND_FOOTER_PREFIX} · Auto-updated from the agent's task list while it works. This comment is informational; findings and replies are posted separately.</sub>`,
   ].join("\n")
 }
 
