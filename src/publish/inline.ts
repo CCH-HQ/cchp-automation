@@ -41,8 +41,8 @@ const COLLAPSE_THRESHOLD = 1200
 /** CCHP brand mark (vector: beige disc, charcoal brackets, coral dot) served
  *  from this public repo; GitHub proxies it via camo and renders it in comments. */
 const LOGO_URL = "https://raw.githubusercontent.com/CCH-HQ/cchp-automation/main/assets/cchp-logo.svg"
-export const LOGO_HEADING = `<img src="${LOGO_URL}" width="22" height="22" alt="CCHP" align="top">`
-const LOGO_FOOTER = `<img src="${LOGO_URL}" width="14" height="14" alt="" align="top">`
+export const LOGO_HEADING = `<img src="${LOGO_URL}" width="22" height="22" alt="CCHP">`
+const LOGO_FOOTER = `<img src="${LOGO_URL}" width="12" height="12" alt="">`
 /** Fixed brand line every structured comment ends with (small print). */
 export const BRAND_FOOTER_PREFIX = `${LOGO_FOOTER} <b>CCHP Automation</b>`
 

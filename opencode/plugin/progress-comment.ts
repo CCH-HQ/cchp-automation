@@ -30,8 +30,8 @@ function sanitize(text: unknown): string {
 
 // Branding (kept in sync with src/publish/inline.ts / sticky.ts renderers).
 const LOGO_URL = "https://raw.githubusercontent.com/CCH-HQ/cchp-automation/main/assets/cchp-logo.svg"
-const LOGO_HEADING = `<img src="${LOGO_URL}" width="22" height="22" alt="CCHP" align="top">`
-const BRAND_FOOTER_PREFIX = `<img src="${LOGO_URL}" width="14" height="14" alt="" align="top"> <b>CCHP Automation</b>`
+const LOGO_HEADING = `<img src="${LOGO_URL}" width="22" height="22" alt="CCHP">`
+const BRAND_FOOTER_PREFIX = `<img src="${LOGO_URL}" width="12" height="12" alt=""> <b>CCHP Automation</b>`
 
 function progressBar(done: number, total: number): string {
   const filled = total > 0 ? Math.round((Math.min(done, total) / total) * 10) : 0
