@@ -14,8 +14,8 @@ import {
   ctxPr,
   ctxPrReview,
   ctxWorkflow,
-  noopReviewContext,
 } from "./context"
+import { makeReviewContext } from "./review/review-context"
 import { classify } from "./route/classify"
 import { makeLookups } from "./route/lookups"
 import { renderPrompt } from "./route/prompts"
@@ -138,15 +138,14 @@ export async function run(): Promise<void> {
 
   if (result.intent) appendFileSync(promptFile, renderPrompt(result.intent, { repo, overlay }))
 
-  const deps: CtxDeps = {
+  const reviewDeps = {
     octokit,
     repo,
     ctxDir: `${workdir}/ctx`,
-    appendPrompt: (t) => appendFileSync(promptFile, t),
-    // TODO(cchp: swap for the real ReviewContext once #5 review pipeline lands —
-    // pr_opened diff + manifest are no-op until then).
-    review: noopReviewContext,
+    appendPrompt: (t: string) => appendFileSync(promptFile, t),
   }
+  // The real ReviewContext (#5): pr_opened diff capture + schema_version:1 manifest.
+  const deps: CtxDeps = { ...reviewDeps, review: makeReviewContext(reviewDeps) }
   await gatherContext(deps, eventName, event, result)
 }
 
