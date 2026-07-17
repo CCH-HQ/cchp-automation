@@ -87,9 +87,11 @@ SKILL_SOURCES=(
 skills_failed=0
 for src in "${SKILL_SOURCES[@]}"; do
   log "  skills add ${src}"
-  # </dev/null:自建 runner 无 tty,若 skills/bunx 遇「覆盖已存在?」之类交互
-  # 提示会永久 hang;显式关掉 stdin 让它走非交互默认。timeout 兜底单个源卡死。
-  timeout 180 bunx skills add "${src}" --global --all </dev/null >/dev/null 2>&1 \
+  # </dev/null + -y(--all 亦隐含 -y):双保险关掉一切交互提示;自建 runner 无 tty,
+  # 任何 prompt 都会永久 hang。DO_NOT_TRACK=1 关 CLI 遥测上报(runner 上实测每源
+  # 逼近旧 180s 上限,冷装本机仅 ~6s,慢在安装外的网络副作用)。timeout 60 兜底:
+  # 正常安装 <10s,60s 已是 6 倍余量,超时即放弃该源交给 Engine Backup 回退。
+  timeout 60 env DO_NOT_TRACK=1 bunx skills add "${src}" --global --all -y </dev/null >/dev/null 2>&1 \
     || { warn "  skills add failed/timed out: ${src} (continuing)"; skills_failed=$((skills_failed + 1)); }
 done
 
