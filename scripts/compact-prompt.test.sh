@@ -2,13 +2,17 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Engine root, canonicalized: run.sh derives ENGINE_DIR the same way, so the
+# absolute paths it renders into prompt/config match these test expectations.
+ENGINE_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
+SRC_DIR="${ENGINE_ROOT}/src"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 
-ULTRA_PROTOCOL="${SCRIPT_DIR}/../opencode/review/ultra-protocol.md"
-ULTRA_PLUGIN="${SCRIPT_DIR}/../opencode/plugin/ultra-review-runner.ts"
-REVIEW_GUARD="${SCRIPT_DIR}/../opencode/plugin/review-artifact-guard.ts"
-REFERENCE_CATALOG="${SCRIPT_DIR}/../opencode/review/reference-library/catalog.json"
+ULTRA_PROTOCOL="${ENGINE_ROOT}/opencode/review/ultra-protocol.md"
+ULTRA_PLUGIN="${ENGINE_ROOT}/opencode/plugin/ultra-review-runner.ts"
+REVIEW_GUARD="${ENGINE_ROOT}/opencode/plugin/review-artifact-guard.ts"
+REFERENCE_CATALOG="${ENGINE_ROOT}/opencode/review/reference-library/catalog.json"
 [[ -f "${ULTRA_PROTOCOL}" ]]
 [[ -f "${ULTRA_PLUGIN}" ]]
 [[ -f "${REVIEW_GUARD}" ]]
@@ -29,8 +33,10 @@ grep -Fq 'ultra_review_task' "${ULTRA_PLUGIN}"
 grep -Fq 'reasoningEffort: "max"' "${SCRIPT_DIR}/run.sh"
 grep -Fq 'variant: "max"' "${SCRIPT_DIR}/run.sh"
 grep -Fq 'opencode run --auto --agent build --variant max' "${SCRIPT_DIR}/run.sh"
-grep -Fq '/opencode/review/ultra-protocol.md' "${SCRIPT_DIR}/run.sh"
-grep -Fq '/opencode/plugin/ultra-review-runner.ts' "${SCRIPT_DIR}/run.sh"
+# run.sh builds these from ${OPENCODE_DIR} (= $ENGINE_DIR/opencode), so only the
+# path suffix is a stable literal there.
+grep -Fq '/review/ultra-protocol.md' "${SCRIPT_DIR}/run.sh"
+grep -Fq '/plugin/ultra-review-runner.ts' "${SCRIPT_DIR}/run.sh"
 
 config_smoke="${tmp}/config-smoke"
 mkdir -p "${config_smoke}/home/.local/bin" "${config_smoke}/repo" "${config_smoke}/bin"
@@ -68,9 +74,8 @@ MOCK
 chmod +x "${config_smoke}/bin/timeout"
 env HOME="${config_smoke}/home" PATH="${config_smoke}/bin:${PATH}" \
   BOT_WORKDIR="${config_smoke}" REPO_DIR="${config_smoke}/repo" \
-  GITHUB_WORKSPACE="$(cd "${SCRIPT_DIR}/../.." && pwd)" \
   BOT_PROMPT_FILE="${config_smoke}/prompt.md" \
-  BOT_SYSTEM_PROMPT="${SCRIPT_DIR}/system-prompt.md" BOT_TASK=pr_opened \
+  BOT_SYSTEM_PROMPT="${ENGINE_ROOT}/opencode/system-prompt.md" BOT_TASK=pr_opened \
   BOT_CAN_WRITE=1 BOT_REPO=example/repo BOT_PR_NUMBER=7 \
   BOT_HEAD_SHA=0123456789abcdef0123456789abcdef01234567 \
   CCHP_BOT_MODEL=relay/gpt-5.6-sol \
@@ -93,9 +98,8 @@ grep -Fq "${ULTRA_PROTOCOL}" "${config_smoke}/prompt.md"
 
 env HOME="${config_smoke}/home" PATH="${config_smoke}/bin:${PATH}" \
   BOT_WORKDIR="${config_smoke}" REPO_DIR="${config_smoke}/repo" \
-  GITHUB_WORKSPACE="$(cd "${SCRIPT_DIR}/../.." && pwd)" \
   BOT_PROMPT_FILE="${config_smoke}/prompt.md" \
-  BOT_SYSTEM_PROMPT="${SCRIPT_DIR}/system-prompt.md" BOT_TASK=pr_opened BOT_SKIP_PR_INSPECT=1 \
+  BOT_SYSTEM_PROMPT="${ENGINE_ROOT}/opencode/system-prompt.md" BOT_TASK=pr_opened BOT_SKIP_PR_INSPECT=1 \
   BOT_CAN_WRITE=1 BOT_REPO=example/repo BOT_PR_NUMBER=7 \
   BOT_HEAD_SHA=0123456789abcdef0123456789abcdef01234567 \
   CCHP_BOT_MODEL=relay/gpt-5.6-sol \
@@ -120,18 +124,15 @@ grep -Fq "${large}/ctx/prompt-full.md" "${large}/prompt.md"
 grep -Fq "Read that file first" "${large}/prompt.md"
 [[ "$(wc -c < "${large}/ctx/prompt-full.md")" -gt 100 ]]
 
-review_context="$({
-  sed -n '/^ctx_pr_review()/,/^}/p' "${SCRIPT_DIR}/context.sh"
-} 2>/dev/null)"
-grep -Fq 'ctx_pr_review "$num"' "${SCRIPT_DIR}/route.sh"
-grep -Fq 'BOT_SKIP_PR_INSPECT=1' "${SCRIPT_DIR}/route.sh"
-grep -Fq 'setenv BOT_SKIP_PR_INSPECT "$BOT_SKIP_PR_INSPECT"' "${SCRIPT_DIR}/route.sh"
-grep -Fq 'setenv BOT_PR_IS_FORK "$BOT_PR_IS_FORK"' "${SCRIPT_DIR}/route.sh"
-grep -Fq 'pr_fork_via_api "$num"; is_fork="$BOT_PR_IS_FORK"' "${SCRIPT_DIR}/route.sh"
-grep -Fq 'set_pr_fork "$(j ' "${SCRIPT_DIR}/route.sh"
-grep -Fq '[[ "$is_fork" == 1 ]] && effective_cw=0' "${SCRIPT_DIR}/route.sh"
-grep -Fq 'setenv BOT_CAN_WRITE "$effective_cw"; setenv BOT_TASK engage' "${SCRIPT_DIR}/route.sh"
-if grep -Fq '[[ "$is_fork" == 1 ]] && cw=0' "${SCRIPT_DIR}/route.sh"; then
+# Route + context moved from bash (route.sh / context.sh) into the TS engine
+# (src/cli.ts + src/route/* + src/context.ts). The invariants the old greps
+# pinned are asserted against the TS sources; behaviour is covered by `bun test`
+# (src/route/classify.test.ts, src/context.test.ts, src/review/diff.test.ts).
+grep -Fq 'await ctxPrReview(deps, num' "${SRC_DIR}/cli.ts"
+grep -Fq 'BOT_SKIP_PR_INSPECT = "1"' "${SRC_DIR}/route/classify.ts"
+grep -Fq 'BOT_PR_IS_FORK: fork ? "1" : "0"' "${SRC_DIR}/route/classify.ts"
+grep -Fq 'const effectiveCw = fork ? false : cw' "${SRC_DIR}/route/classify.ts"
+if grep -Eq '\bcw = fork' "${SRC_DIR}/route/classify.ts"; then
   echo "fork PR routing must keep actor authority separate from code-write permission" >&2
   exit 1
 fi
@@ -140,194 +141,27 @@ grep -Fq 'git remote set-url origin "https://github.com/${GH_REPO}.git"' "${SCRI
 [[ -x "${SCRIPT_DIR}/review-meta.sh" ]]
 grep -Fq 'review-meta.sh" "${HOME}/.local/bin/cchp-review-meta"' "${SCRIPT_DIR}/run.sh"
 grep -Fq 'external_directory: $external_directory_permission' "${SCRIPT_DIR}/run.sh"
-grep -Fq -- '--json number,title,url,state,isDraft' <<<"${review_context}"
-if grep -Eq -- '--comments|--json reviews' <<<"${review_context}"; then
+review_context="$(sed -n '/^export async function ctxPrReview(/,/^}/p' "${SRC_DIR}/context.ts")"
+grep -Fq 'pulls.get' <<<"${review_context}"
+if grep -Eq 'listComments|listReviews' <<<"${review_context}"; then
   echo "pr_opened review context must exclude prior comments/reviews" >&2
   exit 1
 fi
 
-route_mock_bin="${tmp}/route-mock-bin"
-mkdir -p "${route_mock_bin}"
-cat > "${route_mock_bin}/gh" <<'MOCK'
-#!/usr/bin/env bash
-set -euo pipefail
-joined="$*"
-case "${joined}" in
-  "api repos/example/repo/collaborators/member/permission "*) printf 'y\n' ;;
-  "api repos/example/repo/collaborators/"*"/permission "*) printf 'n\n' ;;
-  "api orgs/example/members/"*) exit 1 ;;
-  "api repos/example/repo/pulls/7 --jq .base.ref") printf 'dev\n' ;;
-  "api repos/example/repo/pulls/7 --jq .head.ref") printf 'fork-feature\n' ;;
-  "api repos/example/repo/pulls/7 --jq .head.sha") printf '%040d\n' 1 ;;
-  "api repos/example/repo/pulls/7 --jq .head.repo.full_name // empty")
-    [[ "${MOCK_HEAD_REPO_MODE:-fork}" != "fail" ]] || exit 1
-    printf 'contributor/repo\n'
-    ;;
-  "pr view "*) printf 'mock PR context\n' ;;
-  "pr diff "*) printf 'diff --git a/file b/file\n+new content\n' ;;
-  api*) ;;
-  *) printf 'unexpected mock gh invocation: %s\n' "${joined}" >&2; exit 2 ;;
-esac
-MOCK
-chmod +x "${route_mock_bin}/gh"
-
-run_route_case() { # $1=name $2=actor $3=head-repo-mode
-  local name="$1" actor="$2" head_mode="$3"
-  local work="${tmp}/route-${name}"
-  mkdir -p "${work}"
-  jq -n --arg actor "$actor" '{
-    action: "created",
-    comment: {id: 99, user: {login: $actor}, body: "please inspect"},
-    issue: {number: 7, pull_request: {url: "https://api.github.test/pulls/7"}}
-  }' > "${work}/event.json"
-  : > "${work}/github-env"
-  : > "${work}/github-output"
-  env PATH="${route_mock_bin}:${PATH}" MOCK_HEAD_REPO_MODE="$head_mode" \
-    GITHUB_EVENT_NAME=issue_comment GITHUB_EVENT_PATH="${work}/event.json" \
-    GH_REPO=example/repo BOT_SLUG=cchp-automation BOT_WORKDIR="$work" GH_TOKEN=test \
-    GITHUB_ENV="${work}/github-env" GITHUB_OUTPUT="${work}/github-output" \
-    bash "${SCRIPT_DIR}/route.sh"
-  grep -Fxq 'BOT_PR_IS_FORK=1' "${work}/github-env"
-  if grep -Fq 'BOT_TRIGGER_TRUSTED=' "${work}/github-env"; then
-    echo "fork routing must not use actor trust to relax untrusted PR content" >&2
-    exit 1
-  fi
-  grep -Fxq 'BOT_CAN_WRITE=0' "${work}/github-env"
-  grep -Fxq 'needs_write=false' "${work}/github-output"
-  grep -Fxq 'act=true' "${work}/github-output"
-  [[ -s "${work}/ctx/pr-diff.patch" ]]
-}
-
-run_route_case member-fork member fork
-run_route_case api-failure-outsider outsider fail
-
-context_mock_bin="${tmp}/context-mock-bin"
-mkdir -p "${context_mock_bin}"
-cat > "${context_mock_bin}/gh" <<'MOCK'
-#!/usr/bin/env bash
-set -euo pipefail
-if [[ "$1" == pr && "$2" == view ]]; then
-  printf '{"number":7,"title":"test review","url":"https://example.invalid/pr/7","state":"OPEN","isDraft":false,"author":{"login":"test"},"baseRefName":"dev","baseRefOid":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","headRefName":"feature","headRefOid":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","body":"","additions":1,"deletions":0,"changedFiles":1,"files":[{"path":"a.txt","additions":1,"deletions":0}]}\n'
-  exit 0
-fi
-if [[ "$1" == pr && "$2" == diff ]]; then
-  printf 'diff\n' >> "${MOCK_GH_LOG:?}"
-  case "${MOCK_GH_DIFF_MODE:-success}" in
-    success) printf 'diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -0,0 +1 @@\n+review me\n' ;;
-    fail) printf 'mock diff failure\n' >&2; exit 23 ;;
-    oversize) printf '%080d\n' 0 ;;
-    *) exit 24 ;;
-  esac
-  exit 0
-fi
-if [[ "$1" == api ]]; then
-  joined="$*"
-  case "$joined" in
-    "api repos/example/repo/compare/"*) printf '{"merge_base_commit":{"sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}\n' ;;
-    *"pulls/7/files?per_page=100"*) printf '[{"filename":"a.txt","status":"modified","additions":1,"deletions":0,"changes":1,"patch":"@@ -0,0 +1 @@\\n+review me"}]\n' ;;
-    *"pulls/7/commits?per_page=100"*) printf '[{"sha":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","commit":{"message":"test"}}]\n' ;;
-    *) exit 26 ;;
-  esac
-  exit 0
-fi
-exit 25
-MOCK
-chmod +x "${context_mock_bin}/gh"
-
-context_success="${tmp}/context-success"
-mkdir -p "${context_success}/ctx"
-: > "${context_success}/prompt.md"
-: > "${context_success}/gh.log"
-(
-  export PATH="${context_mock_bin}:${PATH}"
-  export MOCK_GH_LOG="${context_success}/gh.log"
-  export MOCK_GH_DIFF_MODE=success
-  REPO=example/repo
-  PROMPT="${context_success}/prompt.md"
-  CTX_DIR="${context_success}/ctx"
-  CTX_INLINE_MAX=1
-  CTX_PR_DIFF_MAX_BYTES=1024
-  CTX_PR_DIFF_TIMEOUT_SECONDS=10
-  # shellcheck source=context.sh
-  source "${SCRIPT_DIR}/context.sh"
-  ctx_pr_review 7 ''
-)
-grep -Fq 'diff --git a/a.txt b/a.txt' "${context_success}/ctx/pr-diff.patch"
-grep -Fq "${context_success}/ctx/context.md" "${context_success}/prompt.md"
-grep -Fq "${context_success}/ctx/pr-diff.patch" "${context_success}/prompt.md"
-grep -Fq 'Read that absolute path with the built-in Read tool' "${context_success}/prompt.md"
-grep -Fq 'UNTRUSTED data' "${context_success}/prompt.md"
-grep -Fxq 'diff' "${context_success}/gh.log"
-[[ -s "${context_success}/ctx/review-manifest.json" ]]
-jq -e '.complete == true and .pull_request.base_sha == "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" and .pull_request.head_sha == "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" and .files[0].hunk_headers == ["@@ -0,0 +1 @@"]' "${context_success}/ctx/review-manifest.json" >/dev/null
-grep -Fq "${context_success}/ctx/review-manifest.json" "${context_success}/prompt.md"
-
-context_skip="${tmp}/context-skip"
-mkdir -p "${context_skip}/ctx"
-: > "${context_skip}/prompt.md"
-: > "${context_skip}/gh.log"
-(
-  export PATH="${context_mock_bin}:${PATH}"
-  export MOCK_GH_LOG="${context_skip}/gh.log"
-  export MOCK_GH_DIFF_MODE=success
-  REPO=example/repo
-  PROMPT="${context_skip}/prompt.md"
-  CTX_DIR="${context_skip}/ctx"
-  BOT_SKIP_PR_INSPECT=1
-  # shellcheck source=context.sh
-  source "${SCRIPT_DIR}/context.sh"
-  ctx_pr_review 7 ''
-)
-[[ ! -e "${context_skip}/ctx/pr-diff.patch" ]]
-[[ ! -e "${context_skip}/ctx/review-manifest.json" ]]
-[[ ! -s "${context_skip}/gh.log" ]]
-grep -Fq 'Skipped by policy for this metadata-only PR edit' "${context_skip}/prompt.md"
-
-context_failure="${tmp}/context-failure"
-mkdir -p "${context_failure}/ctx"
-: > "${context_failure}/prompt.md"
-: > "${context_failure}/gh.log"
-(
-  export PATH="${context_mock_bin}:${PATH}"
-  export MOCK_GH_LOG="${context_failure}/gh.log"
-  export MOCK_GH_DIFF_MODE=fail
-  REPO=example/repo
-  PROMPT="${context_failure}/prompt.md"
-  CTX_DIR="${context_failure}/ctx"
-  # shellcheck source=context.sh
-  source "${SCRIPT_DIR}/context.sh"
-  ctx_pr_review 7 ''
-)
-[[ ! -e "${context_failure}/ctx/pr-diff.patch" ]]
-[[ ! -e "${context_failure}/ctx/pr-diff.patch.tmp" ]]
-[[ ! -e "${context_failure}/ctx/review-manifest.json" ]]
-[[ -s "${context_failure}/ctx/pr-diff.err" ]]
-grep -Fq 'Complete current PR diff — UNAVAILABLE' "${context_failure}/prompt.md"
-grep -Fq 'diff fetch failed, timed out, or returned an empty patch' "${context_failure}/prompt.md"
-grep -Fq 'Do not claim that a complete ultrareview was performed' "${context_failure}/prompt.md"
-
-context_oversize="${tmp}/context-oversize"
-mkdir -p "${context_oversize}/ctx"
-: > "${context_oversize}/prompt.md"
-: > "${context_oversize}/gh.log"
-(
-  export PATH="${context_mock_bin}:${PATH}"
-  export MOCK_GH_LOG="${context_oversize}/gh.log"
-  export MOCK_GH_DIFF_MODE=oversize
-  REPO=example/repo
-  PROMPT="${context_oversize}/prompt.md"
-  CTX_DIR="${context_oversize}/ctx"
-  CTX_PR_DIFF_MAX_BYTES=32
-  # shellcheck source=context.sh
-  source "${SCRIPT_DIR}/context.sh"
-  ctx_pr_review 7 ''
-)
-[[ ! -e "${context_oversize}/ctx/pr-diff.patch" ]]
-[[ ! -e "${context_oversize}/ctx/pr-diff.patch.tmp" ]]
-[[ ! -e "${context_oversize}/ctx/review-manifest.json" ]]
-grep -Fq 'exceeded the 32-byte safety limit' "${context_oversize}/prompt.md"
-grep -Fq 'No partial diff was exposed' "${context_oversize}/prompt.md"
-grep -Fq 'Do not claim that a complete ultrareview was performed' "${context_oversize}/prompt.md"
+# Behavioural fork-routing and PR-diff context cases (previously driven through
+# bash route.sh / context.sh with a mock `gh`) are exercised by the TS suite
+# (`bun test`): src/route/classify.test.ts (fork clamp, act/needs_write,
+# skip-inspect), src/context.test.ts (context assembly), and
+# src/review/diff.test.ts (diff capture success / skip / failure / oversize).
+# Here we pin that those suites exist and that the fail-closed diff messages the
+# old bash cases asserted are still emitted by the TS implementation.
+[[ -f "${SRC_DIR}/route/classify.test.ts" ]]
+[[ -f "${SRC_DIR}/context.test.ts" ]]
+[[ -f "${SRC_DIR}/review/diff.test.ts" ]]
+grep -Fq 'Skipped by policy for this metadata-only PR edit' "${SRC_DIR}/review/diff.ts"
+grep -Fq 'Complete current PR diff — UNAVAILABLE' "${SRC_DIR}/review/diff.ts"
+grep -Fq 'No partial diff was exposed. Do not claim that a complete ultrareview was performed.' "${SRC_DIR}/review/diff.ts"
+grep -Fq -- '-byte safety limit' "${SRC_DIR}/review/diff.ts"
 
 # shellcheck source=permissions.sh
 source "${SCRIPT_DIR}/permissions.sh"
@@ -557,7 +391,7 @@ if env "${wrapper_env[@]}" "${SCRIPT_DIR}/review-meta.sh" \
   exit 1
 fi
 
-if grep -Eq 'permission-(statuses|checks):[[:space:]]*write' "${SCRIPT_DIR}/../workflows/cchp-bot.yml"; then
+if grep -Eq 'permission-(statuses|checks):[[:space:]]*write' "${ENGINE_ROOT}/.github/workflows/run.yml"; then
   echo "cchp bot tokens must not receive status/check write permissions" >&2
   exit 1
 fi
@@ -570,8 +404,8 @@ readonly_permission="$(build_opencode_permission "$tmp/readonly" 0 engage)"
 jq -e '.edit == "deny" and (has("bash") | not)' <<<"${readonly_permission}" >/dev/null
 
 # --- additive block: review philosophy + external scanner evidence contract ---
-SYSTEM_PROMPT_MD="${SCRIPT_DIR}/system-prompt.md"
-CODE_REVIEW_CMD="${SCRIPT_DIR}/../opencode/command/code-review.md"
+SYSTEM_PROMPT_MD="${ENGINE_ROOT}/opencode/system-prompt.md"
+CODE_REVIEW_CMD="${ENGINE_ROOT}/opencode/command/code-review.md"
 # Google eng-practices absorption: approval standard + severity labels
 grep -Fq 'improves overall code health' "${SYSTEM_PROMPT_MD}"
 grep -Fq 'no perfect code, only better code' "${SYSTEM_PROMPT_MD}"
@@ -596,53 +430,16 @@ grep -Fq 'ctx/external' "${CODE_REVIEW_CMD}"
 grep -Fq 'UNVERIFIED candidate' "${CODE_REVIEW_CMD}"
 
 # --- additive block: interactive action-menu routing (checkbox replaces reactions) ---
-run_action_case() { # $1=name $2=sender $3=old-body $4=new-body
-  local name="$1" sender="$2" old_body="$3" new_body="$4"
-  local work="${tmp}/action-${name}"
-  mkdir -p "${work}"
-  jq -n --arg sender "$sender" --arg old "$old_body" --arg new "$new_body" '{
-    action: "edited",
-    sender: {login: $sender},
-    comment: {id: 555, user: {login: "cchp-automation[bot]"}, body: $new},
-    changes: {body: {from: $old}},
-    issue: {number: 7}
-  }' > "${work}/event.json"
-  : > "${work}/github-env"
-  : > "${work}/github-output"
-  env PATH="${route_mock_bin}:${PATH}" \
-    GITHUB_EVENT_NAME=issue_comment GITHUB_EVENT_PATH="${work}/event.json" \
-    GH_REPO=example/repo BOT_SLUG=cchp-automation BOT_WORKDIR="$work" GH_TOKEN=test \
-    GITHUB_ENV="${work}/github-env" GITHUB_OUTPUT="${work}/github-output" \
-    bash "${SCRIPT_DIR}/route.sh"
-}
-
-menu_unchecked='Pick one:
-- [ ] Re-run the review <!-- cchp-action:rerun-review -->
-- [ ] Implement the plan <!-- cchp-action:implement-plan -->'
-menu_checked='Pick one:
-- [x] Re-run the review <!-- cchp-action:rerun-review -->
-- [ ] Implement the plan <!-- cchp-action:implement-plan -->'
-
-# member checks a box on the bot menu → engage with the selected action id
-run_action_case member-check member "$menu_unchecked" "$menu_checked"
-grep -Fxq 'BOT_TASK=engage' "${tmp}/action-member-check/github-env"
-grep -Fxq 'BOT_ISSUE_NUMBER=7' "${tmp}/action-member-check/github-env"
-grep -Fxq 'BOT_CAN_WRITE=1' "${tmp}/action-member-check/github-env"
-grep -Fxq 'act=true' "${tmp}/action-member-check/github-output"
-grep -Fxq 'needs_write=true' "${tmp}/action-member-check/github-output"
-grep -Fq "checked the action box 'rerun-review'" "${tmp}/action-member-check/prompt.md"
-grep -Fq "RESET its checkbox" "${tmp}/action-member-check/prompt.md"
-
-# non-member checking a box must not trigger anything
-run_action_case outsider-check outsider "$menu_unchecked" "$menu_checked"
-grep -Fxq 'act=false' "${tmp}/action-outsider-check/github-output"
-
-# an edit that does not newly check any box is a no-op
-run_action_case no-new-check member "$menu_checked" "$menu_checked"
-grep -Fxq 'act=false' "${tmp}/action-no-new-check/github-output"
-
-# the bot editing its own menu (ack/reset) must never re-trigger
-run_action_case bot-self-edit 'cchp-automation[bot]' "$menu_unchecked" "$menu_checked"
-grep -Fxq 'act=false' "${tmp}/action-bot-self-edit/github-output"
+# The behavioural cases (member check triggers engage, outsider check no-ops,
+# no-new-check no-ops, bot self-edit never re-triggers) run in the TS suite:
+# src/types.test.ts (newlyCheckedActionIds) + src/route/classify.test.ts
+# (action_menu_* routing). Pin the static wiring here.
+grep -Fq 'newlyCheckedActionIds' "${SRC_DIR}/route/classify.ts"
+grep -Fq 'action_menu_pr' "${SRC_DIR}/route/classify.ts"
+grep -Fq 'cchp-action' "${SRC_DIR}/types.ts"
+grep -Fq "checked the action box" "${SRC_DIR}/route/prompts.ts"
+grep -Fq "RESET its checkbox" "${SRC_DIR}/route/prompts.ts"
+[[ -f "${SRC_DIR}/types.test.ts" ]]
+grep -Fq 'cchp-action' "${SRC_DIR}/route/classify.test.ts"
 
 echo "compact-prompt tests passed"
