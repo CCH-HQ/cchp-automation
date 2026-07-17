@@ -1,0 +1,84 @@
+{
+  $schema: 'https://docs.renovatebot.com/renovate-schema.json',
+
+  // Engine's own Renovate config. Scope is deliberately narrow — this repo only
+  // ships GitHub Actions workflows + a small TypeScript/Octokit engine:
+  //   - GitHub Actions  → keep pinned to a 40-char SHA (digest) + version comment
+  //   - Octokit family  → octokit + @octokit/* plugins
+  //   - MCP SDK         → @modelcontextprotocol/sdk
+  //   - TypeScript      → typescript + @types/bun
+  // config:recommended supplies sane defaults; helpers:pinGitHubActionDigests keeps
+  // every action `uses:` pinned by SHA with its `# vX.Y.Z` comment in sync.
+  extends: ['config:recommended', 'helpers:pinGitHubActionDigests'],
+
+  // —— Supply-chain cooldown ——
+  // Don't adopt a release until it's been public for a few days; this (plus the PR
+  // limits below) is the pacing mechanism — no restrictive global schedule needed.
+  minimumReleaseAge: '3 days',
+  minimumReleaseAgeBehaviour: 'timestamp-required',
+  internalChecksFilter: 'strict',
+
+  // Bump the version in package.json (not just bun.lock) so every update is a
+  // visible, reviewable PR even when the new version still satisfies the '^' range.
+  rangeStrategy: 'bump',
+
+  // ci.yml runs on `pull_request` (+ push to main), so a `renovate/*` branch has no
+  // checks until its PR exists. 'not-pending' would wait for checks that never
+  // start → deadlock. Open the PR first; the PR triggers CI. Cooldown still applies.
+  prCreation: 'immediate',
+
+  // —— Auto-merge policy ——
+  // Non-major auto-merges once ci.yml is green; majors always land as a PR (see the
+  // packageRules below). Not GitHub-native auto-merge: Renovate merges via the API
+  // after it observes the PR checks pass (ignoreTests:false enforces the gate).
+  automerge: true,
+  automergeType: 'pr',
+  platformAutomerge: false,
+  ignoreTests: false,
+
+  // Pin action digests; never run dependency lifecycle scripts on update.
+  pinDigests: true,
+  ignoreScripts: true,
+
+  // Regenerate bun.lock on a weekly cadence.
+  lockFileMaintenance: { enabled: true, schedule: ['before 6am on monday'] },
+
+  // Security fixes skip the cooldown above and get their own label.
+  vulnerabilityAlerts: { labels: ['security'], minimumReleaseAge: null },
+  osvVulnerabilityAlerts: true,
+
+  // Keep the update stream calm for a small repo.
+  prConcurrentLimit: 5,
+  prHourlyLimit: 2,
+  labels: ['deps'],
+
+  packageRules: [
+    // GitHub Actions — keep pinned to a SHA digest + version comment, one group.
+    {
+      matchManagers: ['github-actions'],
+      groupName: 'github-actions',
+      pinDigests: true,
+    },
+    // Octokit family (octokit core + every @octokit/* plugin) upgrade together.
+    {
+      matchPackageNames: ['octokit', '@octokit/**'],
+      groupName: 'octokit',
+    },
+    // Model Context Protocol SDK.
+    {
+      matchPackageNames: ['@modelcontextprotocol/sdk'],
+      groupName: 'mcp-sdk',
+    },
+    // TypeScript toolchain (compiler + Bun type defs).
+    {
+      matchPackageNames: ['typescript', '@types/bun'],
+      groupName: 'typescript',
+    },
+    // Majors are never auto-merged — always a reviewable PR.
+    {
+      matchUpdateTypes: ['major'],
+      automerge: false,
+      labels: ['deps', 'major'],
+    },
+  ],
+}

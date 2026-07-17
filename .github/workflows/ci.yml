@@ -1,0 +1,86 @@
+# Engine self-CI: type-check + unit tests for the TypeScript/Octokit engine, plus
+# lint + security-audit gates for the reusable workflow itself. Runs on every push
+# to main and on all pull requests.
+#
+# Every third-party action is pinned to a full 40-char commit SHA with a trailing
+# `# vX.Y.Z` version comment; Renovate keeps both fresh (see /renovate.json5).
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Read-only by default; no job here pushes, comments, or uploads results.
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  # Cancel superseded PR runs; never cancel an in-flight run on main.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  test:
+    name: test + typecheck
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Install Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version-file: .bun-version
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Test
+        run: bun test
+
+      - name: Type-check
+        run: bunx tsc --noEmit
+
+  actionlint:
+    name: actionlint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      # `-ignore job_workflow_ref`: `github.job_workflow_ref` is a real Actions
+      # context property (used in run.yml to resolve the pinned engine ref) that
+      # actionlint's bundled context schema does not yet recognise, so it emits a
+      # spurious "property not defined" error. Scoped ignore — run.yml is not edited.
+      - name: Lint workflows
+        uses: raven-actions/actionlint@3d39aea434753780c3b3d4a1a31c854b4dbf49d7 # v2.2.0
+        with:
+          flags: "-ignore job_workflow_ref"
+
+  zizmor:
+    name: zizmor
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      # run.yml already carries an inline `# zizmor: ignore[unpinned-uses]` for its
+      # intentional `@latest` self-reference, so no extra suppression is needed here.
+      # Gate on medium+: the only remaining low notes are template-injection on
+      # `env.ENGINE_DIR` (a github.workspace-derived path, not attacker-controllable).
+      # advanced-security:false + annotations:true keeps this job to `contents: read`
+      # (no SARIF upload / security-events:write).
+      - name: Audit workflows
+        uses: zizmorcore/zizmor-action@6599ee8b7a49aef6a770f63d261d214911a7ce02 # v0.6.0
+        with:
+          inputs: .github/workflows
+          min-severity: medium
+          advanced-security: false
+          annotations: true

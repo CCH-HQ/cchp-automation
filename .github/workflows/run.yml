@@ -1,0 +1,224 @@
+# cchp-automation — reusable engine workflow. A consumer repo calls this from its
+# own workflow (which owns the event matrix, concurrency, permissions, and the
+# secret/vars mapping) via:
+#
+#   jobs:
+#     bot:
+#       uses: CCH-HQ/cchp-automation/.github/workflows/run.yml@latest  # zizmor: ignore[unpinned-uses]
+#       secrets:
+#         app-client-id:   ${{ secrets.CCHP_APP_CLIENT_ID }}
+#         app-private-key: ${{ secrets.CCHP_APP_PRIVATE_KEY }}
+#         provider-keys:   ${{ secrets.CCHP_BOT_PROVIDER_KEYS }}
+#         heroui-token:    ${{ secrets.HEROUI_AUTH_TOKEN }}
+#         see-api-key:     ${{ secrets.SEE_API_KEY }}
+#       with:
+#         default_branch:  dev
+#         roadmap_project: "1"
+#
+# Model/provider VARIABLES (CCHP_BOT_PROVIDERS / MODEL / SMALL_MODEL /
+# EXTRA_INSTRUCTIONS / CCHP_BOT_OPENCODE_VERSION) are read straight from the
+# `vars` context, which resolves to the CALLER's repository — so the consumer's
+# existing variables stay unchanged and need no remapping. Secrets can't cross the
+# reusable-workflow boundary via context, so they're passed explicitly above (no
+# `secrets: inherit`); the stored secret names/values are unchanged.
+#
+# TRUST MODEL: this workflow checks out only the pinned ENGINE code. It never
+# checks out untrusted PR head code; fork PR handling reads trusted context only
+# (see scripts/prepare-env.sh). Consumer overlay files are read as repo-relative
+# paths inside the trusted REPO_DIR clone.
+name: cchp-automation
+
+on:
+  workflow_call:
+    inputs:
+      default_branch:  { type: string, required: false, default: "main" }
+      roadmap_project: { type: string, required: false, default: "" }
+      roadmap_policy:  { type: string, required: false, default: ".github/cchp-automation/roadmap-policy.md" }
+      semver_workflow: { type: string, required: false, default: "" }
+      semver_marker:   { type: string, required: false, default: "" }
+      tech_stack:      { type: string, required: false, default: "" }
+      languages:       { type: string, required: false, default: "" }
+    secrets:
+      app-client-id:   { required: true }
+      app-private-key: { required: true }
+      provider-keys:   { required: false }
+      heroui-token:    { required: false }
+      see-api-key:     { required: false }
+
+jobs:
+  bot:
+    runs-on: [self-hosted, linux, x64]
+    timeout-minutes: 720
+    env:
+      GH_REPO: ${{ github.repository }}
+      ENGINE_DIR: ${{ github.workspace }}/.cchp-engine
+      BOT_DEFAULT_BRANCH: ${{ inputs.default_branch }}
+      BOT_ROADMAP_PROJECT: ${{ inputs.roadmap_project }}
+    steps:
+      - uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2
+        with:
+          egress-policy: audit
+
+      # Base token: read code + comment/review/edit-title/roadmap. NO contents:write
+      # → physically cannot push, merge, or create files. Used for routing + all
+      # read-only / review / outsider tasks, so an injected prompt on those runs
+      # cannot mutate the repo.
+      - name: Mint App token (base — no contents:write)
+        id: base
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3
+        with:
+          client-id: ${{ secrets.app-client-id }}
+          private-key: ${{ secrets.app-private-key }}
+          permission-contents: read
+          permission-metadata: read
+          permission-issues: write
+          permission-pull-requests: write
+          permission-discussions: write
+          permission-actions: read
+          permission-organization-projects: write
+
+      # The pinned engine code (this reusable workflow's own repo, at the ref the
+      # consumer pinned). Parse the ref from job_workflow_ref so @latest / @<sha>
+      # both resolve to the matching engine tree.
+      - name: Resolve engine ref
+        id: engine
+        env:
+          JWR: ${{ github.job_workflow_ref }}
+        run: echo "ref=${JWR##*@}" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout engine (pinned, trusted)
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          repository: CCH-HQ/cchp-automation
+          ref: ${{ steps.engine.outputs.ref }}
+          path: .cchp-engine
+          token: ${{ steps.base.outputs.token }}
+          persist-credentials: false
+
+      # Consumer overlay files (e.g. roadmap-policy.md) are consumed as repo-
+      # relative paths inside the trusted REPO_DIR clone made by prepare-env.sh;
+      # no separate overlay checkout is needed.
+
+      - name: Bot identity + isolated workdir
+        env:
+          GH_TOKEN: ${{ steps.base.outputs.token }}
+          SLUG: ${{ steps.base.outputs.app-slug }}
+        run: |
+          set -euo pipefail
+          uid=$(gh api "/users/${SLUG}[bot]" --jq .id)
+          {
+            echo "BOT_SLUG=${SLUG}"
+            echo "BOT_GIT_NAME=${SLUG}[bot]"
+            echo "BOT_GIT_EMAIL=${uid}+${SLUG}[bot]@users.noreply.github.com"
+            echo "BOT_WORKDIR=$(mktemp -d)"
+          } >> "$GITHUB_ENV"
+
+      - name: Install Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version-file: .cchp-engine/.bun-version
+          no-cache: true
+
+      - name: Install engine dependencies
+        working-directory: .cchp-engine
+        run: bun install --frozen-lockfile
+
+      # Route the event (TS/Octokit CLI). Emits act / needs_write + BOT_* env.
+      # GITHUB_WORKFLOW = the CALLER's workflow name, so workflow_run self-exclusion
+      # correctly ignores the consumer's own bot workflow.
+      - name: Route event
+        id: route
+        working-directory: .cchp-engine
+        env:
+          GH_TOKEN: ${{ steps.base.outputs.token }}
+          BOT_DISPATCH_TASK: ${{ github.event.inputs.task }}
+          BOT_DISPATCH_PROMPT: ${{ github.event.inputs.prompt }}
+          BOT_DISPATCH_BRANCH: ${{ github.event.inputs.branch }}
+          BOT_DISPATCH_CAN_WRITE: ${{ github.event.inputs.can_write }}
+        run: bun src/cli.ts
+
+      # Write token: base set + contents/workflows write, so push/merge is possible.
+      # Minted ONLY for tasks routing decided need it — narrower than the App grant.
+      - name: Mint App token (write — push-capable)
+        id: write
+        if: steps.route.outputs.act == 'true' && steps.route.outputs.needs_write == 'true'
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3
+        with:
+          client-id: ${{ secrets.app-client-id }}
+          private-key: ${{ secrets.app-private-key }}
+          permission-contents: write
+          permission-metadata: read
+          permission-issues: write
+          permission-pull-requests: write
+          permission-discussions: write
+          permission-actions: read
+          permission-workflows: write
+          permission-organization-projects: write
+
+      - name: Install OpenCode CLI
+        if: steps.route.outputs.act == 'true'
+        env:
+          BOT_OPENCODE_VERSION: ${{ vars.CCHP_BOT_OPENCODE_VERSION }}
+          GH_TOKEN: ${{ steps.base.outputs.token }}
+        run: |
+          set -euo pipefail
+          if [ -z "${BOT_OPENCODE_VERSION:-}" ]; then
+            BOT_OPENCODE_VERSION="$(gh release view --repo anomalyco/opencode --json tagName --jq '.tagName | ltrimstr("v")')"
+          fi
+          echo "installing opencode ${BOT_OPENCODE_VERSION}"
+          installer="$(mktemp)"
+          trap 'rm -f "${installer}"' EXIT
+          curl -fsSL https://opencode.ai/install -o "${installer}"
+          bash "${installer}" --version "${BOT_OPENCODE_VERSION}" --no-modify-path
+          mkdir -p "${HOME}/.local/bin"
+          install -m 0755 "${HOME}/.opencode/bin/opencode" "${HOME}/.local/bin/opencode"
+          "${HOME}/.local/bin/opencode" --version
+
+      - name: Prepare isolated environment
+        if: steps.route.outputs.act == 'true'
+        env:
+          GH_TOKEN: ${{ steps.write.outputs.token || steps.base.outputs.token }}
+          BOT_TOKEN: ${{ steps.write.outputs.token || steps.base.outputs.token }}
+          HEROUI_AUTH_TOKEN: ${{ secrets.heroui-token }}
+        run: bash ${{ env.ENGINE_DIR }}/scripts/prepare-env.sh
+
+      - name: External static analysis (trusted pre-review scan)
+        if: steps.route.outputs.act == 'true'
+        env:
+          GH_TOKEN: ${{ steps.base.outputs.token }}
+        run: bash ${{ env.ENGINE_DIR }}/scripts/external-scan.sh
+
+      # Run the agent. Model/provider VARIABLES are read straight from the caller's
+      # `vars` context (unchanged); provider keys + SEE come from the passed secrets.
+      - name: Run opencode
+        if: steps.route.outputs.act == 'true'
+        env:
+          GH_TOKEN: ${{ steps.write.outputs.token || steps.base.outputs.token }}
+          REPO_DIR: ${{ env.BOT_WORKDIR }}/repo
+          BOT_PROMPT_FILE: ${{ env.BOT_WORKDIR }}/prompt.md
+          BOT_SYSTEM_PROMPT: ${{ env.ENGINE_DIR }}/opencode/system-prompt.md
+          # System-prompt overlay values — run.sh renders {{OVERLAY.*}} from these
+          # BOT_* names (BOT_DEFAULT_BRANCH / BOT_ROADMAP_PROJECT are job env).
+          BOT_ROADMAP_POLICY: ${{ inputs.roadmap_policy }}
+          BOT_SEMVER_WORKFLOW: ${{ inputs.semver_workflow }}
+          BOT_SEMVER_MARKER: ${{ inputs.semver_marker }}
+          BOT_TECH_STACK: ${{ inputs.tech_stack }}
+          BOT_LANGUAGES: ${{ inputs.languages }}
+          # Model/provider config — read DIRECTLY from the consumer's variables.
+          CCHP_BOT_PROVIDERS: ${{ vars.CCHP_BOT_PROVIDERS }}
+          CCHP_BOT_MODEL: ${{ vars.CCHP_BOT_MODEL }}
+          CCHP_BOT_SMALL_MODEL: ${{ vars.CCHP_BOT_SMALL_MODEL }}
+          CCHP_BOT_EXTRA_INSTRUCTIONS: ${{ vars.CCHP_BOT_EXTRA_INSTRUCTIONS }}
+          # Org/repo-var kill-switch: downgrade an APPROVE review verdict to COMMENT.
+          CCHP_DISABLE_AUTO_APPROVE: ${{ vars.CCHP_DISABLE_AUTO_APPROVE }}
+          # Provider keys + SEE — passed secrets, scoped to this step (least privilege).
+          CCHP_BOT_PROVIDER_KEYS: ${{ secrets.provider-keys }}
+          SEE_API_KEY: ${{ secrets.see-api-key }}
+          # The agent session may (re)install web deps (@heroui-pro registry) during
+          # fix tasks — same job-level exposure the consumer workflow had.
+          HEROUI_AUTH_TOKEN: ${{ secrets.heroui-token }}
+        run: bash ${{ env.ENGINE_DIR }}/scripts/run.sh
+
+      - name: Cleanup isolated environment
+        if: always()
+        run: bash ${{ env.ENGINE_DIR }}/scripts/cleanup.sh
