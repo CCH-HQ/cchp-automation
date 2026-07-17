@@ -44,6 +44,15 @@ jobs:
       - name: Type-check
         run: bunx tsc --noEmit
 
+      # Bash integration harnesses (whole-pipeline prompt/context/permission
+      # self-test + external-scan self-test). These guard the ultrareview
+      # constraints the consumer repo's hygiene S13 used to grep for.
+      - name: Script integration tests
+        working-directory: scripts
+        run: |
+          bash compact-prompt.test.sh
+          bash external-scan.test.sh
+
   actionlint:
     name: actionlint
     runs-on: ubuntu-latest
