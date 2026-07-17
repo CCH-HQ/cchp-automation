@@ -3,7 +3,7 @@
 // BOT_* env + act/needs_write outputs, best-effort 👀 acks, renders the prompt,
 // and gathers task-specific context. Every GitHub call goes through the one
 // Octokit client (ADR 0003). The bash route.sh + context.sh, in TS.
-import { appendFileSync } from "node:fs"
+import { appendFileSync, mkdirSync } from "node:fs"
 import { loadOverlay } from "./config/overlay"
 import { makeOctokit, type GitHubClient } from "./github/client"
 import { readEvent, setEnv, setOutput } from "./github/actions-io"
@@ -138,6 +138,11 @@ export async function run(): Promise<void> {
 
   if (result.intent) appendFileSync(promptFile, renderPrompt(result.intent, { repo, overlay }))
 
+  // The route step runs BEFORE prepare-env.sh (which is what later creates
+  // ${workdir}/ctx), so ensure it exists now — otherwise the first oversized
+  // context / trigger / pr-diff / manifest write below throws ENOENT and aborts
+  // the whole run. (Regression from the bash route.sh → TS port.)
+  mkdirSync(`${workdir}/ctx`, { recursive: true })
   const reviewDeps = {
     octokit,
     repo,

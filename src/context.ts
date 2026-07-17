@@ -11,7 +11,7 @@
 // The full PR diff + the trusted review manifest are deliberately NOT gathered
 // here — the #5 review pipeline owns them via the injected `ReviewContext`; this
 // module defers to it and defaults to a no-op.
-import { writeFileSync } from "node:fs"
+import { mkdirSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import type { GitHubClient } from "./github/client"
 
@@ -108,6 +108,7 @@ export function emitContext(deps: CtxDeps, content: string): void {
     return
   }
   const file = join(deps.ctxDir, "context.md")
+  mkdirSync(deps.ctxDir, { recursive: true }) // route runs before prepare-env creates ctx/
   writeFileSync(file, content)
   deps.appendPrompt(
     `\n${UNTRUSTED_HEADER}\n` +
@@ -129,6 +130,7 @@ export function highlightTrigger(deps: CtxDeps, body: string | undefined): void 
   const size = bytes(body)
   if (size > CTX_INLINE_MAX) {
     const file = join(deps.ctxDir, "trigger.md")
+    mkdirSync(deps.ctxDir, { recursive: true }) // route runs before prepare-env creates ctx/
     writeFileSync(file, `${body}\n`)
     deps.appendPrompt(
       `\n${TRIGGER_HEADER}\n` +

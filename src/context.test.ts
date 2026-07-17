@@ -115,6 +115,27 @@ test("emitContext: oversized content written to context.md + Read-this pointer",
   expect(readFileSync(join(ctxDir, "context.md"), "utf8")).toBe(big)
 })
 
+// Regression: the route step runs before prepare-env.sh creates ${workdir}/ctx,
+// so an oversized-context (or trigger) write must create the dir itself instead
+// of throwing ENOENT and aborting the run.
+test("emitContext / highlightTrigger create a missing ctxDir instead of ENOENT", () => {
+  const base = mkdtempSync(join(tmpdir(), "cchp-nodir-"))
+  const ctxDir = join(base, "ctx") // deliberately NOT created
+  const out: string[] = []
+  const deps: CtxDeps = {
+    octokit: {} as CtxDeps["octokit"],
+    repo: "CCH-HQ/repo",
+    ctxDir,
+    appendPrompt: (t) => out.push(t),
+  }
+  const big = "z".repeat(CTX_INLINE_MAX + 1)
+  emitContext(deps, big)
+  expect(existsSync(join(ctxDir, "context.md"))).toBe(true)
+  expect(readFileSync(join(ctxDir, "context.md"), "utf8")).toBe(big)
+  highlightTrigger(deps, big)
+  expect(existsSync(join(ctxDir, "trigger.md"))).toBe(true)
+})
+
 // ── fetchers (fake Octokit; routing paginate by a per-method tag) ─────────────
 interface FakeData {
   issue?: unknown
