@@ -4,7 +4,10 @@
 // network, no fs — so every gating invariant is unit-tested (classify.test.ts).
 //
 // SECURITY INVARIANTS preserved verbatim from route.sh:
-//   * Never act on the bot's own events (no feedback loops).
+//   * Never act on the bot's own events (no feedback loops) — EXCEPT the
+//     read-only pr_opened review path: bot-authored PRs (Renovate shares this
+//     App identity) and the bot's own ci_fix pushes are reviewed like any
+//     other, because the review task never pushes and so cannot loop.
 //   * Code execution on a human's behalf (write) only for repo/org members.
 //   * A Fork PR (head repo != base repo) never receives a code-write token for
 //     engage, and is never auto-merged on LGTM.
@@ -193,8 +196,10 @@ export async function classify(input: ClassifyInput, lookups: Lookups): Promise<
           { needsWrite: false },
         )
       }
-      if (isBotActor(e.sender?.login)) return noAct("PR event by bot")
       if (a === "labeled") {
+        // Label events stay bot-excluded: the bot adds the LGTM label itself
+        // during lgtm_merge — acting on that echo would double-trigger a merge.
+        if (isBotActor(e.sender?.login)) return noAct("PR label event by bot")
         if (!/^lgtm$/i.test(String(e.label?.name ?? ""))) return noAct("label not LGTM")
         const sender = String(e.sender?.login ?? "")
         if (!(await lookups.canWrite(sender))) return noAct(`LGTM label by non-member @${sender}`)
@@ -210,8 +215,15 @@ export async function classify(input: ClassifyInput, lookups: Lookups): Promise<
         )
       }
       if (["opened", "edited", "reopened", "ready_for_review", "synchronize"].includes(a)) {
+        // Bot senders/authors DO get reviewed: Renovate runs under this same
+        // App (its dep PRs would otherwise never be reviewed), and the bot's
+        // own ci_fix push must trigger a follow-up review of the fix commit.
+        // No feedback loop: pr_opened is read-only (never pushes), and its
+        // comments don't emit pull_request_target events. Only a bot's
+        // `edited` is skipped — it is the echo of the bot's own title/body
+        // normalization and the base branch did not change.
+        if (a === "edited" && isBotActor(e.sender?.login)) return noAct("PR edited by bot")
         const actor = String(e.pull_request?.user?.login ?? "")
-        if (actor === botUser) return noAct("PR by self")
         const metadataOnly = a === "edited" && !e.changes?.base?.ref?.from
         const prEnv: Partial<BotEnv> = {
           BOT_CAN_WRITE: "1", BOT_PR_NUMBER: String(num), BOT_PR_BASE: prBase,

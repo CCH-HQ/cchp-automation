@@ -156,17 +156,20 @@ and fixes the repository, endpoint, HTTP method, and accepted flags before invok
 public IDs to shell commands; restricted fork shell `$...` expansion is denied so
 environment values cannot be exfiltrated through queries or metadata.
 
-**Inline PR review:** use the MCP tool
-`github_inline_comment_create_inline_comment` ({path, line, body, side?,
-start_line?, start_side?, fingerprint, confirmed:true}). Use
-`github_inline_comment_list_review_history` immediately before publication.
-Review tasks cannot use raw `gh api`; the server validates the trusted patch
-anchor, completed evidence, and idempotency marker before every POST. When you
-have several verified inline findings, prefer ONE
-`github_inline_comment_post_review_batch` call ({comments:[{path, line, body,
-fingerprint, …}], summary?, confirmed:true}) — it publishes them as a single
-PR review (one notification instead of N) and skips already-posted
-fingerprints automatically.
+**Inline PR review:** publish verified findings with ONE MCP call
+`github_inline_comment_post_inline_review` ({comments:[{path, line, body,
+fingerprint, side?, start_line?, start_side?}], summary?}) — a single PR
+review, one notification instead of N. `fingerprint` is the finding's stable
+root-cause KEY: pass a short deterministic string (e.g.
+`billing-cache: snapshot version reuse`); the server hashes it and
+automatically skips fingerprints already posted in any earlier run. Review
+tasks cannot use raw `gh api`; the server validates every line/side anchor
+against the trusted current PR patch. An item that fails anchoring comes back
+under `rejected` (with the exact reason) while the valid rest still
+publishes — reroute every rejected finding into the review summary sticky,
+never drop it and never retry the same invalid anchor. Immediately before
+publication call `github_inline_comment_list_review_threads` and dedup
+semantically against OTHER reviewers' threads (see pr_opened step 2e).
 
 **Structured comments (preferred for any substantial reply).** Use
 `github_inline_comment_post_structured_comment` for top-level comments on the
@@ -517,6 +520,24 @@ Post a short sticky comment on the outcome (merged / blocked + why).
    final publication/deduplication stage so resolved findings are not reposted.
    Do not impose an artificial token, elapsed-time, or finding-count budget:
    favor exhaustive coverage and verified defects over speed.
+   **Review status sticky — ONE structured comment from start to summary.**
+   The moment the review starts, post a structured comment with
+   `sticky_key: "review"` (title `Code review`, summary
+   "🔍 Reviewing commit `<short-sha>` — in progress", metadata: commit +
+   status). While the review runs, update the SAME sticky whenever your set of
+   confirmed findings changes — list EVERY finding of yours there in real
+   time, including root causes another reviewer also reported. Never post
+   standalone intermediate comments. At the end, rewrite that sticky into the
+   final review summary: metadata chips (commit, verdict, counts by severity),
+   one section per severity (P0/P1 expanded, P2/P3 `collapsed: true`), each
+   finding as `path:line — one-line claim` linking its inline comment, plus —
+   when applicable — a collapsed section for findings that could not anchor to
+   the diff (full text inline) and one for root causes already reported by
+   other reviewers (`already reported by @x — not re-posted`). If NOTHING
+   survived verification, rewrite the sticky to say the review completed with
+   no findings and add reaction `+1` on the PR
+   (`github_inline_comment_add_reaction {number, content: "+1"}`) so the
+   author gets an explicit all-clear instead of silence.
    a. Read the complete pre-fetched patch path and pre-computed triage (the
       `ctx/pr-diff.patch` and `ctx/inspect-review.md` paths in your task prompt).
       If triage is missing, do not invoke shell: use the pre-fetched patch and
@@ -554,21 +575,29 @@ Post a short sticky comment on the outcome (merged / blocked + why).
       capability is NOT a finding. It becomes a finding only when the code
       violates the documented decision, breaks an invariant, or introduces a
       concrete defect within the documented scope.
-   e. **Second-pass verification (mandatory).** For every candidate finding —
-      inspect-derived, subagent-derived, or your own — re-open the actual code
-      and re-derive the failure scenario yourself. Post ONLY findings you
-      personally re-confirmed, each as a concrete doubt (疑点) with file:line,
-      the concrete failure scenario, and inspect's risk/classification when
-      relevant — as inline comments with
-      `github_inline_comment_create_inline_comment`. Before publication call
-      `github_inline_comment_list_review_history`, deduplicate all prior inline,
-      top-level, and review bodies, and pass `confirmed: true` plus a stable
-      lowercase SHA-256 root-cause fingerprint. The server independently checks
-      the trusted artifact finalizer and current patch anchor. If a verified finding cannot
-      attach to a current diff line (for example a deleted file or cross-file
-      architecture defect), write it to `$BOT_WORKDIR/ctx/reply.md` and publish
-      one consolidated top-level comment with
-      `cchp-review-meta pr-review-comment-file <stable-sha256-fingerprint>`.
+   e. **Second-pass verification (mandatory) + two-axis dedup at publication.**
+      For every candidate finding — inspect-derived, subagent-derived, or your
+      own — re-open the actual code and re-derive the failure scenario
+      yourself. Post ONLY findings you personally re-confirmed, each as a
+      concrete doubt (疑点) with file:line, the concrete failure scenario, and
+      inspect's risk/classification when relevant — published in ONE
+      `github_inline_comment_post_inline_review` batch. `fingerprint` is the
+      stable root-cause key (a short deterministic string; the server hashes
+      it and auto-skips anything already posted by you in ANY earlier run).
+      Items the server returns under `rejected` (invalid anchor) reroute into
+      the review summary sticky — never dropped, never retried on the same
+      anchor. Cross-REVIEWER dedup is your job: immediately before publishing,
+      call `github_inline_comment_list_review_threads`; a root cause another
+      reviewer (human or bot) already reported gets NO new inline comment from
+      you — record it in the summary sticky's "already reported" section
+      instead. When several reviewers duplicated the SAME root cause, keep the
+      single most correct/precise thread open and resolve the other duplicates
+      with `github_inline_comment_resolve_review_thread`; never resolve a
+      thread that raises a distinct unaddressed issue. If a verified finding
+      cannot attach to a current diff line (for example a deleted file or
+      cross-file architecture defect), write it to `$BOT_WORKDIR/ctx/reply.md`
+      and publish one consolidated top-level comment with
+      `cchp-review-meta pr-review-comment-file <root-cause-key>`.
       The wrapper revalidates the evidence and enforces idempotency. Raw `gh api` is
       unavailable in this task. Discard anything you could
       not reproduce by reading the code: no speculative nitpicks, no style noise.

@@ -278,17 +278,38 @@ Mark blocking intent in each published finding body: an unprefixed finding is
 a blocking defect; prefix verified non-blocking feedback `Nit:`, `Optional:`,
 or `FYI:`. Undocumented personal style preference remains unpublishable.
 
-At publication time, call `list_review_history` and deduplicate against inline,
-top-level, and submitted-review history. Publish one inline comment per unique
-verified root cause through the inline MCP tool with `confirmed: true` and a
-stable lowercase SHA-256 `fingerprint`. The server validates the anchor against
-the trusted current patch and appends an idempotency marker. For findings that
-cannot attach to the current diff, write one consolidated report to
+At publication time, dedup on two axes, then publish once. (1) Cross-run
+self-dedup is automatic: each finding carries a stable root-cause
+`fingerprint` — pass the key string itself; the server hashes it and skips
+fingerprints already posted in any earlier run. (2) Cross-reviewer dedup is
+the coordinator's job: call `list_review_threads`, compare root causes
+semantically, and publish NO inline comment for a root cause any other
+reviewer already reported — record it in the review summary sticky instead.
+When several reviewers duplicated one root cause, keep the single most
+correct/precise thread open and resolve the other duplicates via
+`resolve_review_thread`; never resolve a thread raising a distinct
+unaddressed issue. Publish one inline comment per unique verified root cause
+through ONE `post_inline_review` batch; the server validates every anchor
+against the trusted current patch and appends the idempotency marker. Items
+returned under `rejected` (invalid anchor) reroute into the summary sticky —
+never dropped, never retried on the same anchor. For findings that cannot
+attach to the current diff, write one consolidated report to
 `$BOT_WORKDIR/ctx/reply.md` and call
-`cchp-review-meta pr-review-comment-file <stable-sha256-fingerprint>`; this path
-also revalidates artifacts and deduplicates before publishing. Do not publish unresolved, refuted,
-pre-existing, duplicate, stylistic, or speculative candidates. If none survive,
-publish no review comments and report the exact scope and limitations.
+`cchp-review-meta pr-review-comment-file <root-cause-key>`; this path also
+revalidates artifacts and deduplicates before publishing. Do not publish
+unresolved, refuted, pre-existing, duplicate, stylistic, or speculative
+candidates.
+
+Maintain the sticky review status comment (structured comment,
+`sticky_key: "review"`) from the first phase to the last: open it the moment
+the review starts ("in progress" + commit), keep the coordinator's confirmed
+findings current in it while phases run (including root causes other
+reviewers also found), and finish by rewriting it into the severity-grouped
+summary — P0/P1 sections expanded, P2/P3 collapsed, every finding linking its
+inline comment, non-anchorable findings and already-reported-by-others in
+their own sections, exact scope and limitations stated. If no finding
+survives verification, state that plainly in the sticky and add the `+1`
+reaction on the PR — an explicit "reviewed, nothing found" beats silence.
 
 The publication design incorporates three upstream patterns: changed-line
 filtering and safe line relocation from Alibaba open-code-review; applicability,

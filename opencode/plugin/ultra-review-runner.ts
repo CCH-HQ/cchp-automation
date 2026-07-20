@@ -147,7 +147,9 @@ async function runOne(
         tools: {
           task: false,
           ultra_review_task: false,
-          github_inline_comment_create_inline_comment: false,
+          // Leaf reviewers never publish or mutate GitHub — disable the whole
+          // curated MCP surface (wildcard covers every github_inline_comment_* tool).
+          "github_inline_comment*": false,
         },
         parts: [{ type: "text", text: `${task.prompt}\n\n${assembledReferences}` }],
       },

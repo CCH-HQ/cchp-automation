@@ -35,9 +35,15 @@ unreproducible claims. Keep realistic unresolved risks in the ledger rather
 than silently discarding them.
 
 Write review evidence only below `$BOT_WORKDIR/ctx/review/`. The clone remains
-read-only. Publish only independently verified findings: one inline comment per
-unique root cause after `list_review_history` deduplication. Pass
-`confirmed: true` and a stable lowercase SHA-256 root-cause fingerprint; the
-server will reject publication until the trusted artifact finalizer passes and
-the line is present in the current patch. Use one consolidated shell-safe top-level comment when no
-diff line can anchor it. If nothing is confirmed, publish nothing.
+read-only. Publish only independently verified findings: one inline comment
+per unique root cause, in ONE `post_inline_review` batch with a stable
+root-cause `fingerprint` key (the server hashes it and skips already-posted
+fingerprints; items returned under `rejected` reroute to the review summary
+sticky). Before publishing, dedup against other reviewers via
+`list_review_threads` — an already-reported root cause gets no new inline
+comment, and duplicate threads for one root cause are resolved down to the
+single best via `resolve_review_thread`. The server validates every anchor
+against the current trusted patch. Use one consolidated shell-safe top-level
+comment when no diff line can anchor it. Keep the sticky review status
+comment (`sticky_key: "review"`) current from start to final summary; if
+nothing is confirmed, say so there and add the `+1` reaction on the PR.

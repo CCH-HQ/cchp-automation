@@ -72,6 +72,8 @@ export const SERVER_VERSION = "1.0.0"
 // input validation is self-contained; the publishers re-validate authoritatively).
 const STICKY_KEY_RE = /^[a-z0-9][a-z0-9:._-]{0,63}$/
 const VERDICTS: Verdict[] = ["COMMENT", "REQUEST_CHANGES", "APPROVE"]
+// The REST reactions API's full content enum ('+1' 👍 is the "review ran clean" ack).
+const REACTION_CONTENTS = ["+1", "-1", "laugh", "confused", "heart", "hooray", "rocket", "eyes"] as const
 const CHECK_STATUSES: CheckStatus[] = ["queued", "in_progress", "completed"]
 const CHECK_CONCLUSIONS: CheckConclusion[] = ["success", "neutral", "failure", "action_required", "cancelled"]
 
@@ -648,6 +650,77 @@ export function buildTools(deps: ServerDeps): ToolEntry[] {
       },
     },
     {
+      name: "add_reaction",
+      description:
+        "Add ONE emoji reaction to a PR or issue body. Convention: after a completed review that confirmed ZERO findings, react '+1' on the PR so the author positively knows the review ran clean (no comment spam).",
+      inputSchema: schema(
+        { number: intProp("PR or issue number to react to"), content: enumProp(REACTION_CONTENTS, "Reaction emoji") },
+        ["number", "content"],
+      ),
+      handler: async (a) => {
+        const content = reqStr(a, "content")
+        if (!REACTION_CONTENTS.includes(content as (typeof REACTION_CONTENTS)[number])) {
+          throw new Error(`content must be one of ${REACTION_CONTENTS.join(", ")}`)
+        }
+        const { owner, name } = ns()
+        await octokit.rest.reactions.createForIssue({
+          owner,
+          repo: name,
+          issue_number: reqInt(a, "number"),
+          content: content as (typeof REACTION_CONTENTS)[number],
+        })
+        return "reaction added"
+      },
+    },
+    {
+      name: "list_review_threads",
+      description:
+        "List ALL inline review threads on a PR (every reviewer, human or bot) with thread node id, path/line, isResolved/isOutdated, and each comment's author + body (JSON). Use before publication to dedup semantically against OTHER reviewers' findings: a root cause already reported by someone else gets NO new inline comment — record it in the summary comment instead.",
+      inputSchema: schema({ pr_number: intProp("Pull request number") }, ["pr_number"]),
+      handler: async (a) => {
+        const prNumber = reqInt(a, "pr_number")
+        const { owner, name } = ns()
+        const threads: unknown[] = []
+        let cursor: string | null = null
+        do {
+          const data = (await octokit.graphql(REVIEW_THREADS_QUERY, {
+            owner,
+            name,
+            number: prNumber,
+            cursor,
+          })) as {
+            repository?: {
+              pullRequest?: {
+                reviewThreads?: {
+                  pageInfo?: { hasNextPage?: boolean; endCursor?: string | null }
+                  nodes?: unknown[]
+                }
+              }
+            }
+          }
+          const conn = data?.repository?.pullRequest?.reviewThreads
+          threads.push(...(conn?.nodes ?? []))
+          cursor = conn?.pageInfo?.hasNextPage ? (conn.pageInfo.endCursor ?? null) : null
+        } while (cursor)
+        return JSON.stringify({ pr_number: prNumber, threads }, null, 2)
+      },
+    },
+    {
+      name: "resolve_review_thread",
+      description:
+        "Resolve one inline review thread by its GraphQL node id (from list_review_threads). Use ONLY to dedup: when two or more reviewers reported the SAME root cause, resolve the less correct/less precise duplicates and keep exactly one canonical thread open. Never resolve a thread that raises a distinct unaddressed issue.",
+      inputSchema: schema({ thread_id: strProp("Review thread node id (from list_review_threads)") }, ["thread_id"]),
+      handler: async (a) => {
+        const data = (await octokit.graphql(RESOLVE_THREAD_MUTATION, { id: reqStr(a, "thread_id") })) as {
+          resolveReviewThread?: { thread?: { id?: string; isResolved?: boolean } }
+        }
+        return JSON.stringify({
+          thread_id: data?.resolveReviewThread?.thread?.id ?? null,
+          is_resolved: data?.resolveReviewThread?.thread?.isResolved ?? false,
+        })
+      },
+    },
+    {
       name: "rerun_workflow_run",
       description: "Re-run a workflow run (all jobs, or only failed jobs when failed_only=true).",
       inputSchema: schema({ run_id: intProp("Workflow run id"), failed_only: boolProp("Re-run only the failed jobs") }, ["run_id"]),
@@ -735,6 +808,17 @@ export function buildTools(deps: ServerDeps): ToolEntry[] {
 // Standard Projects v2 mutations (fixed operations; contract per ADR 0006).
 const ROADMAP_ADD_ITEM = `mutation($p:ID!,$c:ID!){addProjectV2ItemById(input:{projectId:$p,contentId:$c}){item{id}}}`
 const ROADMAP_MOVE_ITEM = `mutation($p:ID!,$i:ID!,$f:ID!,$o:String!){updateProjectV2ItemFieldValue(input:{projectId:$p,itemId:$i,fieldId:$f,value:{singleSelectOptionId:$o}}){projectV2Item{id}}}`
+
+// Review-thread dedup surface (fixed operations): read every reviewer's inline
+// threads, resolve a confirmed-duplicate thread. Comments are capped at 50 per
+// thread — dedup needs the opening claim, not a full transcript.
+const REVIEW_THREADS_QUERY = `query($owner:String!,$name:String!,$number:Int!,$cursor:String){
+  repository(owner:$owner,name:$name){pullRequest(number:$number){
+    reviewThreads(first:100,after:$cursor){
+      pageInfo{hasNextPage endCursor}
+      nodes{id isResolved isOutdated path line startLine
+        comments(first:50){nodes{databaseId author{login} body createdAt}}}}}}}`
+const RESOLVE_THREAD_MUTATION = `mutation($id:ID!){resolveReviewThread(input:{threadId:$id}){thread{id isResolved}}}`
 
 // ── MCP wiring ───────────────────────────────────────────────────────────────
 

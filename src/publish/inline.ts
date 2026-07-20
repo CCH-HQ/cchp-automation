@@ -23,7 +23,7 @@
 // performs the Octokit publication + dedup.
 import { splitRepo } from "../context"
 import type { GitHubClient } from "../github/client"
-import { findByMarker, hidden, MARKER } from "../types"
+import { findByMarker, fingerprint, hidden, MARKER } from "../types"
 
 // ── frozen validators / thresholds (verbatim from the MCP server) ────────────
 export type Side = "LEFT" | "RIGHT"
@@ -185,6 +185,15 @@ function extractFingerprints(body: string | null | undefined): string[] {
   return [...(body ?? "").matchAll(FINGERPRINT_MARKER_RE)].map((m) => m[1]!)
 }
 
+/** Normalize a caller-supplied fingerprint: a 64-hex SHA-256 passes through
+ *  verbatim; any other non-empty stable root-cause key is hashed server-side.
+ *  Models cannot compute SHA-256 themselves (bash is denied during reviews),
+ *  so the key itself is an accepted, deterministic input. */
+export function normalizeFingerprint(value: string): string {
+  const v = value.trim()
+  return FINGERPRINT_RE.test(v) ? v : fingerprint(v)
+}
+
 // ── review history (dedup source) ────────────────────────────────────────────
 
 /** A simplified prior comment/review, carrying the Fingerprints it embeds. */
@@ -302,14 +311,17 @@ export async function createInlineComment(
 ): Promise<InlineOutcome> {
   const { prNumber, headSha, comment } = opts
   if (typeof comment.body !== "string" || !comment.body.trim()) throw new Error("body is required")
-  if (!FINGERPRINT_RE.test(comment.fingerprint || "")) throw new Error("fingerprint must be lowercase SHA-256 hex")
+  if (typeof comment.fingerprint !== "string" || !comment.fingerprint.trim()) {
+    throw new Error("fingerprint requires a stable root-cause key (hashed server-side) or SHA-256 hex")
+  }
+  const fp = normalizeFingerprint(comment.fingerprint)
   const files = normalizePatch(opts.patch)
   const side = validateAnchor(comment, files)
   const history = opts.history ?? (await reviewHistory(octokit, repo, prNumber))
-  const existing = history.find((x) => x.fingerprints.includes(comment.fingerprint))
+  const existing = history.find((x) => x.fingerprints.includes(fp))
   if (existing) return { status: "already-posted", ref: existing.html_url ?? String(existing.id ?? "") }
   const { owner, name } = splitRepo(repo)
-  const body = `${stripFingerprintMarkers(comment.body).trim()}\n\n${hidden(MARKER.fingerprint(comment.fingerprint))}`
+  const body = `${stripFingerprintMarkers(comment.body).trim()}\n\n${hidden(MARKER.fingerprint(fp))}`
   const { data } = await octokit.rest.pulls.createReviewComment({
     owner,
     repo: name,
@@ -326,10 +338,20 @@ export async function createInlineComment(
   return { status: "posted", url: data.html_url }
 }
 
-/** Result of a batch publication. */
+/** One batch item that could not be published, with the exact reason — the
+ *  caller reroutes it to the summary comment instead of losing the finding. */
+export interface RejectedFinding {
+  path: string
+  line: number
+  reason: string
+}
+
+/** Result of a batch publication. `rejected` lists items that failed anchor/
+ *  shape validation and were NOT posted (present only when non-empty). */
 export type BatchOutcome =
-  | { status: "posted"; url: string; posted: number; skipped: number }
-  | { status: "already-posted"; total: number }
+  | { status: "posted"; url: string; posted: number; skipped: number; rejected?: RejectedFinding[] }
+  | { status: "already-posted"; total: number; rejected?: RejectedFinding[] }
+  | { status: "rejected"; rejected: RejectedFinding[] }
 
 export interface PostBatchOpts {
   prNumber: number
@@ -341,11 +363,13 @@ export interface PostBatchOpts {
 }
 
 /** Publish many confirmed findings as ONE Pull Request Review (`event: COMMENT`,
- *  single API call), verbatim gates from the MCP server's `post_review_batch`:
- *  1..50 comments; every comment's body + Fingerprint validated and anchor checked
- *  (even duplicates, before the dedup skip); already-posted Fingerprints (in
- *  history OR earlier in this batch) skipped. Returns `already-posted` with no API
- *  write when every Fingerprint was previously published. */
+ *  single API call). 1..50 comments; already-posted Fingerprints (in history OR
+ *  earlier in this batch) are skipped. An item failing body/fingerprint/anchor
+ *  validation no longer fails the whole batch: it lands in `rejected` with the
+ *  exact reason (the caller reroutes it to the summary comment) while every
+ *  valid item still publishes — one bad line number must not discard a whole
+ *  review's worth of findings. Returns `already-posted` when nothing new
+ *  remains, `rejected` when nothing was publishable at all. */
 export async function postReviewBatch(octokit: GitHubClient, repo: string, opts: PostBatchOpts): Promise<BatchOutcome> {
   const { prNumber, headSha, comments } = opts
   if (!Array.isArray(comments) || comments.length === 0) throw new Error("comments must be a non-empty array")
@@ -355,21 +379,31 @@ export async function postReviewBatch(octokit: GitHubClient, repo: string, opts:
   const seen = new Set(history.flatMap((x) => x.fingerprints))
   const localSeen = new Set<string>()
   const payload: ReviewCommentPayload[] = []
+  const rejected: RejectedFinding[] = []
   let skipped = 0
   for (const c of comments) {
-    if (typeof c.body !== "string" || !c.body.trim()) throw new Error("each comment requires a body")
-    if (!FINGERPRINT_RE.test(c.fingerprint || "")) throw new Error("each comment requires a lowercase SHA-256 fingerprint")
-    const side = validateAnchor(c, files)
-    if (seen.has(c.fingerprint) || localSeen.has(c.fingerprint)) {
+    let side: Side
+    try {
+      if (typeof c.body !== "string" || !c.body.trim()) throw new Error("comment requires a body")
+      if (typeof c.fingerprint !== "string" || !c.fingerprint.trim()) {
+        throw new Error("comment requires a stable root-cause key (hashed server-side) or SHA-256 fingerprint")
+      }
+      side = validateAnchor(c, files)
+    } catch (e) {
+      rejected.push({ path: String(c?.path ?? ""), line: Number(c?.line ?? 0), reason: (e as Error).message })
+      continue
+    }
+    const fp = normalizeFingerprint(c.fingerprint)
+    if (seen.has(fp) || localSeen.has(fp)) {
       skipped++
       continue
     }
-    localSeen.add(c.fingerprint)
+    localSeen.add(fp)
     const entry: ReviewCommentPayload = {
       path: c.path,
       line: c.line,
       side,
-      body: `${stripFingerprintMarkers(c.body).trim()}\n\n${hidden(MARKER.fingerprint(c.fingerprint))}`,
+      body: `${stripFingerprintMarkers(c.body).trim()}\n\n${hidden(MARKER.fingerprint(fp))}`,
     }
     if (c.start_line != null) {
       entry.start_line = c.start_line
@@ -377,7 +411,11 @@ export async function postReviewBatch(octokit: GitHubClient, repo: string, opts:
     }
     payload.push(entry)
   }
-  if (payload.length === 0) return { status: "already-posted", total: comments.length }
+  const rej = rejected.length ? { rejected } : {}
+  if (payload.length === 0) {
+    if (skipped === 0 && rejected.length > 0) return { status: "rejected", rejected }
+    return { status: "already-posted", total: comments.length, ...rej }
+  }
   const { owner, name } = splitRepo(repo)
   const summary = sanitizeText(opts.summary ?? "")
   const { data } = await octokit.rest.pulls.createReview({
@@ -389,7 +427,7 @@ export async function postReviewBatch(octokit: GitHubClient, repo: string, opts:
     comments: payload,
     ...(summary ? { body: summary } : {}),
   })
-  return { status: "posted", url: data.html_url, posted: payload.length, skipped }
+  return { status: "posted", url: data.html_url, posted: payload.length, skipped, ...rej }
 }
 
 // ── structured conversation comments (pr-agent-style server-side templates) ──

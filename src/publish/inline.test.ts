@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test"
 import type { GitHubClient } from "../github/client"
+import { fingerprint } from "../types"
 import {
   createInlineComment,
   parsePatch,
@@ -228,18 +229,39 @@ test("createInlineComment: fetches history itself when not provided (empty threa
   expect(calls.createReviewComment.length).toBe(1)
 })
 
-test("createInlineComment: rejects a bad fingerprint / empty body / uncommentable line", async () => {
+test("createInlineComment: rejects an empty fingerprint / empty body / uncommentable line", async () => {
   const { octokit } = fake()
   const base = { prNumber: 9, headSha: "sha", patch: PATCH }
   await expect(
-    createInlineComment(octokit, "CCH-HQ/repo", { ...base, comment: { path: "foo.ts", line: 2, body: "x", fingerprint: "nope" } }),
-  ).rejects.toThrow("lowercase SHA-256")
+    createInlineComment(octokit, "CCH-HQ/repo", { ...base, comment: { path: "foo.ts", line: 2, body: "x", fingerprint: "  " } }),
+  ).rejects.toThrow("stable root-cause key")
   await expect(
     createInlineComment(octokit, "CCH-HQ/repo", { ...base, comment: { path: "foo.ts", line: 2, body: "   ", fingerprint: FP_A } }),
   ).rejects.toThrow("body is required")
   await expect(
     createInlineComment(octokit, "CCH-HQ/repo", { ...base, comment: { path: "foo.ts", line: 99, body: "x", fingerprint: FP_A } }),
   ).rejects.toThrow("not commentable")
+})
+
+test("createInlineComment: a non-hex root-cause key is hashed server-side, deterministically", async () => {
+  const { octokit, calls } = fake()
+  const hashed = fingerprint("dedup: nil deref in auth chain")
+  await createInlineComment(octokit, "CCH-HQ/repo", {
+    prNumber: 9,
+    headSha: "sha",
+    patch: PATCH,
+    comment: { path: "foo.ts", line: 2, body: "x", fingerprint: "dedup: nil deref in auth chain" },
+  })
+  expect(String(calls.createReviewComment[0]!.body)).toContain(`cchp-review-fingerprint:${hashed}`)
+  // The same key deduplicates against history on the next run.
+  const res = await createInlineComment(octokit, "CCH-HQ/repo", {
+    prNumber: 9,
+    headSha: "sha",
+    patch: PATCH,
+    comment: { path: "foo.ts", line: 2, body: "x", fingerprint: "dedup: nil deref in auth chain" },
+    history: [{ kind: "inline", id: 7, fingerprints: [hashed] }],
+  })
+  expect(res.status).toBe("already-posted")
 })
 
 // ── postReviewBatch ────────────────────────────────────────────────────────────
@@ -282,6 +304,43 @@ test("postReviewBatch: dedups against history AND within the batch, reports skip
   })
   expect(res).toEqual({ status: "posted", url: "https://gh/review/1", posted: 1, skipped: 2 })
   expect((calls.createReview[0]!.comments as unknown[]).length).toBe(1)
+})
+
+test("postReviewBatch: an invalid anchor rejects ONLY that item — the rest still publish", async () => {
+  const { octokit, calls } = fake()
+  const res = await postReviewBatch(octokit, "CCH-HQ/repo", {
+    prNumber: 9,
+    headSha: "sha",
+    patch: PATCH,
+    comments: [
+      { path: "foo.ts", line: 2, body: "good", fingerprint: FP_A },
+      { path: "foo.ts", line: 99, body: "bad line", fingerprint: FP_B },
+      { path: "foo.ts", line: 3, body: "   ", fingerprint: FP_C },
+    ],
+  })
+  expect(res).toEqual({
+    status: "posted",
+    url: "https://gh/review/1",
+    posted: 1,
+    skipped: 0,
+    rejected: [
+      { path: "foo.ts", line: 99, reason: "line is not commentable in the trusted current PR patch" },
+      { path: "foo.ts", line: 3, reason: "comment requires a body" },
+    ],
+  })
+  expect((calls.createReview[0]!.comments as unknown[]).length).toBe(1)
+})
+
+test("postReviewBatch: every item invalid → status rejected, no API write", async () => {
+  const { octokit, calls } = fake()
+  const res = await postReviewBatch(octokit, "CCH-HQ/repo", {
+    prNumber: 9,
+    headSha: "sha",
+    patch: PATCH,
+    comments: [{ path: "foo.ts", line: 99, body: "bad", fingerprint: FP_A }],
+  })
+  expect(res.status).toBe("rejected")
+  expect(calls.createReview.length).toBe(0)
 })
 
 test("postReviewBatch: all fingerprints already posted → already-posted, no review created", async () => {

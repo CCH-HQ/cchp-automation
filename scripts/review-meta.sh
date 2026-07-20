@@ -119,17 +119,22 @@ case "${op}" in
   pr-review-comment-file)
     require_count 1 "$#"
     require_current_pr
-    [[ "$1" =~ ^[0-9a-f]{64}$ ]] || die "review fingerprint must be lowercase SHA-256 hex"
+    # Same contract as the MCP inline path: 64-hex passes through, any other
+    # non-empty stable root-cause key is hashed here (the model has no shell
+    # sha256 during reviews).
+    [[ -n "$1" ]] || die "review fingerprint / root-cause key must be non-empty"
+    fp="$1"
+    [[ "${fp}" =~ ^[0-9a-f]{64}$ ]] || fp="$(printf '%s' "${fp}" | sha256sum | awk '{print $1}')"
     require_review_finalized
     reply_file="${BOT_WORKDIR:?}/ctx/reply.md"
     [[ -f "${reply_file}" && ! -L "${reply_file}" ]] || die "reply file is missing or invalid"
     reply_size="$(wc -c < "${reply_file}")"
     [[ "${reply_size}" =~ ^[0-9]+$ && "${reply_size}" -ge 1 && "${reply_size}" -le 65000 ]] \
       || die "reply file size must be 1..65000 bytes"
-    marker="<!-- cchp-review-fingerprint:$1 -->"
+    marker="<!-- cchp-review-fingerprint:${fp} -->"
     if "${gh_bin}" api --paginate "repos/${repo}/issues/${BOT_PR_NUMBER}/comments" \
         --jq '.[].body // empty' | grep -Fqx -- "${marker}"; then
-      printf 'already-posted: %s\n' "$1"
+      printf 'already-posted: %s\n' "${fp}"
       exit 0
     fi
     if grep -Eq '<!-- cchp-review-fingerprint:[0-9a-f]{64} -->' "${reply_file}"; then

@@ -33,6 +33,7 @@ function fakeOctokit(opts: FakeOpts = {}) {
     checksCreate: [] as Record<string, unknown>[],
     checksUpdate: [] as Record<string, unknown>[],
     addLabels: [] as Record<string, unknown>[],
+    reactions: [] as Record<string, unknown>[],
     graphql: [] as { query: string; variables: unknown }[],
     prGet: [] as Record<string, unknown>[],
   }
@@ -66,6 +67,9 @@ function fakeOctokit(opts: FakeOpts = {}) {
       checks: {
         create: async (p: Record<string, unknown>) => (calls.checksCreate.push(p), { data: { id: 777 } }),
         update: async (p: Record<string, unknown>) => (calls.checksUpdate.push(p), { data: {} }),
+      },
+      reactions: {
+        createForIssue: async (p: Record<string, unknown>) => (calls.reactions.push(p), { data: {} }),
       },
     },
   } as unknown as GitHubClient
@@ -103,6 +107,9 @@ const EXPECTED_TOOLS = [
   "add_label",
   "remove_label",
   "set_milestone",
+  "add_reaction",
+  "list_review_threads",
+  "resolve_review_thread",
   "rerun_workflow_run",
   "cancel_workflow_run",
   "roadmap_add_item",
@@ -196,11 +203,14 @@ test("post_inline_review binds PR/head/patch from the run env + injected trusted
   expect((calls.createReview[0]!.comments as unknown[]).length).toBe(1)
 })
 
-test("post_inline_review anchors against the trusted patch (uncommentable line rejected)", async () => {
+test("post_inline_review anchors against the trusted patch (uncommentable line rejected per-item, not fatal)", async () => {
   const { octokit, calls } = fakeOctokit()
   const tools = buildTools({ octokit, repo: REPO, env: { BOT_PR_NUMBER: "8", BOT_HEAD_SHA: "h" }, readTrustedPatch: () => PATCH })
   const res = await callTool(tools, "post_inline_review", { comments: [{ path: "foo.ts", line: 999, body: "x", fingerprint: FP }] })
-  expect(res.isError).toBe(true)
+  expect(res.isError).toBeUndefined()
+  const parsed = JSON.parse(text(res))
+  expect(parsed.status).toBe("rejected")
+  expect(parsed.rejected[0]).toMatchObject({ path: "foo.ts", line: 999 })
   expect(text(res)).toContain("not commentable")
   expect(calls.createReview).toHaveLength(0)
 })
@@ -302,6 +312,53 @@ test("add_label validates the labels array before calling Octokit", async () => 
   const bad = await callTool(tools, "add_label", { number: 5, labels: [] })
   expect(bad.isError).toBe(true)
   expect(calls.addLabels).toHaveLength(1) // unchanged
+})
+
+test("add_reaction posts the reaction and rejects unknown content", async () => {
+  const { octokit, calls } = fakeOctokit()
+  const tools = buildTools({ octokit, repo: REPO })
+  const ok = await callTool(tools, "add_reaction", { number: 8, content: "+1" })
+  expect(ok.isError).toBeUndefined()
+  expect(calls.reactions[0]).toMatchObject({ issue_number: 8, content: "+1" })
+
+  const bad = await callTool(tools, "add_reaction", { number: 8, content: "sparkles" })
+  expect(bad.isError).toBe(true)
+  expect(calls.reactions).toHaveLength(1)
+})
+
+test("list_review_threads pages through reviewThreads and returns every reviewer's threads", async () => {
+  const thread = {
+    id: "RT_1",
+    isResolved: false,
+    isOutdated: false,
+    path: "foo.ts",
+    line: 2,
+    startLine: null,
+    comments: { nodes: [{ databaseId: 9, author: { login: "greptile-apps" }, body: "nil deref", createdAt: "t" }] },
+  }
+  const { octokit, calls } = fakeOctokit({
+    graphqlResult: {
+      repository: { pullRequest: { reviewThreads: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [thread] } } },
+    },
+  })
+  const tools = buildTools({ octokit, repo: REPO })
+  const res = await callTool(tools, "list_review_threads", { pr_number: 8 })
+  const parsed = JSON.parse(text(res))
+  expect(parsed.pr_number).toBe(8)
+  expect(parsed.threads).toEqual([thread])
+  expect(calls.graphql[0]!.query).toContain("reviewThreads")
+  expect(calls.graphql[0]!.variables).toMatchObject({ number: 8 })
+})
+
+test("resolve_review_thread runs the resolveReviewThread mutation by node id", async () => {
+  const { octokit, calls } = fakeOctokit({
+    graphqlResult: { resolveReviewThread: { thread: { id: "RT_1", isResolved: true } } },
+  })
+  const tools = buildTools({ octokit, repo: REPO })
+  const res = await callTool(tools, "resolve_review_thread", { thread_id: "RT_1" })
+  expect(JSON.parse(text(res))).toEqual({ thread_id: "RT_1", is_resolved: true })
+  expect(calls.graphql[0]!.query).toContain("resolveReviewThread")
+  expect(calls.graphql[0]!.variables).toMatchObject({ id: "RT_1" })
 })
 
 // ── entry guards ───────────────────────────────────────────────────────────────

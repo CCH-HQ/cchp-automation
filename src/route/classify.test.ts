@@ -218,9 +218,32 @@ test("PR edited without base change → metadata-only, skip diff inspection", as
   expect(r.intent?.vars.metadataOnly).toBe(true)
 })
 
-test("PR opened by the bot itself → no action", async () => {
+test("PR opened by the bot itself (e.g. Renovate under the same App) → still reviewed", async () => {
   const r = await run("pull_request_target", {
-    action: "opened", pull_request: { number: 8, base: { ref: "dev" }, head: { ref: "f", repo: { full_name: REPO } }, user: { login: BOT } }, sender: { login: BOT },
+    action: "opened", pull_request: { number: 8, base: { ref: "dev" }, head: { ref: "f", sha: "s", repo: { full_name: REPO } }, user: { login: BOT } }, sender: { login: BOT },
+  })
+  expect(r.env.BOT_TASK).toBe("pr_opened")
+  expect(r.needsWrite).toBe(false)
+})
+
+test("PR synchronize by the bot (ci_fix push) → follow-up review", async () => {
+  const r = await run("pull_request_target", {
+    action: "synchronize", pull_request: { number: 8, base: { ref: "dev" }, head: { ref: "f", sha: "s2", repo: { full_name: REPO } }, user: { login: "alice" } }, sender: { login: BOT },
+  })
+  expect(r.env.BOT_TASK).toBe("pr_opened")
+  expect(r.intent?.vars.action).toBe("synchronize")
+})
+
+test("PR edited by the bot (its own title fix echo) → no action", async () => {
+  const r = await run("pull_request_target", {
+    action: "edited", changes: {}, pull_request: { number: 8, base: { ref: "dev" }, head: { ref: "f", sha: "s", repo: { full_name: REPO } }, user: { login: "alice" } }, sender: { login: BOT },
+  })
+  expect(r.act).toBe(false)
+})
+
+test("PR labeled LGTM by the bot itself → no action (no merge echo loop)", async () => {
+  const r = await run("pull_request_target", {
+    action: "labeled", label: { name: "LGTM" }, pull_request: { number: 8, base: { ref: "dev" }, head: { ref: "f", sha: "s", repo: { full_name: REPO } } }, sender: { login: BOT },
   })
   expect(r.act).toBe(false)
 })
