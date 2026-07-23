@@ -565,9 +565,12 @@ Post a short sticky comment on the outcome (merged / blocked + why).
       Every review shard gets at least five independent correctness passes, so
       every changed hunk receives at least five independent correctness passes;
       use four independent verifier roles for every unique candidate and add fresh
-      adjudicators for P0/P1. Use `max` reasoning for the coordinator and all
-      substantive child sessions. Each finder returns structured evidence, not
-      only `file:line | severity | claim | failure scenario` text.
+      adjudicators for P0/P1. Use `xhigh` reasoning for the coordinator and every
+      session that may write files, `low` for read-only exploration/review, and
+      `medium` only for sessions that execute operations without file writes.
+      Explicit deep-reasoning specialists may retain `max`. Each finder returns
+      structured evidence, not only
+      `file:line | severity | claim | failure scenario` text.
    d. **Documentation-aware scope.** Read the applicable root and nested
       `CLAUDE.md`, ADRs, specs, runbooks, and design documents before judging an
       implementation. If those documents explicitly make a tradeoff, defer a

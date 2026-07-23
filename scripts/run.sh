@@ -258,19 +258,34 @@ fi
 COORD_AGENT=build
 [[ "${HAVE_OMOA}" == "1" ]] && COORD_AGENT=sisyphus
 
-# oh-my-openagent 逐 agent/category 显式钉死 model + 思考预算 = 主模型(variant max)。否则其
-# 子代理会自作主张用便宜回退模型,且那些默认模型不在本仓 providers 里会直接失败。同时关掉会
-# 外泄未信任 PR 代码的远端 MCP(websearch/context7/grep_app)、遥测、自更新。写到用户级 opencode
-# 配置目录,与 OPENCODE_CONFIG_CONTENT 独立生效(oh-my-openagent.jsonc 自有加载器)。
+# oh-my-openagent 逐 agent/category 显式钉死主模型,并按能力分配思考强度:纯只读 specialist
+# 使用 low;需要深度推理的 oracle/metis/momus 保留 max;可能写文件或职责不明确的
+# agent/category 使用 xhigh。当前没有明确的“允许执行但禁止写入”OMOA 角色,所以不强行分配
+# medium。否则子代理会自作主张用便宜回退模型,且那些默认模型不在本仓 providers 里会直接失败。
+# 同时关掉会外泄未信任 PR 代码的远端 MCP
+# (websearch/context7/grep_app)、遥测、自更新。写到用户级 opencode 配置目录,与
+# OPENCODE_CONFIG_CONTENT 独立生效(oh-my-openagent.jsonc 自有加载器)。
 if [[ "${HAVE_OMOA}" == "1" ]]; then
   mkdir -p "${HOME}/.config/opencode"
   jq -n --arg model "${CCHP_BOT_MODEL}" \
-     --argjson agents '["sisyphus","hephaestus","prometheus","atlas","oracle","librarian","explore","multimodal-looker","metis","momus","sisyphus-junior"]' \
+     --argjson low_agents '["librarian","explore","multimodal-looker"]' \
+     --argjson max_agents '["oracle","metis","momus"]' \
+     --argjson xhigh_agents '["sisyphus","hephaestus","prometheus","atlas","sisyphus-junior"]' \
      --argjson cats   '["quick","deep","ultrabrain","visual-engineering","writing","unspecified-low","unspecified-high"]' '
      { telemetry: false, auto_update: false,
        disabled_mcps: ["websearch", "context7", "grep_app"],
-       agents:     ($agents | map({ (.): { model: $model, variant: "max" } }) | add),
-       categories: ($cats   | map({ (.): { model: $model, variant: "max" } }) | add) }
+       agents: (($low_agents
+                   | map({ (.): { model: $model, variant: "low" } })
+                   | add)
+                + ($max_agents
+                   | map({ (.): { model: $model, variant: "max" } })
+                   | add)
+                + ($xhigh_agents
+                   | map({ (.): { model: $model, variant: "xhigh" } })
+                   | add)),
+       categories: ($cats
+                    | map({ (.): { model: $model, variant: "xhigh" } })
+                    | add) }
   ' > "${HOME}/.config/opencode/oh-my-openagent.jsonc"
 fi
 
@@ -312,11 +327,13 @@ OPENCODE_CONFIG_CONTENT="$(jq -nc \
      "openai-compatible": "@ai-sdk/openai-compatible"}[$f]
     // error("CCHP_BOT_PROVIDERS: unknown format \"\($f)\"");
   def envref($pid): "{env:CCHP_PK_" + ($pid | ascii_upcase | gsub("[^A-Z0-9]"; "_")) + "}";
-  def max_variant($f):
+  def effort_variant($f; $effort):
     if $f == "anthropic" then
-      { thinking: { type: "adaptive", display: "summarized" }, effort: "max" }
+      # Anthropic has no xhigh effort token; max is its corresponding strongest value.
+      { thinking: { type: "adaptive", display: "summarized" },
+        effort: (if $effort == "xhigh" then "max" else $effort end) }
     else
-      { reasoningEffort: "max" }
+      { reasoningEffort: $effort }
     end;
   def model_obj($mk; $m; $format):
     { name: $mk, tool_call: true,
@@ -328,15 +345,19 @@ OPENCODE_CONFIG_CONTENT="$(jq -nc \
         { limit: { context: $m.context, output: ($m.output // 32768) } }
       else {} end)
     + (if $m.vision then { attachment: true, modalities: { input: ["text", "image"] } } else {} end)
-    # gpt-5.6-sol supports max even when OpenCode model-id heuristics would
-    # otherwise synthesize only xhigh/high. Define the variant explicitly so the
-    # provider receives reasoningEffort: "max" and every review agent can select it.
-    + (if $m.reasoning == false then {} else { variants: { max: max_variant($format) } } end);
+    # Define every policy tier explicitly instead of relying on OpenCode model-id heuristics.
+    # Agent capabilities select low/medium/xhigh below; the main model uses xhigh.
+    + (if $m.reasoning == false then {} else { variants: {
+        low: effort_variant($format; "low"),
+        medium: effort_variant($format; "medium"),
+        xhigh: effort_variant($format; "xhigh"),
+        max: effort_variant($format; "max")
+      } } end);
 
   ($model | split("/")) as $mparts |
   ($providers[$mparts[0]] // {}) as $mprov |
   ($mprov.models[($mparts[1:] | join("/"))] // {}) as $mainm |
-  (if ($mainm.reasoning != false) and ($mprov.format != null) then "max" else null end) as $mainvariant |
+  (if ($mainm.reasoning != false) and ($mprov.format != null) then "xhigh" else null end) as $mainvariant |
 
   {
     "$schema": "https://opencode.ai/config.json",
@@ -379,16 +400,16 @@ OPENCODE_CONFIG_CONTENT="$(jq -nc \
                       "--enable-web-dashboard", "false", "--mode", "no-onboarding"],
             environment: { SERENA_USAGE_REPORTING: "false" } } }
         else {} end) ),
-    # 思考强度:主线程编排、planner、finder、verifier 全部固定 max。
-    # reasoning effort is pinned to max for the coordinator + planner + all reviewers.
+    # 思考强度按能力分层:主线程和可写角色使用 xhigh;纯只读 explore/review 使用 low;
+    # medium 保留给允许执行操作但明确禁止文件写入的角色(当前没有此类内建角色)。
     agent: ((if $mainvariant then
-      { build: ({ model: $model, variant: "max" }
+      { build: ({ model: $model, variant: "xhigh" }
           + (if $task == "pr_opened" then { permission: { task: "deny" } } else {} end)),
-        general: { model: $model, variant: "max" },
-        explore: { model: $model, variant: "max" },
+        general: { model: $model, variant: "xhigh" },
+        explore: { model: $model, variant: "low" },
         review: {
           model: $model,
-          variant: "max",
+          variant: "low",
           mode: "subagent",
           description: "Read-only Ultra review child. Never modify files, execute nested tasks, or publish comments.",
           prompt: "You are a leaf reviewer. Perform only the assigned role from the task prompt. Do not run the coordinator protocol, do not delegate, do not call task or ultra_review_task, do not publish comments, and return only structured evidence for the parent.",
@@ -496,7 +517,7 @@ cd "${REPO_DIR}"
 # ultra-review-runner, which cancels it independently.
 rc=0
 timeout --signal=TERM --kill-after=30s "${BOT_OPENCODE_TIMEOUT:-43200}" \
-  opencode run --auto --agent "${COORD_AGENT}" --variant max < "${BOT_PROMPT_FILE}" || rc=$?
+  opencode run --auto --agent "${COORD_AGENT}" --variant xhigh < "${BOT_PROMPT_FILE}" || rc=$?
 if [[ "${rc}" -eq 124 || "${rc}" -eq 137 ]]; then
   log "ERROR: opencode run exceeded ${BOT_OPENCODE_TIMEOUT:-43200}s and was killed — likely the model gateway hung (check the provider format matches what the gateway actually implements)."
 fi

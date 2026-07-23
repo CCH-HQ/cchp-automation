@@ -19,8 +19,8 @@ this pass — disclose it in the summary.
 Use `ultra_review_task` for every independent finder, verifier, refuter,
 reproducer, discourse, and completeness task. Submit batches of independent
 tasks; the runner admits up to 10 in parallel and hard-aborts each after 30
-minutes. Use the strongest configured agent, which is fixed to the `max`
-reasoning variant.
+minutes. These leaf reviewers are read-only and therefore use the `low`
+reasoning variant under the capability-based policy.
 
 At minimum, run fresh passes for correctness/edge cases, security/trust
 boundaries, contracts/schema/compatibility, concurrency/failure/lifecycle,

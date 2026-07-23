@@ -30,13 +30,13 @@ grep -Fq 'HIGH_RISK_UNRESOLVED' "${ULTRA_PROTOCOL}"
 grep -Fq 'MAX_PARALLEL = 10' "${ULTRA_PLUGIN}"
 grep -Fq 'AGENT_TIMEOUT_MS = 30 * 60 * 1000' "${ULTRA_PLUGIN}"
 grep -Fq 'ultra_review_task' "${ULTRA_PLUGIN}"
-grep -Fq 'reasoningEffort: "max"' "${SCRIPT_DIR}/run.sh"
-grep -Fq 'variant: "max"' "${SCRIPT_DIR}/run.sh"
+grep -Fq 'reasoningEffort: $effort' "${SCRIPT_DIR}/run.sh"
+grep -Fq 'medium: effort_variant($format; "medium")' "${SCRIPT_DIR}/run.sh"
 # Coordinator agent is now selectable: Sisyphus when oh-my-openagent installed,
 # else the built-in build agent. Ultra pipeline (review subagents / ultra_review_task
 # / finalize gates / session-level read-only perms) is unchanged — only the
 # coordinating agent type differs.
-grep -Fq 'opencode run --auto --agent "${COORD_AGENT}" --variant max' "${SCRIPT_DIR}/run.sh"
+grep -Fq 'opencode run --auto --agent "${COORD_AGENT}" --variant xhigh' "${SCRIPT_DIR}/run.sh"
 grep -Fq 'COORD_AGENT=build' "${SCRIPT_DIR}/run.sh"
 grep -Fq 'COORD_AGENT=sisyphus' "${SCRIPT_DIR}/run.sh"
 # run.sh builds these from ${OPENCODE_DIR} (= $ENGINE_DIR/opencode), so only the
@@ -90,17 +90,42 @@ env HOME="${config_smoke}/home" PATH="${config_smoke}/bin:${PATH}" \
   bash "${SCRIPT_DIR}/run.sh"
 jq -e --arg ultra "${ULTRA_PROTOCOL}" --arg runner "file://${ULTRA_PLUGIN}" '
   .model == "relay/gpt-5.6-sol" and
+  .provider.relay.models["gpt-5.6-sol"].variants.low.reasoningEffort == "low" and
+  .provider.relay.models["gpt-5.6-sol"].variants.medium.reasoningEffort == "medium" and
+  .provider.relay.models["gpt-5.6-sol"].variants.xhigh.reasoningEffort == "xhigh" and
   .provider.relay.models["gpt-5.6-sol"].variants.max.reasoningEffort == "max" and
-  .agent.build.variant == "max" and
-  .agent.general.variant == "max" and
-  .agent.explore.variant == "max" and
-  .agent.planner.variant == "max" and
+  (.provider.relay.models["gpt-5.6-sol"].variants | keys | sort) == ["low", "max", "medium", "xhigh"] and
+  .agent.build.variant == "xhigh" and
+  .agent.general.variant == "xhigh" and
+  .agent.explore.variant == "low" and
+  .agent.review.variant == "low" and
+  .agent.planner.variant == "xhigh" and
   (.instructions | index($ultra)) == null and
   (.agent.review.prompt | contains("leaf reviewer")) and
   (.plugin | index($runner)) != null
 ' "${config_smoke}/opencode.json" >/dev/null
 grep -Fq 'review-artifact-guard.ts' "${config_smoke}/opencode.json"
 grep -Fq "${ULTRA_PROTOCOL}" "${config_smoke}/prompt.md"
+
+# Anthropic uses adaptive thinking and maps the xhigh policy tier to its
+# strongest supported effort token, max.
+env HOME="${config_smoke}/home" PATH="${config_smoke}/bin:${PATH}" \
+  BOT_WORKDIR="${config_smoke}" REPO_DIR="${config_smoke}/repo" \
+  BOT_PROMPT_FILE="${config_smoke}/prompt.md" \
+  BOT_SYSTEM_PROMPT="${ENGINE_ROOT}/opencode/system-prompt.md" BOT_TASK=engage \
+  BOT_CAN_WRITE=0 BOT_REPO=example/repo \
+  CCHP_BOT_MODEL=relay/gpt-5.6-sol \
+  CCHP_BOT_PROVIDERS='{"relay":{"format":"anthropic","base_url":"https://example.invalid/v1","models":{"gpt-5.6-sol":{"context":500000,"output":128000}}}}' \
+  CAPTURE_CONFIG="${config_smoke}/anthropic-opencode.json" \
+  bash "${SCRIPT_DIR}/run.sh"
+jq -e '
+  .provider.relay.models["gpt-5.6-sol"].variants.low.effort == "low" and
+  .provider.relay.models["gpt-5.6-sol"].variants.medium.effort == "medium" and
+  .provider.relay.models["gpt-5.6-sol"].variants.xhigh.effort == "max" and
+  .provider.relay.models["gpt-5.6-sol"].variants.max.effort == "max" and
+  (.provider.relay.models["gpt-5.6-sol"].variants[] |
+    .thinking == {type: "adaptive", display: "summarized"})
+' "${config_smoke}/anthropic-opencode.json" >/dev/null
 
 env HOME="${config_smoke}/home" PATH="${config_smoke}/bin:${PATH}" \
   BOT_WORKDIR="${config_smoke}" REPO_DIR="${config_smoke}/repo" \
@@ -116,8 +141,9 @@ jq -e --arg ultra "${ULTRA_PROTOCOL}" '(.instructions | index($ultra)) == null' 
 
 # ── agent toolchain wiring: with fff / serena / oh-my-openagent / context-mode
 # "installed" (PATH stubs), assert they get wired into the synthesized config,
-# the coordinator becomes Sisyphus, every oh-my-openagent agent is pinned to the
-# main model + variant max, and context-mode is gated OFF on the untrusted
+# the coordinator becomes Sisyphus, every oh-my-openagent agent/category is pinned
+# to the main model with a capability-based variant, and context-mode is gated
+# OFF on the untrusted
 # pr_opened review path (fff/serena, being read-only, stay).
 tc="${tmp}/toolchain-smoke"
 mkdir -p "${tc}/home/.local/bin" "${tc}/repo" "${tc}/bin"
@@ -148,11 +174,23 @@ jq -e '
   (.plugin | index("oh-my-openagent@latest")) != null and
   .default_agent == "sisyphus"
 ' "${tc}/engage.json" >/dev/null
-# every oh-my-openagent agent + category pinned to the main model + variant max
+# Every oh-my-openagent agent/category is pinned to the main model. Read-only
+# specialists use low; oracle/metis/momus retain max; agents/categories that may
+# write use xhigh.
 jq -e '
+  . as $config |
   (.agents | length) == 11 and
-  (.agents | to_entries | all(.value == {model: "relay/gpt-5.6-sol", variant: "max"})) and
+  (.agents | to_entries | all(.value.model == "relay/gpt-5.6-sol")) and
+  (["librarian", "explore", "multimodal-looker"] |
+    all(.[]; $config.agents[.].variant == "low")) and
+  (["oracle", "metis", "momus"] |
+    all(.[]; $config.agents[.].variant == "max")) and
+  (["sisyphus", "hephaestus", "prometheus", "atlas", "sisyphus-junior"] |
+    all(.[]; $config.agents[.].variant == "xhigh")) and
   (.categories | length) == 7 and
+  (.categories | to_entries | all(.value.model == "relay/gpt-5.6-sol")) and
+  (["quick", "deep", "ultrabrain", "visual-engineering", "writing", "unspecified-low", "unspecified-high"] |
+    all(.[]; $config.categories[.].variant == "xhigh")) and
   (.disabled_mcps | index("websearch")) != null and
   .telemetry == false and .auto_update == false
 ' "${tc}/home/.config/opencode/oh-my-openagent.jsonc" >/dev/null
