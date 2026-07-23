@@ -87,7 +87,7 @@ jobs:
         run: echo "ref=${JWR##*@}" >> "$GITHUB_OUTPUT"
 
       - name: Checkout engine (pinned, trusted)
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           repository: CCH-HQ/cchp-automation
           ref: ${{ steps.engine.outputs.ref }}
