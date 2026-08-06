@@ -128,4 +128,26 @@ done
 [[ "$(stat -c '%a' "$test_root/work/ctx/see/api-key")" == "600" ]]
 [[ "$(<"$test_root/work/ctx/see/api-key")" == "see-sentinel" ]]
 [[ ! -e "$test_root/see-env.log" ]]
+
+second_work="$test_root/read-only-work"
+second_home="$test_root/read-only-home"
+mkdir -p "$second_work" "$second_home"
+: > "$second_work/prompt.md"
+PATH="$test_root/bin:/usr/bin:/bin" \
+HOME="$second_home" \
+BOT_WORKDIR="$second_work" \
+BOT_TASK=manual \
+BOT_CAN_WRITE=0 \
+BOT_TOKEN="token-sentinel" \
+GH_REPO="CCH-HQ/fixture" \
+BOT_DEFAULT_BRANCH="dev" \
+BOT_TARGET_BRANCH="dev" \
+REPO_DIR="$second_work/repo" \
+BOT_PROMPT_FILE="$second_work/prompt.md" \
+BOT_SKIP_SKILLS=1 \
+BOT_SKIP_SEE=1 \
+BOT_SKIP_ATARAXY=1 \
+BOT_SKIP_PR_INSPECT=1 \
+  bash "$ROOT/scripts/prepare-codex-env.sh"
+[[ ! -e "$second_home/bun-env.log" ]] || { echo 'read-only manual unexpectedly installed web deps' >&2; exit 1; }
 printf 'prepare-codex-env credential sanitization test passed\n'
