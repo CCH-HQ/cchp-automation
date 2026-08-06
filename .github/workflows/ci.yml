@@ -189,10 +189,12 @@ jobs:
         with:
           persist-credentials: false
 
-      # `run.yml` resolves the pinned engine ref from `github.workflow_ref`,
-      # which is understood by actionlint's context schema.
+      # `run.yml` uses the called workflow identity from the job context rather
+      # than the caller-associated github context.
       - name: Lint workflows
         uses: raven-actions/actionlint@3d39aea434753780c3b3d4a1a31c854b4dbf49d7 # v2.2.0
+        with:
+          flags: -ignore 'property "workflow_(repository|sha)" is not defined'
 
   zizmor:
     name: zizmor

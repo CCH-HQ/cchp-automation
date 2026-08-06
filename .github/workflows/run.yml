@@ -78,20 +78,14 @@ jobs:
           permission-actions: read
           permission-organization-projects: write
 
-      # The pinned engine code (this reusable workflow's own repo, at the ref the
-      # consumer pinned). Parse the ref from workflow_ref so @latest / @<sha>
-      # both resolve to the matching engine tree.
-      - name: Resolve engine ref
-        id: engine
-        env:
-          JWR: ${{ github.workflow_ref }}
-        run: echo "ref=${JWR##*@}" >> "$GITHUB_OUTPUT"
-
+      # The pinned engine code (this reusable workflow's own repo, at the exact
+      # commit GitHub resolved for @latest or @<sha>). The github context belongs
+      # to the caller, while job.workflow_* identifies the called workflow.
       - name: Checkout engine (pinned, trusted)
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
-          repository: CCH-HQ/cchp-automation
-          ref: ${{ steps.engine.outputs.ref }}
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
           path: .cchp-engine
           token: ${{ steps.base.outputs.token }}
           persist-credentials: false
