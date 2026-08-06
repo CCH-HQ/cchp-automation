@@ -19,7 +19,7 @@ failures=0
 for row in "${sources[@]}"; do
   IFS=$'\t' read -r id url timeout_seconds <<<"$row"
   printf '[skills] install %s from %s\n' "$id" "$url"
-  if ! timeout "$timeout_seconds" env -i \
+  if ! timeout --signal=TERM --kill-after=5s "$timeout_seconds" env -i \
     PATH="${PATH}" HOME="$install_home" TMPDIR="${TMPDIR:-/tmp}" LANG="${LANG:-C.UTF-8}" DO_NOT_TRACK=1 \
     bunx skills add "$url" --global --all -y </dev/null >/dev/null 2>&1; then
     printf '[skills][warn] source failed or timed out: %s\n' "$id" >&2

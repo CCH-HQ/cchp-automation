@@ -25,6 +25,10 @@ for forbidden in GH_TOKEN BOT_TOKEN CCHP_APP_PRIVATE_KEY CCHP_BOT_PROVIDER_KEYS 
   [[ -z "${!forbidden:-}" ]] || { printf 'bunx inherited %s\n' "$forbidden" >&2; exit 97; }
 done
 url="${3:?}"
+if [[ "$url" == *stubborn ]]; then
+  trap '' TERM
+  while true; do sleep 1; done
+fi
 if [[ "$url" == *failed ]]; then exit 23; fi
 if [[ "$url" == *empty ]]; then exit 0; fi
 if [[ "$url" == *symlink ]]; then
@@ -51,6 +55,22 @@ bash "$ROOT/scripts/install-skills.sh"
 
 [[ -f "$test_root/target/live/SKILL.md" ]] || { echo 'live skill missing' >&2; exit 1; }
 [[ -f "$test_root/target/fallback/SKILL.md" ]] || { echo 'fallback skill missing' >&2; exit 1; }
+
+cat > "$test_root/stubborn-manifest.json" <<'JSON'
+{"schemaVersion":1,"sources":[{"id":"stubborn","url":"https://github.com/example/stubborn","timeoutSeconds":1}]}
+JSON
+rm -rf -- "$test_root/target" "$test_root/work/skills-install-home"
+if ! /usr/bin/timeout --signal=TERM --kill-after=1s 12s env \
+  PATH="$test_root/bin:/usr/bin:/bin" \
+  BOT_WORKDIR="$test_root/work" \
+  CCHP_SKILLS_MANIFEST="$test_root/stubborn-manifest.json" \
+  CCHP_SKILLS_BACKUP="$test_root/backup" \
+  CCHP_SKILLS_TARGET="$test_root/target" \
+  bash "$ROOT/scripts/install-skills.sh"; then
+  echo 'stubborn skills installer exceeded its hard timeout' >&2
+  exit 1
+fi
+[[ -f "$test_root/target/fallback/SKILL.md" ]] || { echo 'stubborn install did not activate backup' >&2; exit 1; }
 
 printf '%s\n' 'tampered' >> "$test_root/backup/skills/fallback/SKILL.md"
 rm -rf -- "$test_root/target/fallback" "$test_root/work/skills-install-home"

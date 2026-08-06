@@ -23,7 +23,7 @@ cd "$stage"
 for row in "${sources[@]}"; do
   IFS=$'\t' read -r id url timeout_seconds <<<"$row"
   printf '[skills-backup] install %s from %s\n' "$id" "$url"
-  if ! timeout "$timeout_seconds" env DO_NOT_TRACK=1 bunx skills add "$url" --all -y </dev/null; then
+  if ! timeout --signal=TERM --kill-after=5s "$timeout_seconds" env DO_NOT_TRACK=1 bunx skills add "$url" --all -y </dev/null; then
     printf '[skills-backup][error] source failed or timed out: %s; preserving the previous complete backup\n' "$id" >&2
     exit 1
   fi
