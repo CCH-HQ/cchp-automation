@@ -45,9 +45,11 @@ search_files() {
       --glob '!scripts/codex-removal-gate.test.sh' \
       --glob '!scripts/codex-removal-gate.sh' || true
   else
-    grep -RIlZE "$fallback_pattern" \
+    grep -RIlZiE "$fallback_pattern" \
       --exclude-dir=.git \
       --exclude-dir=reference-library \
+      --exclude='codex-removal-gate.sh' \
+      --exclude='codex-removal-gate.test.sh' \
       "$@" || true
   fi
 }
@@ -158,10 +160,11 @@ for deleted in \
     exit 1
   fi
 done
-if grep -RInE 'BOT_REVIEW_FINALIZER|CCHP_REVIEW_FINALIZER' .github scripts src codex \
+if grep -RInE \
   --exclude-dir=.git \
   --exclude='codex-removal-gate.sh' \
-  --exclude='codex-removal-gate.test.sh'; then
+  --exclude='codex-removal-gate.test.sh' \
+  'BOT_REVIEW_FINALIZER|CCHP_REVIEW_FINALIZER' .github scripts src codex; then
   printf '[codex-removal][error] legacy shell finalizer wiring remains\n' >&2
   exit 1
 fi

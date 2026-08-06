@@ -94,7 +94,7 @@ mkdir -p "$hidden_escaped_package/.github/actions/live"
 printf '%s\n' '{"scripts":{"legacy":"openco\u0064e run"}}' \
   >"$hidden_escaped_package/.github/actions/live/package.json"
 expect_fail "$hidden_escaped_package"
-if ! rg -qF '.github/actions/live/package.json:' "$hidden_escaped_package/gate.out"; then
+if ! grep -qF '.github/actions/live/package.json:' "$hidden_escaped_package/gate.out"; then
   printf '[codex-removal-gate-test][error] hidden escaped package was not reported\n' >&2
   exit 1
 fi
@@ -103,7 +103,7 @@ hidden_lockfile="$(new_fixture hidden-lockfile)"
 mkdir -p "$hidden_lockfile/.cache"
 printf 'opencode@1.0.0\n' >"$hidden_lockfile/.cache/pnpm-lock.yaml"
 expect_fail "$hidden_lockfile"
-if ! rg -qF '.cache/pnpm-lock.yaml:' "$hidden_lockfile/gate.out"; then
+if ! grep -qF '.cache/pnpm-lock.yaml:' "$hidden_lockfile/gate.out"; then
   printf '[codex-removal-gate-test][error] hidden lockfile was not reported\n' >&2
   exit 1
 fi
