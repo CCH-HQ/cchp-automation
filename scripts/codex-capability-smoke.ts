@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 import { mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs"
-import { join } from "node:path"
+import { join, resolve } from "node:path"
 import { tmpdir } from "node:os"
 import { CodexAppServer, type JsonRpcNotification } from "../src/codex/app-server"
 import { assertPinnedVersion, probeCapabilities } from "../src/codex/cli"
@@ -16,6 +16,10 @@ type Json = Record<string, unknown>
 export interface ToolRef {
   name: string
   namespace?: string
+}
+
+export function capabilityEngineRoot(scriptDirectory = import.meta.dir): string {
+  return resolve(scriptDirectory, "..")
 }
 
 export function waitAgentArguments(
@@ -196,6 +200,7 @@ function assertFixtureEnvironment(rows: Json[], fixture: "fff" | "serena", repo:
 async function main(): Promise<void> {
   const expected = process.env.CCHP_CODEX_VERSION ?? "0.146.0"
   const selectedMode = collaborationMode()
+  const engineRoot = capabilityEngineRoot()
   const capability = probeCapabilities(process.env.CODEX_BIN ?? "codex")
   if (selectedMode === "native-v2") {
     assertPinnedVersion(capability.version, expected)
@@ -437,7 +442,7 @@ async function main(): Promise<void> {
   })
   const prepared = prepareCodexHome({
     botWorkdir: root,
-    engineDir: process.cwd(),
+    engineDir: engineRoot,
     repoDir: repo,
     bridgeBaseUrl: bridge.baseUrl,
     bridgeTokenEnv: bridgeEnv,
@@ -445,8 +450,8 @@ async function main(): Promise<void> {
     sandboxMode: "read-only",
     collaborationMode: selectedMode,
     baseInstructions: "You are the CCHP capability smoke root coordinator.",
-    fffCommand: join(process.cwd(), "scripts", "fixtures", "readonly-mcp-fixture.ts"),
-    serenaCommand: join(process.cwd(), "scripts", "fixtures", "readonly-mcp-fixture.ts"),
+    fffCommand: join(engineRoot, "scripts", "fixtures", "readonly-mcp-fixture.ts"),
+    serenaCommand: join(engineRoot, "scripts", "fixtures", "readonly-mcp-fixture.ts"),
   })
   const notifications: JsonRpcNotification[] = []
   const appServerStderr: string[] = []

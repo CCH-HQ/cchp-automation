@@ -1,5 +1,9 @@
 import { expect, test } from "bun:test"
-import { collaborationLifecycleObserved, customToolCall, extractToolRefs, isChildProviderRequest, isCollaborationToolName, parentObservedChildOutput, parentObservedNativeChildOutput, toolCall, waitAgentArguments } from "./codex-capability-smoke"
+import { capabilityEngineRoot, collaborationLifecycleObserved, customToolCall, extractToolRefs, isChildProviderRequest, isCollaborationToolName, parentObservedChildOutput, parentObservedNativeChildOutput, toolCall, waitAgentArguments } from "./codex-capability-smoke"
+
+test("resolves the engine root from the smoke script instead of the caller working directory", () => {
+  expect(capabilityEngineRoot("/opt/cchp-engine/scripts")).toBe("/opt/cchp-engine")
+})
 
 test("maps wait_agent arguments to the selected collaboration ABI", () => {
   expect(waitAgentArguments("native-v2", "/root/child", 2_000)).toEqual({ timeout_ms: 2_000 })

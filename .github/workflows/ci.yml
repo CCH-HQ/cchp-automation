@@ -84,11 +84,12 @@ jobs:
         run: bash scripts/install-codex.sh
 
       - name: Capability, strict-config, collaboration and credential smoke
+        working-directory: ${{ runner.temp }}
         env:
           CCHP_CODEX_VERSION: "0.146.0"
           CCHP_ARTIFACT_RUN_ID: ${{ github.run_id }}-${{ github.run_attempt }}
           CCHP_SMOKE_ARTIFACT_DIR: artifacts/codex-capability/${{ github.run_id }}-${{ github.run_attempt }}
-        run: bash scripts/codex-capability-smoke.sh
+        run: bash ${{ github.workspace }}/scripts/codex-capability-smoke.sh
 
       - name: Validate Codex capability evidence ownership
         id: validate-capability-evidence
