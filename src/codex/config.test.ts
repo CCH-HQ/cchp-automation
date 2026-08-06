@@ -28,6 +28,7 @@ test("writes an isolated strict Codex config with loopback providers and no call
   const result = prepareCodexHome({
     botWorkdir,
     engineDir: "/opt/cchp-engine",
+    bunCommand: "/opt/cchp/bin/bun",
     repoDir: `${botWorkdir}/repo`,
     bridgeBaseUrl: "http://127.0.0.1:43123",
     bridgeTokenEnv: "CCHP_CODEX_BRIDGE_TOKEN",
@@ -66,6 +67,10 @@ test("writes an isolated strict Codex config with loopback providers and no call
     config.indexOf("[mcp_servers.cchp_github]"),
     config.indexOf("[mcp_servers.fff]") === -1 ? config.length : config.indexOf("[mcp_servers.fff]"),
   )
+  expect(githubMcp).toContain('command = "/opt/cchp/bin/bun"')
+  for (const name of ["PATH", "HOME", "LANG", "TMPDIR"]) {
+    expect(githubMcp).toContain(`"${name}"`)
+  }
   expect(githubMcp).not.toContain("CCHP_CODEX_BRIDGE_TOKEN")
   expect(reviewer).toContain(`model = "${providerSet.reviewModelKey}"`)
   expect(reviewer).toContain('model_provider = "cchp_review_')
@@ -97,6 +102,7 @@ test("writes an isolated strict Codex config with loopback providers and no call
   expect(config).toContain('[mcp_servers.fff]\ncommand = "fff-mcp"\nenv_vars =')
   expect(config).not.toContain('args = ["--stdio"]')
   expect(config).toContain('[mcp_servers.see_upload]')
+  expect(config).toContain('[mcp_servers.see_upload]\ncommand = "/opt/cchp/bin/bun"')
   expect(config).toContain('enabled_tools = ["upload_file"]')
   expect(config).toContain(`SEE_API_KEY_FILE = "${join(botWorkdir, "ctx", "see", "api-key")}"`)
   expect(config).not.toContain("SEE_API_KEY =")
@@ -106,7 +112,7 @@ test("writes an isolated strict Codex config with loopback providers and no call
     expect(role).toContain('enabled_tools = ["find_files", "grep", "multi_grep"]')
     expect(role).toContain('[mcp_servers.serena]\ncommand = "serena"')
     expect(role).toContain('enabled_tools = ["search_for_pattern", "get_symbols_overview", "find_symbol", "find_referencing_symbols", "find_implementations", "find_declaration", "get_diagnostics_for_file", "get_current_config", "initial_instructions"]')
-    expect(role).toContain('[mcp_servers.cchp_github]\ncommand = "bun"')
+    expect(role).toContain('[mcp_servers.cchp_github]\ncommand = "/opt/cchp/bin/bun"')
     expect(role).toContain('enabled_tools = ["get_pr_diff"')
     for (const forbidden of [
       "write_review_artifact", "post_comment", "merge_pr", "create_pull_request",
@@ -147,6 +153,7 @@ test("explicit fallback disables native collaboration and registers exactly one 
   const result = prepareCodexHome({
     botWorkdir,
     engineDir: "/opt/cchp-engine",
+    bunCommand: "/opt/cchp/bin/bun",
     repoDir: `${botWorkdir}/repo`,
     bridgeBaseUrl: "http://127.0.0.1:43123",
     bridgeTokenEnv: "CCHP_CODEX_BRIDGE_TOKEN",
@@ -160,7 +167,11 @@ test("explicit fallback disables native collaboration and registers exactly one 
   expect(config.match(/\[mcp_servers\.agents\]/g)).toHaveLength(1)
   expect(config).not.toContain("max_concurrent_threads_per_session")
   const agentsMcp = config.slice(config.indexOf("[mcp_servers.agents]"))
+  expect(agentsMcp).toContain('command = "/opt/cchp/bin/bun"')
   expect(agentsMcp).toContain('"BOT_TASK"')
+  for (const name of ["PATH", "HOME", "LANG", "TMPDIR"]) {
+    expect(agentsMcp).toContain(`"${name}"`)
+  }
 })
 
 test("non-reasoning small models do not advertise or force reasoning", () => {

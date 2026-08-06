@@ -1,5 +1,5 @@
 import { mkdirSync, writeFileSync } from "node:fs"
-import { join } from "node:path"
+import { isAbsolute, join } from "node:path"
 import type { ProviderSet } from "./providers"
 
 export type CodexSandboxMode = "read-only" | "workspace-write"
@@ -8,6 +8,7 @@ export type CollaborationMode = "native-v2" | "explicit-exec"
 export interface PrepareCodexHomeInput {
   botWorkdir: string
   engineDir: string
+  bunCommand?: string
   repoDir: string
   bridgeBaseUrl: string
   bridgeTokenEnv: string
@@ -58,9 +59,16 @@ export const READ_ONLY_SERENA_TOOLS = [
   "initial_instructions",
 ] as const
 
+const BUN_MCP_RUNTIME_ENV = ["PATH", "HOME", "LANG", "TMPDIR"] as const
 
 function toml(value: string): string {
   return JSON.stringify(value)
+}
+
+function bunMcpCommand(input: PrepareCodexHomeInput): string {
+  const command = input.bunCommand ?? process.execPath
+  if (!isAbsolute(command)) throw new Error("Bun MCP command must be an absolute path")
+  return command
 }
 
 function provider(input: PrepareCodexHomeInput, providerId: string) {
@@ -163,11 +171,12 @@ function modelInfo(input: {
 function githubMcpConfig(input: PrepareCodexHomeInput, enabledTools?: readonly string[]): string[] {
   return [
     "[mcp_servers.cchp_github]",
-    'command = "bun"',
+    `command = ${toml(bunMcpCommand(input))}`,
     `args = [${toml(join(input.engineDir, "src", "mcp", "server.ts"))}]`,
     `cwd = ${toml(input.engineDir)}`,
     "env_vars = [" +
       [
+        ...BUN_MCP_RUNTIME_ENV,
         "BOT_REPO",
         "BOT_TASK",
         "BOT_WORKDIR",
@@ -350,11 +359,12 @@ export function prepareCodexHome(input: PrepareCodexHomeInput): PreparedCodexHom
   if (collaborationMode === "explicit-exec") {
     lines.push(
       "[mcp_servers.agents]",
-      'command = "bun"',
+      `command = ${toml(bunMcpCommand(input))}`,
       `args = [${toml(input.explicitChildServer ?? join(input.engineDir, "src", "codex", "agents-mcp-server.ts"))}]`,
       `cwd = ${toml(input.engineDir)}`,
       "env_vars = [" +
         [
+          ...BUN_MCP_RUNTIME_ENV,
           "BOT_WORKDIR",
           "BOT_TASK",
           "BOT_RUN_ID",
@@ -380,7 +390,7 @@ export function prepareCodexHome(input: PrepareCodexHomeInput): PreparedCodexHom
   if (input.seeServer && input.seeCliBin) {
     lines.push(
       "[mcp_servers.see_upload]",
-      'command = "bun"',
+      `command = ${toml(bunMcpCommand(input))}`,
       `args = [${toml(input.seeServer)}]`,
       `cwd = ${toml(input.engineDir)}`,
       `env = { SEE_API_KEY_FILE = ${toml(join(input.botWorkdir, "ctx", "see", "api-key"))}, SEE_CLI_BIN = ${toml(input.seeCliBin)} }`,
