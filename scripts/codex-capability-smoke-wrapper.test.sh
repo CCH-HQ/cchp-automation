@@ -6,7 +6,10 @@ fixture_root="$(mktemp -d "${TMPDIR:-/tmp}/cchp-capability-wrapper.XXXXXX")"
 trap 'rm -rf "$fixture_root"' EXIT
 script_root="$fixture_root/repo"
 artifact_dir="$script_root/artifacts/codex-capability/run-42-2"
+real_node_bin="$(command -v node)"
+[[ -x "$real_node_bin" ]]
 mkdir -p "$fixture_root/bin" "$script_root/scripts" "$(dirname "$artifact_dir")"
+ln -s "$real_node_bin" "$fixture_root/bin/node"
 cp "$repo_root/scripts/codex-capability-smoke.sh" "$script_root/scripts/"
 
 cat >"$fixture_root/bin/bun" <<'EOF'

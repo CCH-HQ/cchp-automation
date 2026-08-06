@@ -187,6 +187,14 @@ if (platform.name !== "@openai/codex" || platform.version !== platformVersion) {
 }
 NODE
 
+bwrap_bin="$(find "$platform_dir/vendor" -type f -path '*/codex-resources/bwrap' -print -quit)"
+[[ -n "$bwrap_bin" && -x "$bwrap_bin" ]] || {
+  printf '[codex-install] bundled bubblewrap is missing from the verified platform package\n' >&2
+  exit 2
+}
+bwrap_target="$(realpath --relative-to="$stage/bin" "$bwrap_bin")"
+ln -s "$bwrap_target" "$stage/bin/bwrap"
+
 chmod 0755 "$wrapper_dir/bin/codex.js"
 ln -s "../lib/node_modules/@openai/codex/bin/codex.js" "$stage/bin/codex"
 rm -rf -- "$PREFIX"
@@ -195,6 +203,8 @@ stage=""
 
 codex_bin="$PREFIX/bin/codex"
 [[ -x "$codex_bin" ]] || { printf '[codex-install] installed Codex binary is missing: %s\n' "$codex_bin" >&2; exit 2; }
+bwrap_bin="$PREFIX/bin/bwrap"
+[[ -x "$bwrap_bin" ]] || { printf '[codex-install] installed bundled bubblewrap is missing: %s\n' "$bwrap_bin" >&2; exit 2; }
 version_output="$("$codex_bin" --version)"
 [[ "$version_output" == "codex-cli ${CODEX_VERSION}" ]] || {
   printf '[codex-install] version mismatch: %s\n' "$version_output" >&2
@@ -203,4 +213,7 @@ version_output="$("$codex_bin" --version)"
 if [[ -n "${GITHUB_ENV:-}" ]]; then
   printf 'CODEX_BIN=%s\n' "$codex_bin" >>"$GITHUB_ENV"
 fi
-printf '[codex-install] %s (%s)\n' "$version_output" "$codex_bin"
+if [[ -n "${GITHUB_PATH:-}" ]]; then
+  printf '%s\n' "$PREFIX/bin" >>"$GITHUB_PATH"
+fi
+printf '[codex-install] %s (%s) bundled_bwrap=%s\n' "$version_output" "$codex_bin" "$bwrap_bin"

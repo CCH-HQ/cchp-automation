@@ -7,7 +7,7 @@ trap 'rm -rf "$fixture_root"' EXIT
 
 fake_bin="$fixture_root/bin"
 fixtures="$fixture_root/fixtures"
-mkdir -p "$fake_bin" "$fixtures/wrapper/package/bin" "$fixtures/platform/package/bin" "$fixtures/platform-arm64/package/bin" "$fixture_root/home" "$fixture_root/work"
+mkdir -p "$fake_bin" "$fixtures/wrapper/package/bin" "$fixtures/platform/package/bin" "$fixtures/platform/package/vendor/x86_64-unknown-linux-musl/codex-resources" "$fixtures/platform-arm64/package/bin" "$fixtures/platform-arm64/package/vendor/aarch64-unknown-linux-musl/codex-resources" "$fixture_root/home" "$fixture_root/work"
 real_node_bin="$(command -v node)"
 [[ -x "$real_node_bin" ]]
 
@@ -37,6 +37,9 @@ cat >"$fixtures/platform-arm64/package/package.json" <<'EOF'
 EOF
 printf 'verified native payload\n' >"$fixtures/platform/package/bin/codex"
 printf 'verified arm native payload\n' >"$fixtures/platform-arm64/package/bin/codex"
+printf '#!/usr/bin/env bash\nexit 0\n' >"$fixtures/platform/package/vendor/x86_64-unknown-linux-musl/codex-resources/bwrap"
+printf '#!/usr/bin/env bash\nexit 0\n' >"$fixtures/platform-arm64/package/vendor/aarch64-unknown-linux-musl/codex-resources/bwrap"
+chmod +x "$fixtures/platform/package/vendor/x86_64-unknown-linux-musl/codex-resources/bwrap" "$fixtures/platform-arm64/package/vendor/aarch64-unknown-linux-musl/codex-resources/bwrap"
 tar -czf "$fixtures/wrapper.tgz" -C "$fixtures/wrapper" package
 tar -czf "$fixtures/platform.tgz" -C "$fixtures/platform" package
 tar -czf "$fixtures/platform-arm64.tgz" -C "$fixtures/platform-arm64" package
@@ -240,6 +243,7 @@ run_install() {
     HOME="$fixture_root/home" \
     BOT_WORKDIR="$fixture_root/work" \
     GITHUB_ENV="$fixture_root/github-env" \
+    GITHUB_PATH="$fixture_root/github-path" \
     PATH="$fake_bin:/usr/bin:/bin" \
     FAKE_FIXTURES="$fixtures" \
     FAKE_CURL_TRACE="$fixture_root/curl.trace" \
@@ -261,8 +265,10 @@ grep -F '[codex-install] package=@openai/codex version=0.146.0 source_tag=rust-v
 grep -F '[codex-install] target=linux-x64 platform_package=@openai/codex@0.146.0-linux-x64' "$success_log" >/dev/null
 grep -F "[codex-install] codex-cli 0.146.0 ($codex_bin)" "$success_log" >/dev/null
 grep -Fx "CODEX_BIN=$codex_bin" "$fixture_root/github-env" >/dev/null
+grep -Fx "$fixture_root/work/codex-install/npm/bin" "$fixture_root/github-path" >/dev/null
 [[ "$(wc -l <"$fixture_root/curl.trace")" -eq 6 ]]
 [[ -x "$codex_bin" ]]
+[[ -x "$fixture_root/work/codex-install/npm/bin/bwrap" ]]
 [[ -f "$fixture_root/work/codex-install/npm/lib/node_modules/@openai/codex-linux-x64/package.json" ]]
 [[ -s "$fixture_root/installed.marker" ]]
 [[ ! -e "$fixture_root/poison.marker" ]]
