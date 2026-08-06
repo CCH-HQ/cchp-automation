@@ -14,6 +14,43 @@ coordinator='sis''yphus'
 legacy_tool='ultra_''review_task'
 legacy_noop='CCHP_BOT_OPEN''CODE_VERSION'
 pattern="${engine}|${plugin}|\\b${plugin_short}\\b|${coordinator}|${legacy_tool}|${legacy_noop}"
+fallback_pattern="${engine}|${plugin}|(^|[^[:alnum:]_])${plugin_short}([^[:alnum:]_]|$)|${coordinator}|${legacy_tool}|${legacy_noop}"
+if command -v rg >/dev/null 2>&1; then
+  has_rg=1
+else
+  has_rg=0
+fi
+
+search_matches() {
+  local file="$1"
+  if [[ "$has_rg" == "1" ]]; then
+    rg -n -i "$pattern" "$file" || true
+  else
+    grep -nEi "$fallback_pattern" "$file" || true
+  fi
+}
+
+search_stdin() {
+  if [[ "$has_rg" == "1" ]]; then
+    rg -n -i "$pattern" - || true
+  else
+    grep -nEi "$fallback_pattern" || true
+  fi
+}
+
+search_files() {
+  if [[ "$has_rg" == "1" ]]; then
+    rg -l -0 -i "$pattern" "$@" \
+      --glob '!codex/review/reference-library/**' \
+      --glob '!scripts/codex-removal-gate.test.sh' \
+      --glob '!scripts/codex-removal-gate.sh' || true
+  else
+    grep -RIlZE "$fallback_pattern" \
+      --exclude-dir=.git \
+      --exclude-dir=reference-library \
+      "$@" || true
+  fi
+}
 
 # Live production surfaces. The migration record is deliberately not in this
 # list: it is historical provenance, not an instruction or runtime surface.
@@ -21,22 +58,30 @@ search_roots=(.github scripts src codex README.md docs package.json bun.lock)
 [[ -e tests ]] && search_roots+=(tests)
 config_files=()
 while IFS= read -r -d '' file; do config_files+=("$file"); done < <(
-  rg --files --hidden -0 \
-    --glob '!.git/**' \
-    -g 'package.json' \
-    -g 'package-lock.json' \
-    -g 'npm-shrinkwrap.json' \
-    -g 'pnpm-lock.yaml' \
-    -g 'yarn.lock' \
-    -g 'bun.lock' \
-    -g '!codex/review/reference-library/**' || true
+  if [[ "$has_rg" == "1" ]]; then
+    rg --files --hidden -0 \
+      --glob '!.git/**' \
+      -g 'package.json' \
+      -g 'package-lock.json' \
+      -g 'npm-shrinkwrap.json' \
+      -g 'pnpm-lock.yaml' \
+      -g 'yarn.lock' \
+      -g 'bun.lock' \
+      -g '!codex/review/reference-library/**' || true
+  else
+    find . -type f \
+      \( -name package.json -o -name package-lock.json -o -name npm-shrinkwrap.json -o -name pnpm-lock.yaml -o -name yarn.lock -o -name bun.lock \) \
+      ! -path './.git/*' \
+      ! -path './codex/review/reference-library/*' \
+      -print0
+  fi
 )
 search_roots+=("${config_files[@]}")
 
 caller_contract='src/codex/caller-contract.ts'
 if [[ -f "$caller_contract" ]]; then
-  noop_count="$(rg -o -F "$legacy_noop" "$caller_contract" | wc -l | tr -d '[:space:]')"
-  declaration_count="$(rg -n "^[[:space:]]*\"${legacy_noop}\",[[:space:]]*$" "$caller_contract" | wc -l | tr -d '[:space:]')"
+  noop_count="$(grep -oF "$legacy_noop" "$caller_contract" | wc -l | tr -d '[:space:]')"
+  declaration_count="$(grep -nE "^[[:space:]]*\"${legacy_noop}\",[[:space:]]*$" "$caller_contract" | wc -l | tr -d '[:space:]')"
   if [[ "$noop_count" != "1" || "$declaration_count" != "1" ]]; then
     printf '[codex-removal][error] ignored legacy caller variable must appear exactly once in CALLER_VARIABLES\n' >&2
     exit 1
@@ -53,26 +98,23 @@ while IFS= read -r -d '' file; do
   # the declaration file itself.
   case "$file" in
     README.md)
-      matches="$(sed '/^- `'"$legacy_noop"'` is retained as an ignored legacy no-op so existing$/s/'"$legacy_noop"'//' "$file" | rg -n -i "$pattern" - || true)"
+      matches="$(sed '/^- `'"$legacy_noop"'` is retained as an ignored legacy no-op so existing$/s/'"$legacy_noop"'//' "$file" | search_stdin)"
       ;;
     src/codex/caller-contract.ts)
-      matches="$(sed "/^[[:space:]]*\"${legacy_noop}\",[[:space:]]*$/s/${legacy_noop}//" "$file" | rg -n -i "$pattern" - || true)"
+      matches="$(sed "/^[[:space:]]*\"${legacy_noop}\",[[:space:]]*$/s/${legacy_noop}//" "$file" | search_stdin)"
       ;;
     *.test.ts)
-      matches="$(sed "s/${legacy_noop}//g" "$file" | rg -n -i "$pattern" - || true)"
+      matches="$(sed "s/${legacy_noop}//g" "$file" | search_stdin)"
       ;;
     *)
-      matches="$(rg -n -i "$pattern" "$file" || true)"
+      matches="$(search_matches "$file")"
       ;;
   esac
   if [[ -n "$matches" ]]; then
     while IFS= read -r match; do printf '%s:%s\n' "$file" "$match" >&2; done <<< "$matches"
     found=1
   fi
-done < <(rg -l -0 -i "$pattern" "${search_roots[@]}" \
-  --glob '!codex/review/reference-library/**' \
-  --glob '!scripts/codex-removal-gate.test.sh' \
-  --glob '!scripts/codex-removal-gate.sh' || true)
+done < <(search_files "${search_roots[@]}")
 
 for file in "${config_files[@]}"; do
   case "${file##*/}" in
@@ -91,7 +133,7 @@ NODE
         found=1
         continue
       fi
-      decoded_matches="$(printf '%s' "$decoded" | rg -n -i "$pattern" - || true)"
+      decoded_matches="$(printf '%s' "$decoded" | search_stdin)"
       if [[ -n "$decoded_matches" ]]; then
         printf '%s:%s\n' "$file" "$decoded_matches" >&2
         found=1
@@ -116,9 +158,10 @@ for deleted in \
     exit 1
   fi
 done
-if rg -n 'BOT_REVIEW_FINALIZER|CCHP_REVIEW_FINALIZER' .github scripts src codex \
-  --glob '!scripts/codex-removal-gate.sh' \
-  --glob '!scripts/codex-removal-gate.test.sh'; then
+if grep -RInE 'BOT_REVIEW_FINALIZER|CCHP_REVIEW_FINALIZER' .github scripts src codex \
+  --exclude-dir=.git \
+  --exclude='codex-removal-gate.sh' \
+  --exclude='codex-removal-gate.test.sh'; then
   printf '[codex-removal][error] legacy shell finalizer wiring remains\n' >&2
   exit 1
 fi
