@@ -57,6 +57,8 @@ export interface CommentResult {
   url: string
 }
 
+export const PR_TITLE_NOTE = "Updated the PR title to match the repository's Conventional Commit format."
+
 /** `pr-comment`: post a short one-line top-level comment (≤4096). `gh pr comment
  *  --body` → `issues.createComment`. Multi-line bodies go through `commentFile`. */
 export async function postComment(
@@ -74,6 +76,25 @@ export async function postComment(
     issue_number: issueNumber,
     body: comment,
   })
+  return { id: data.id, url: data.html_url }
+}
+
+/** The only pre-finalization comment allowed for `pr_opened`: a fixed,
+ * server-owned note after the current PR title was successfully normalized. */
+export async function postPrTitleNote(
+  octokit: GitHubClient,
+  repo: string,
+  prNumber: number,
+): Promise<CommentResult> {
+  requireNumber(prNumber)
+  const { owner, name } = splitRepo(repo)
+  const { data } = await octokit.rest.issues.createComment({
+    owner,
+    repo: name,
+    issue_number: prNumber,
+    body: PR_TITLE_NOTE,
+    _cchp_broker_purpose: "pr_opened_title_note",
+  } as never)
   return { id: data.id, url: data.html_url }
 }
 
@@ -108,12 +129,14 @@ export async function closePrOrIssue(
   repo: string,
   number: number,
   reason: string,
+  options: { brokerPurpose?: "pr_opened_triage_close" } = {},
 ): Promise<void> {
   requireNumber(number)
   requireText(reason, 512, "reason")
   const { owner, name } = splitRepo(repo)
-  await octokit.rest.issues.createComment({ owner, repo: name, issue_number: number, body: reason })
-  await octokit.rest.issues.update({ owner, repo: name, issue_number: number, state: "closed" })
+  const internal = options.brokerPurpose ? { _cchp_broker_purpose: options.brokerPurpose } : {}
+  await octokit.rest.issues.createComment({ owner, repo: name, issue_number: number, body: reason, ...internal } as never)
+  await octokit.rest.issues.update({ owner, repo: name, issue_number: number, state: "closed", ...internal } as never)
 }
 
 // review-meta.sh `pr-lock` reasons. The script's vocabulary is the gh/GraphQL

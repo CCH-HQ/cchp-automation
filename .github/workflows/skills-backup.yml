@@ -3,14 +3,12 @@
 # Agent Skills run at LATEST at Run time; they are deliberately unpinned. This
 # scheduled maintenance workflow keeps an Engine-side Backup mirror so a Run never
 # hard-fails when a Skills source is unreachable — on source failure the Run warns,
-# uses this Backup, and reports degraded status (see scripts/run.sh consumption).
+# uses this Backup, and reports degraded status (see scripts/install-skills.sh consumption).
 #
 # What it does each week:
-#   1. Discover the SAME skill sources the bot installs at runtime — read straight
-#      from scripts/prepare-env.sh (single source of truth) so the Backup can never
-#      drift from what a Run actually loads.
+#   1. Read the engine-neutral skills/manifest.json shared by both runtime paths.
 #   2. Install them with the `skills` CLI (`bunx skills add <src> --all`, the same
-#      tool prepare-env.sh uses, minus --global so the tree lands in the workspace)
+#      tool the shared runtime installer uses, minus --global so the tree lands in the workspace)
 #      into an isolated staging dir. This doubles as the discovery / frontmatter /
 #      install smoke.
 #   3. Mirror the installed SKILL trees into skills-backup/skills/ and record
@@ -61,130 +59,7 @@ jobs:
           no-cache: true
 
       - name: Refresh skills backup
-        run: |
-          set -euo pipefail
-
-          ROOT="$PWD"
-          STAGE="${RUNNER_TEMP:-/tmp}/skills-stage"
-          rm -rf "$STAGE"
-          mkdir -p "$STAGE"
-
-          # ── 1. Discover sources from the runtime installer (single SoT) ───────
-          # Pull every https://github.com/... URL out of the SKILL_SOURCES=( ... )
-          # array in scripts/prepare-env.sh, ignoring trailing shell comments.
-          mapfile -t SOURCES < <(
-            sed -n '/SKILL_SOURCES=(/,/^)/p' scripts/prepare-env.sh \
-              | grep -oE 'https://github\.com/[^"[:space:]]+'
-          )
-          if [ "${#SOURCES[@]}" -eq 0 ]; then
-            echo "::error::no SKILL_SOURCES found in scripts/prepare-env.sh"
-            exit 1
-          fi
-          printf 'discovered %d skill source(s)\n' "${#SOURCES[@]}"
-
-          # ── 2. Install (non-global) into staging + resolve provenance ─────────
-          FETCHED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          INSTALL_FAILS=0
-          : > "$STAGE/sources.ndjson"
-
-          cd "$STAGE"
-          for url in "${SOURCES[@]}"; do
-            echo "→ skills add ${url}"
-            # </dev/null: non-interactive (no tty on a runner); timeout: one bad
-            # source can't wedge the job. Failures are recorded, not fatal.
-            if ! timeout 300 bunx skills add "${url}" --all </dev/null; then
-              echo "::warning::skills add failed/timed out: ${url} (continuing)"
-              INSTALL_FAILS=$((INSTALL_FAILS + 1))
-              continue
-            fi
-
-            # Parse owner/repo + ref out of the source URL. Bare repo URLs have no
-            # /tree/<ref>/ segment → resolve HEAD (default branch).
-            path="${url#https://github.com/}"
-            owner_repo="$(printf '%s' "$path" | cut -d/ -f1-2)"
-            if printf '%s' "$path" | grep -q '/tree/'; then
-              ref="$(printf '%s' "$path" | sed -E 's#^[^/]+/[^/]+/tree/([^/]+).*#\1#')"
-            else
-              ref="HEAD"
-            fi
-            commit="$(git ls-remote "https://github.com/${owner_repo}.git" "${ref}" 2>/dev/null | head -n1 | cut -f1 || true)"
-            if [ -z "${commit}" ]; then
-              commit="$(git ls-remote "https://github.com/${owner_repo}.git" HEAD 2>/dev/null | head -n1 | cut -f1 || true)"
-            fi
-
-            jq -cn \
-              --arg url "$url" --arg repo "$owner_repo" --arg ref "$ref" \
-              --arg commit "$commit" --arg fetchedAt "$FETCHED_AT" \
-              '{url:$url, repo:$repo, ref:$ref, commit:($commit // ""), fetchedAt:$fetchedAt}' \
-              >> "$STAGE/sources.ndjson"
-          done
-
-          # The `skills` CLI writes .agents/skills/ + skills-lock.json in the cwd
-          # (staging). No lock file ⇒ every install failed ⇒ nothing to back up.
-          if [ ! -f "$STAGE/skills-lock.json" ]; then
-            echo "::error::skills CLI produced no skills-lock.json (all installs failed?)"
-            exit 1
-          fi
-
-          # ── 3. Build the provenance manifest (tracing only, NOT a runtime pin) ─
-          jq -s '.' "$STAGE/sources.ndjson" > "$STAGE/sources.json"
-          jq \
-            --slurpfile srcs "$STAGE/sources.json" \
-            --arg generatedAt "$FETCHED_AT" \
-            --argjson installFails "$INSTALL_FAILS" \
-            '
-            ($srcs[0]) as $sources
-            | ($sources | map({ (.repo): . }) | add) as $byrepo
-            | {
-                schemaVersion: 1,
-                note: "Trace-only backup of Agent Skills; NOT a runtime pin (ADR 0007). Runs consume skills at latest and fall back to this backup only when a source is unreachable.",
-                generatedAt: $generatedAt,
-                sourceCount: ($sources | length),
-                installFailures: $installFails,
-                sources: $sources,
-                skills: (
-                  (.skills // {})
-                  | to_entries
-                  | map(
-                      .key as $k | .value as $v
-                      | {
-                          key: $k,
-                          value: (
-                            $v
-                            + {
-                                ref: ($byrepo[$v.source].ref // null),
-                                commit: ($byrepo[$v.source].commit // null),
-                                fetchedAt: ($byrepo[$v.source].fetchedAt // null),
-                                contentHash: $v.computedHash
-                              }
-                            | del(.computedHash)
-                          )
-                        }
-                    )
-                  | from_entries
-                )
-              }
-            ' "$STAGE/skills-lock.json" > "$STAGE/manifest.json"
-
-          # ── 4. Mirror into the repo (fresh; drop stale entries) ───────────────
-          cd "$ROOT"
-          rm -rf skills-backup
-          mkdir -p skills-backup
-          cp -R "$STAGE/.agents/skills" skills-backup/skills
-          cp "$STAGE/manifest.json" skills-backup/manifest.json
-
-          # ── 5. Suppress pure-timestamp churn ──────────────────────────────────
-          # generatedAt / fetchedAt move every run. If nothing but timestamps
-          # changed, restore the committed manifest so there is no diff → no PR.
-          strip='del(.generatedAt) | (.sources // []) |= map(del(.fetchedAt)) | (.skills // {}) |= map_values(del(.fetchedAt))'
-          old_stable="$(git show HEAD:skills-backup/manifest.json 2>/dev/null | jq -S "$strip" 2>/dev/null || echo MISSING)"
-          new_stable="$(jq -S "$strip" skills-backup/manifest.json)"
-          if [ "$old_stable" != "MISSING" ] \
-             && [ "$old_stable" = "$new_stable" ] \
-             && [ -z "$(git status --porcelain -- skills-backup/skills)" ]; then
-            echo "skill content unchanged; discarding timestamp-only manifest churn"
-            git checkout HEAD -- skills-backup/manifest.json
-          fi
+        run: bash scripts/refresh-skills-backup.sh
 
       - name: Open backup refresh PR (only when content changed)
         uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1 # v8.1.1
@@ -202,7 +77,7 @@ jobs:
             the fallback used only when a Skills source is unreachable. It is
             **trace-only, not a runtime pin** — do not "fix" it by pinning skills.
 
-            - Sources: discovered from `scripts/prepare-env.sh` (`SKILL_SOURCES`).
+            - Sources: read from the engine-neutral `skills/manifest.json`.
             - Installed with the same `skills` CLI (`bunx skills add … --all`).
             - `skills-backup/manifest.json` records source / ref / commit / fetch
               time / content hash per skill for tracing.

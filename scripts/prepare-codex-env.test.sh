@@ -1,0 +1,131 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+test_root="$(mktemp -d)"
+trap 'rm -rf -- "$test_root"' EXIT
+mkdir -p "$test_root/bin" "$test_root/work" "$test_root/home"
+: > "$test_root/work/prompt.md"
+
+cat > "$test_root/bin/git" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+case "${1:-}" in
+  clone)
+    destination="${!#}"
+    mkdir -p "$destination/.git"
+    mkdir -p "$destination/web"
+    mkdir -p "$destination/scripts/ci"
+    printf '{"name":"fixture"}\n' > "$destination/web/package.json"
+    cat > "$destination/scripts/ci/bun-trust.sh" <<'TRUST'
+#!/usr/bin/env bash
+set -euo pipefail
+env | sed 's/=.*//' | sort > "${HOME:?}/bun-trust-env.names"
+printf '%s\n' "${HEROUI_AUTH_TOKEN:-missing}" > "${HOME:?}/bun-trust-token"
+TRUST
+    chmod +x "$destination/scripts/ci/bun-trust.sh"
+    printf '[remote "origin"]\n\turl = https://x-access-token:token-sentinel@github.com/CCH-HQ/fixture.git\n' > "$destination/.git/config"
+    ;;
+  remote)
+    [[ "${2:-}" == "set-url" && "${3:-}" == "origin" ]]
+    printf '[remote "origin"]\n\turl = %s\n' "${4:?}" > .git/config
+    ;;
+  config|submodule)
+    ;;
+  *)
+    printf 'unexpected git invocation: %s\n' "$*" >&2
+    exit 2
+    ;;
+esac
+SH
+chmod +x "$test_root/bin/git"
+
+cat > "$test_root/bin/bun" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ "${1:-}" == "install" ]]; then
+  env | sed 's/=.*//' | sort > "${HOME:?}/bun-env.names"
+  printf '%s\n' "${HEROUI_AUTH_TOKEN:-missing}" > "${HOME:?}/bun-env.log"
+fi
+SH
+chmod +x "$test_root/bin/bun"
+
+cat > "$test_root/bin/bunx" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+env | sed 's/=.*//' | sort > "${HOME:?}/bunx-env.names"
+for forbidden in BOT_TOKEN GH_TOKEN CCHP_APP_PRIVATE_KEY CCHP_BOT_PROVIDER_KEYS SEE_API_KEY HEROUI_AUTH_TOKEN; do
+  [[ -z "${!forbidden:-}" ]] || { printf 'bunx inherited %s\n' "$forbidden" >&2; exit 97; }
+done
+mkdir -p "${HOME}/.agents/skills/fixture"
+printf '%s\n' '# fixture skill' > "${HOME}/.agents/skills/fixture/SKILL.md"
+SH
+chmod +x "$test_root/bin/bunx"
+
+cat > "$test_root/bin/uv" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+env | sed 's/=.*//' | sort > "${HOME:?}/uv-env.names"
+for forbidden in BOT_TOKEN GH_TOKEN CCHP_APP_PRIVATE_KEY CCHP_BOT_PROVIDER_KEYS SEE_API_KEY HEROUI_AUTH_TOKEN; do
+  [[ -z "${!forbidden:-}" ]] || { printf 'uv inherited %s\n' "$forbidden" >&2; exit 98; }
+done
+SH
+chmod +x "$test_root/bin/uv"
+
+cat > "$test_root/bin/see-cli" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "${SEE_API_KEY:-missing}" > "${SEE_INVOCATION_LOG:?}"
+SH
+chmod +x "$test_root/bin/see-cli"
+
+PATH="$test_root/bin:/usr/bin:/bin" \
+HOME="$test_root/home" \
+BOT_WORKDIR="$test_root/work" \
+BOT_TOKEN="token-sentinel" \
+GH_TOKEN="gh-sentinel" \
+CCHP_APP_PRIVATE_KEY="app-private-sentinel" \
+CCHP_BOT_PROVIDER_KEYS='{"relay":"provider-sentinel"}' \
+GH_REPO="CCH-HQ/fixture" \
+BOT_DEFAULT_BRANCH="dev" \
+BOT_TARGET_BRANCH="dev" \
+REPO_DIR="$test_root/work/repo" \
+BOT_PROMPT_FILE="$test_root/work/prompt.md" \
+  BOT_SKIP_ATARAXY=1 \
+  BOT_SKIP_PR_INSPECT=1 \
+  HEROUI_AUTH_TOKEN="heroui-sentinel" \
+  SEE_API_KEY="see-sentinel" \
+  SEE_INVOCATION_LOG="$test_root/see-env.log" \
+  bash "$ROOT/scripts/prepare-codex-env.sh"
+
+config="$test_root/work/repo/.git/config"
+[[ -f "$config" ]]
+[[ "$(<"$config")" == *"https://github.com/CCH-HQ/fixture.git"* ]]
+[[ "$(<"$config")" != *"token-sentinel"* ]]
+[[ "$(<"$test_root/home/bun-env.log")" == "heroui-sentinel" ]]
+[[ "$(<"$test_root/home/bun-trust-token")" == "heroui-sentinel" ]]
+for env_file in \
+  "$test_root/home/bun-env.names" \
+  "$test_root/home/bun-trust-env.names" \
+  "$test_root/work/skills-install-home/bunx-env.names" \
+  "$test_root/home/uv-env.names"; do
+  names="$(<"$env_file")"
+  for forbidden in BOT_TOKEN GH_TOKEN CCHP_APP_PRIVATE_KEY CCHP_BOT_PROVIDER_KEYS SEE_API_KEY; do
+    [[ $'\n'"$names"$'\n' != *$'\n'"$forbidden"$'\n'* ]] || {
+      printf '%s inherited forbidden variable %s\n' "$env_file" "$forbidden" >&2
+      exit 1
+    }
+  done
+done
+for env_file in "$test_root/work/skills-install-home/bunx-env.names" "$test_root/home/uv-env.names"; do
+  names="$(<"$env_file")"
+  [[ $'\n'"$names"$'\n' != *$'\n'HEROUI_AUTH_TOKEN$'\n'* ]] || {
+    printf '%s inherited HeroUI token\n' "$env_file" >&2
+    exit 1
+  }
+done
+[[ -f "$test_root/work/ctx/see/api-key" ]]
+[[ "$(stat -c '%a' "$test_root/work/ctx/see/api-key")" == "600" ]]
+[[ "$(<"$test_root/work/ctx/see/api-key")" == "see-sentinel" ]]
+[[ ! -e "$test_root/see-env.log" ]]
+printf 'prepare-codex-env credential sanitization test passed\n'

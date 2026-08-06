@@ -8,30 +8,32 @@ function fakeOctokit() {
   return { octokit, calls }
 }
 
+const HEAD_SHA = "a".repeat(40)
+
 test("COMMENT verdict is submitted as-is", async () => {
   const { octokit, calls } = fakeOctokit()
-  const r = await submitReview(octokit, "CCH-HQ/repo", 8, { event: "COMMENT", body: "notes" })
+  const r = await submitReview(octokit, "CCH-HQ/repo", 8, { event: "COMMENT", body: "notes", headSha: HEAD_SHA })
   expect(r.event).toBe("COMMENT")
-  expect(calls[0]).toMatchObject({ owner: "CCH-HQ", repo: "repo", pull_number: 8, event: "COMMENT" })
+  expect(calls[0]).toMatchObject({ owner: "CCH-HQ", repo: "repo", pull_number: 8, event: "COMMENT", commit_id: HEAD_SHA })
 })
 
 test("REQUEST_CHANGES verdict is submitted as-is", async () => {
   const { octokit, calls } = fakeOctokit()
-  const r = await submitReview(octokit, "CCH-HQ/repo", 8, { event: "REQUEST_CHANGES", body: "blocking" })
+  const r = await submitReview(octokit, "CCH-HQ/repo", 8, { event: "REQUEST_CHANGES", body: "blocking", headSha: HEAD_SHA })
   expect(r.event).toBe("REQUEST_CHANGES")
   expect(calls[0].event).toBe("REQUEST_CHANGES")
 })
 
 test("APPROVE goes through when the kill-switch is off", async () => {
   const { octokit, calls } = fakeOctokit()
-  const r = await submitReview(octokit, "CCH-HQ/repo", 8, { event: "APPROVE", body: "lgtm" })
+  const r = await submitReview(octokit, "CCH-HQ/repo", 8, { event: "APPROVE", body: "lgtm", headSha: HEAD_SHA })
   expect(r.event).toBe("APPROVE")
   expect(calls[0].event).toBe("APPROVE")
 })
 
 test("APPROVE is downgraded to COMMENT when the kill-switch is on", async () => {
   const { octokit, calls } = fakeOctokit()
-  const r = await submitReview(octokit, "CCH-HQ/repo", 8, { event: "APPROVE", body: "lgtm", autoApproveDisabled: true })
+  const r = await submitReview(octokit, "CCH-HQ/repo", 8, { event: "APPROVE", body: "lgtm", headSha: HEAD_SHA, autoApproveDisabled: true })
   expect(r.event).toBe("COMMENT")
   expect(calls[0].event).toBe("COMMENT")
   expect(calls[0].body).toContain("Auto-approve is disabled")

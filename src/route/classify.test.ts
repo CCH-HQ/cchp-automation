@@ -351,15 +351,36 @@ test("unknown cron → no action (drift guard)", async () => {
 })
 
 // ── workflow_dispatch ─────────────────────────────────────────────────────────────
-test("manual dispatch defaults → engage + write", async () => {
+test("manual dispatch defaults to the legacy mention/manual profile + write", async () => {
   const r = await run("workflow_dispatch", {}, { dispatch: { prompt: "do a thing" } })
   expect(r.act).toBe(true)
   expect(r.needsWrite).toBe(true)
+  expect(r.env.BOT_TASK).toBe("manual")
+  expect(r.intent).toEqual({ task: "manual", vars: { kind: "manual", prompt: "do a thing" } })
 })
 
 test("manual dispatch with can_write=0 → no write", async () => {
   const r = await run("workflow_dispatch", {}, { dispatch: { canWrite: "0" } })
   expect(r.needsWrite).toBe(false)
+  expect(r.env.BOT_CAN_WRITE).toBe("0")
+})
+
+test("workflow dispatch preserves mention/manual aliases and explicit dispatch", async () => {
+  for (const [rawTask, task] of [["mention", "manual"], ["manual", "manual"], ["dispatch", "dispatch"]] as const) {
+    const r = await run("workflow_dispatch", {}, { dispatch: { task: rawTask, branch: "release", prompt: "operate" } })
+    expect(r).toMatchObject({ act: true, needsWrite: true })
+    expect(r.env).toMatchObject({ BOT_TASK: task, BOT_TARGET_BRANCH: "release", BOT_CAN_WRITE: "1" })
+    expect(r.intent).toEqual({ task, vars: { kind: "manual", prompt: "operate" } })
+  }
+})
+
+test("workflow dispatch rejects automatic task profiles without trusted event bindings", async () => {
+  for (const task of ["engage", "pr_opened", "ci_fix", "release_notes", "not-a-task"]) {
+    const r = await run("workflow_dispatch", {}, { dispatch: { task, prompt: "operate" } })
+    expect(r).toMatchObject({ act: false, needsWrite: false, reason: `unsupported workflow_dispatch task '${task}'` })
+    expect(r.intent).toBeUndefined()
+    expect(r.env.BOT_TASK).toBeUndefined()
+  }
 })
 
 // ── unhandled ─────────────────────────────────────────────────────────────────────

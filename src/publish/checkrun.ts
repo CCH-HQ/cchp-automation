@@ -12,6 +12,9 @@ export interface CheckAction {
   identifier: string
 }
 
+/** Fixed run-owned check identity. The model never chooses or overrides it. */
+export const CHECK_RUN_NAME = "cchp-automation / ci-fix"
+
 /** The three review-run action buttons (max 3 per Check Run). */
 export const CHECK_ACTIONS: Record<string, CheckAction> = {
   applyFixes: { label: "Apply fixes", description: "Apply the suggested fixes to the PR", identifier: "apply-fixes" },

@@ -138,7 +138,7 @@ export async function run(): Promise<void> {
 
   if (result.intent) appendFileSync(promptFile, renderPrompt(result.intent, { repo, overlay }))
 
-  // The route step runs BEFORE prepare-env.sh (which is what later creates
+  // The route step runs before repository preparation (which later creates
   // ${workdir}/ctx), so ensure it exists now — otherwise the first oversized
   // context / trigger / pr-diff / manifest write below throws ENOENT and aborts
   // the whole run. (Regression from the bash route.sh → TS port.)

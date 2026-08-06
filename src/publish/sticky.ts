@@ -1,14 +1,14 @@
 // Sticky Comment publication (DESIGN §7 / glossary "Sticky Comment"): one
 // bot-authored comment kept unique per purpose by a hidden `cchp-bot:<key>`
 // Marker and upserted (find-by-marker, then edit-or-create) instead of
-// duplicated. Ported from `.github/cchp-bot/opencode/plugin/progress-comment.ts`
-// (gh → Octokit, ADR 0003), which upserts the Progress Comment — the live todo
-// mirror. The marker strings + checklist rendering are the frozen contract and
-// are preserved byte-for-byte via the shared `types.ts` helpers.
+// duplicated. This Octokit implementation preserves the historical Progress
+// Comment contract while the supervisor owns the live todo mirror. The marker
+// strings + checklist rendering are the frozen contract and are preserved
+// byte-for-byte via the shared `types.ts` helpers.
 //
 // The primitive is stateless: the plugin's cross-call caches (looked / commentId
-// / lastBody dedup, first-todowrite-is-root gating) are the caller's concern —
-// they live in the OpenCode plugin loop, not in this publish operation.
+// / lastBody dedup, first-plan-is-root gating) are the caller's concern — they
+// live in the supervisor, not in this publish operation.
 import { splitRepo } from "../context"
 import type { GitHubClient } from "../github/client"
 import { BRAND_FOOTER_PREFIX, LOGO_HEADING } from "./inline"

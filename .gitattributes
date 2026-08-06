@@ -1,0 +1,2 @@
+# Preserve upstream formatting in the generated, vendored skills fallback.
+skills-backup/** -whitespace

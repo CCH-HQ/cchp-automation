@@ -115,7 +115,7 @@ test("emitContext: oversized content written to context.md + Read-this pointer",
   expect(readFileSync(join(ctxDir, "context.md"), "utf8")).toBe(big)
 })
 
-// Regression: the route step runs before prepare-env.sh creates ${workdir}/ctx,
+// Regression: the route step runs before the prepare step creates ${workdir}/ctx,
 // so an oversized-context (or trigger) write must create the dir itself instead
 // of throwing ENOENT and aborting the run.
 test("emitContext / highlightTrigger create a missing ctxDir instead of ENOENT", () => {

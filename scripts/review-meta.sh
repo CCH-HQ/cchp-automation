@@ -41,16 +41,6 @@ require_text() {
   done
 }
 
-require_review_finalized() {
-  [[ "${BOT_TASK:-}" == "pr_opened" ]] || die "review publication is only valid for pr_opened"
-  : "${BOT_WORKDIR:?}" "${CCHP_REVIEW_FINALIZER:?}" "${CCHP_TRUSTED_REVIEW_MANIFEST:?}"
-  "${CCHP_REVIEW_FINALIZER}" \
-    "${BOT_WORKDIR}/ctx/review" \
-    "${CCHP_TRUSTED_REVIEW_MANIFEST}" \
-    "${BOT_WORKDIR}/ctx/review-finalized.json" >/dev/null \
-    || die "Ultra review artifacts did not pass finalization"
-}
-
 repo="${BOT_REPO:-${GH_REPO:-}}"
 [[ "${repo}" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || die "BOT_REPO/GH_REPO is invalid"
 owner="${repo%%/*}"
@@ -68,12 +58,12 @@ if [[ "${BOT_PR_IS_FORK:-0}" == "1" ]] && \
      [[ "${BOT_TASK:-}" == "engage" ]]; }; then
   if [[ "${BOT_TASK:-}" == "lgtm_merge" ]]; then
     case "${op}" in
-      pr-comment|pr-comment-file|pr-review-comment-file|pr-lgtm-label|pr-merge) ;;
+      pr-comment|pr-comment-file|pr-lgtm-label|pr-merge) ;;
       *) die "operation ${op} is not allowed for fork PR merge" ;;
     esac
   else
     case "${op}" in
-      pr-title|pr-title-note|pr-comment|pr-comment-file|pr-review-comment-file|pr-close|pr-lock|pr-triage-label) ;;
+      pr-title|pr-title-note|pr-comment|pr-comment-file|pr-close|pr-lock|pr-triage-label) ;;
       *) die "operation ${op} is not allowed for restricted fork PR tasks" ;;
     esac
   fi
@@ -99,14 +89,14 @@ case "${op}" in
     exec "${gh_bin}" issue edit "$1" --repo "${repo}" --title "$2"
     ;;
   pr-comment)
-    [[ "${BOT_TASK:-}" != "pr_opened" ]] || die "pr_opened findings must use pr-review-comment-file"
+    [[ "${BOT_TASK:-}" != "pr_opened" ]] || die "pr_opened findings must use cchp_github publication tools"
     require_count 1 "$#"
     require_current_pr
     require_text "$1" 4096 comment
     exec "${gh_bin}" pr comment "${BOT_PR_NUMBER}" --repo "${repo}" --body "$1"
     ;;
   pr-comment-file)
-    [[ "${BOT_TASK:-}" != "pr_opened" ]] || die "pr_opened findings must use pr-review-comment-file"
+    [[ "${BOT_TASK:-}" != "pr_opened" ]] || die "pr_opened findings must use cchp_github publication tools"
     require_count 0 "$#"
     require_current_pr
     reply_file="${BOT_WORKDIR:?}/ctx/reply.md"
@@ -115,34 +105,6 @@ case "${op}" in
     [[ "${reply_size}" =~ ^[0-9]+$ && "${reply_size}" -ge 1 && "${reply_size}" -le 65536 ]] \
       || die "reply file size must be 1..65536 bytes"
     exec "${gh_bin}" pr comment "${BOT_PR_NUMBER}" --repo "${repo}" --body-file "${reply_file}"
-    ;;
-  pr-review-comment-file)
-    require_count 1 "$#"
-    require_current_pr
-    # Same contract as the MCP inline path: 64-hex passes through, any other
-    # non-empty stable root-cause key is hashed here (the model has no shell
-    # sha256 during reviews).
-    [[ -n "$1" ]] || die "review fingerprint / root-cause key must be non-empty"
-    fp="$1"
-    [[ "${fp}" =~ ^[0-9a-f]{64}$ ]] || fp="$(printf '%s' "${fp}" | sha256sum | awk '{print $1}')"
-    require_review_finalized
-    reply_file="${BOT_WORKDIR:?}/ctx/reply.md"
-    [[ -f "${reply_file}" && ! -L "${reply_file}" ]] || die "reply file is missing or invalid"
-    reply_size="$(wc -c < "${reply_file}")"
-    [[ "${reply_size}" =~ ^[0-9]+$ && "${reply_size}" -ge 1 && "${reply_size}" -le 65000 ]] \
-      || die "reply file size must be 1..65000 bytes"
-    marker="<!-- cchp-review-fingerprint:${fp} -->"
-    if "${gh_bin}" api --paginate "repos/${repo}/issues/${BOT_PR_NUMBER}/comments" \
-        --jq '.[].body // empty' | grep -Fqx -- "${marker}"; then
-      printf 'already-posted: %s\n' "${fp}"
-      exit 0
-    fi
-    if grep -Eq '<!-- cchp-review-fingerprint:[0-9a-f]{64} -->' "${reply_file}"; then
-      die "reply file must not contain a caller-supplied review fingerprint marker"
-    fi
-    publish_file="${BOT_WORKDIR}/ctx/review-comment-publish.md"
-    { cat "${reply_file}"; printf '\n\n%s\n' "${marker}"; } > "${publish_file}"
-    exec "${gh_bin}" pr comment "${BOT_PR_NUMBER}" --repo "${repo}" --body-file "${publish_file}"
     ;;
   pr-close)
     require_count 1 "$#"

@@ -128,6 +128,7 @@ export async function classify(input: ClassifyInput, lookups: Lookups): Promise<
             {
               BOT_PR_NUMBER: String(num), BOT_PR_BASE: pr.base, BOT_TARGET_BRANCH: pr.head,
               BOT_HEAD_SHA: pr.sha, BOT_CAN_WRITE: cwEnv(effectiveCw), BOT_PR_IS_FORK: fork ? "1" : "0",
+              BOT_PLAN_COMMENT_ID: String(cid),
             },
             "engage",
             { kind: "action_menu_pr", prNumber: num, fork, actionId, commentId: cid, sender },
@@ -135,7 +136,7 @@ export async function classify(input: ClassifyInput, lookups: Lookups): Promise<
           )
         }
         return act(
-          { BOT_CAN_WRITE: "1", BOT_ISSUE_NUMBER: String(num), BOT_TARGET_BRANCH: defaultBranch },
+          { BOT_CAN_WRITE: "1", BOT_ISSUE_NUMBER: String(num), BOT_PLAN_COMMENT_ID: String(cid), BOT_TARGET_BRANCH: defaultBranch },
           "engage",
           { kind: "action_menu_issue", issueNumber: num, actionId, commentId: cid, sender },
           { needsWrite: true, ack: ackMenu },
@@ -313,7 +314,7 @@ export async function classify(input: ClassifyInput, lookups: Lookups): Promise<
       return act(
         { BOT_CAN_WRITE: "1", BOT_RELEASE_TAG: tag, BOT_TARGET_BRANCH: defaultBranch },
         "release_notes",
-        { tag, event: ev },
+        { tag, action: a },
         { needsWrite: true },
       )
     }
@@ -347,7 +348,14 @@ export async function classify(input: ClassifyInput, lookups: Lookups): Promise<
     // ── workflow_dispatch → manual escape hatch ─────────────────────────────────
     case "workflow_dispatch": {
       const canWrite = (input.dispatch?.canWrite ?? "1") === "1"
-      const task = (input.dispatch?.task || "engage") as Task
+      const rawTask = input.dispatch?.task?.trim() || "mention"
+      // The consumer's four workflow_dispatch inputs remain unchanged. Only
+      // manual escape-hatch profiles are accepted: automatic tasks require
+      // trusted event-derived PR/run/release bindings that dispatch does not have.
+      let task: Task
+      if (rawTask === "mention" || rawTask === "manual") task = "manual"
+      else if (rawTask === "dispatch") task = "dispatch"
+      else return noAct(`unsupported workflow_dispatch task '${rawTask}'`)
       return act(
         { BOT_CAN_WRITE: cwEnv(canWrite), BOT_TARGET_BRANCH: input.dispatch?.branch || defaultBranch },
         task,

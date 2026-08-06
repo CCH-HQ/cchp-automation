@@ -2,7 +2,7 @@
 # cchp-automation bot — trusted pre-review external static analysis (CodeQL + Semgrep).
 #
 # Runs as its own TRUSTED workflow step after "Prepare isolated environment" and
-# before "Run opencode". It fetches the PR head from the BASE repository's
+# before "Run Codex supervisor". It fetches the PR head from the BASE repository's
 # refs/pull/<n>/head into a scan-only checkout under ${BOT_WORKDIR}/scan-head
 # (NEVER the execution clone at ${BOT_WORKDIR}/repo), runs static analyzers,
 # normalizes their output into ${BOT_WORKDIR}/ctx/external/ and appends an
@@ -28,7 +28,8 @@
 # self-test and for emergency ops only):
 #   BOT_CODEQL_VERSION BOT_SEMGREP_VERSION BOT_SEMGREP_RULES_COMMIT
 set -euo pipefail
-# See prepare-env.sh: bot tools live in ~/.local/bin, never added to
+SCRIPT_DIR="$(cd -- "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# The trusted prepare step installs optional bot tools under ~/.local/bin, never in
 # GITHUB_PATH (zizmor github-env); every step re-adds it locally.
 export PATH="${HOME}/.local/bin:${PATH}"
 
@@ -187,7 +188,7 @@ scan_checkout() {
   log "scan checkout pinned at ${BOT_HEAD_SHA}"
 }
 
-# ── Changed-file list: trusted diff first, gh API fallback ───────────────────
+# ── Changed-file list: trusted diff first, engine Octokit fallback ───────────
 resolve_changed_files() {
   local patch="${CTX_DIR}/pr-diff.patch"
   if [[ -s "$patch" ]]; then
@@ -196,11 +197,9 @@ resolve_changed_files() {
       | LC_ALL=C sort -u > "$CHANGED_LIST" || true
   fi
   if [[ ! -s "$CHANGED_LIST" ]]; then
-    log "trusted ctx/pr-diff.patch missing or empty; falling back to gh api pulls/${BOT_PR_NUMBER}/files"
-    # TODO(cchp: route via engine CLI — DESIGN §6): PR changed-files listing via
-    # the GitHub REST API (repos/{repo}/pulls/{n}/files, paginated).
-    gh api --paginate "repos/${BOT_REPO}/pulls/${BOT_PR_NUMBER}/files?per_page=100" \
-      --jq '.[].filename' 2>/dev/null | LC_ALL=C sort -u > "$CHANGED_LIST" || true
+    log "trusted ctx/pr-diff.patch missing or empty; falling back to engine Octokit pulls/${BOT_PR_NUMBER}/files"
+    bun "${SCRIPT_DIR}/external-scan-github.ts" changed-files 2>/dev/null \
+      | LC_ALL=C sort -u > "$CHANGED_LIST" || true
   fi
 }
 
@@ -340,11 +339,9 @@ ensure_codeql() {
   log "codeql: downloading bundle ${CODEQL_BUNDLE_VERSION}"
   local dl="${TMP_DIR}/codeql-dl" staging
   mkdir -p "$dl"
-  # TODO(cchp: route via engine CLI — DESIGN §6): CodeQL bundle release asset
-  # download (github/codeql-action) via the GitHub Releases API.
-  if ! timeout 900 gh release download -R github/codeql-action \
-       "codeql-bundle-${CODEQL_BUNDLE_VERSION}" \
-       -p 'codeql-bundle-linux64.tar.gz' --dir "$dl" --clobber >/dev/null 2>&1; then
+  local bundle_url="https://github.com/github/codeql-action/releases/download/codeql-bundle-${CODEQL_BUNDLE_VERSION}/codeql-bundle-linux64.tar.gz"
+  if ! timeout 900 curl --fail --silent --show-error --location \
+       --output "${dl}/codeql-bundle-linux64.tar.gz" "$bundle_url" >/dev/null 2>&1; then
     warn "codeql bundle download failed"
     CODEQL_STATE=fail
     return 1

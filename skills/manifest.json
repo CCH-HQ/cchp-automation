@@ -1,0 +1,50 @@
+{
+  "schemaVersion": 1,
+  "sources": [
+    {
+      "id": "mattpocock-engineering",
+      "url": "https://github.com/mattpocock/skills/tree/main/skills/engineering",
+      "timeoutSeconds": 60
+    },
+    {
+      "id": "addyosmani-agent-skills",
+      "url": "https://github.com/addyosmani/agent-skills/tree/main/skills",
+      "timeoutSeconds": 60
+    },
+    {
+      "id": "samber-go-skills",
+      "url": "https://github.com/samber/cc-skills-golang",
+      "timeoutSeconds": 60
+    },
+    {
+      "id": "vercel-react-best-practices",
+      "url": "https://github.com/vercel-labs/agent-skills/tree/main/skills/react-best-practices",
+      "timeoutSeconds": 60
+    },
+    {
+      "id": "obra-superpowers",
+      "url": "https://github.com/obra/Superpowers/tree/main/skills",
+      "timeoutSeconds": 60
+    },
+    {
+      "id": "ataraxy-sem",
+      "url": "https://github.com/Ataraxy-Labs/sem/tree/main/skills/sem",
+      "timeoutSeconds": 60
+    },
+    {
+      "id": "anthropic-frontend-design",
+      "url": "https://github.com/anthropics/skills/tree/main/skills/frontend-design",
+      "timeoutSeconds": 60
+    },
+    {
+      "id": "anthropic-skill-creator",
+      "url": "https://github.com/anthropics/skills/tree/main/skills/skill-creator",
+      "timeoutSeconds": 60
+    },
+    {
+      "id": "anthropic-claude-md-improver",
+      "url": "https://github.com/anthropics/claude-plugins-official/tree/main/plugins/claude-md-management/skills/claude-md-improver",
+      "timeoutSeconds": 60
+    }
+  ]
+}

@@ -4,7 +4,6 @@
 // refuses explicitly regardless of the token in hand.
 import { splitRepo } from "../context"
 import type { GitHubClient } from "../github/client"
-import { isForkPr } from "../types"
 
 export interface MergeResult {
   merged: boolean
@@ -15,12 +14,13 @@ export async function mergePr(
   octokit: GitHubClient,
   repo: string,
   prNumber: number,
-  opts: { headRepoFullName: string | null; method?: "squash" | "merge" | "rebase" },
+  opts: { method?: "squash" | "merge" | "rebase" } = {},
 ): Promise<MergeResult> {
-  if (isForkPr(opts.headRepoFullName, repo)) {
+  const { owner, name } = splitRepo(repo)
+  const { data: pr } = await octokit.rest.pulls.get({ owner, repo: name, pull_number: prNumber })
+  if (!pr.head?.repo?.full_name || pr.head.repo.full_name !== repo) {
     return { merged: false, reason: "fork PRs are never auto-merged (ADR 0004); a maintainer merges manually" }
   }
-  const { owner, name } = splitRepo(repo)
   await octokit.rest.pulls.merge({ owner, repo: name, pull_number: prNumber, merge_method: opts.method ?? "squash" })
   return { merged: true }
 }

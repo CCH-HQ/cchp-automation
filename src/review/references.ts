@@ -467,8 +467,8 @@ export async function buildLibrary(
 
 const moduleDir = dirname(fileURLToPath(import.meta.url))
 const repoRoot = join(moduleDir, "..", "..")
-const DEFAULT_CONFIG = join(repoRoot, "opencode", "review", "reference-sources.json")
-const DEFAULT_OUTPUT = join(repoRoot, "opencode", "review", "reference-library")
+const DEFAULT_CONFIG = join(repoRoot, "codex", "review", "reference-sources.json")
+const DEFAULT_OUTPUT = join(repoRoot, "codex", "review", "reference-library")
 
 export interface SyncOptions {
   /** Client for the default tarball fetcher; unused when `fetchSource` is given. */

@@ -7,6 +7,8 @@ import {
   commentFile,
   lock,
   postComment,
+  postPrTitleNote,
+  PR_TITLE_NOTE,
   requireText,
   setPrTitle,
 } from "./meta"
@@ -97,6 +99,16 @@ test("postComment: rejects multiline / over-length bodies", async () => {
   const { octokit } = fake()
   await expect(postComment(octokit, REPO, 5, "line1\nline2")).rejects.toThrow("must be one line")
   await expect(postComment(octokit, REPO, 5, "a".repeat(4097))).rejects.toThrow("invalid comment length")
+})
+
+test("postPrTitleNote: emits only the fixed broker-scoped title note", async () => {
+  const { octokit, calls } = fake()
+  await expect(postPrTitleNote(octokit, REPO, 5)).resolves.toEqual({ id: 11, url: "https://gh/c/11" })
+  expect(calls.createComment).toEqual([expect.objectContaining({
+    issue_number: 5,
+    body: PR_TITLE_NOTE,
+    _cchp_broker_purpose: "pr_opened_title_note",
+  })])
 })
 
 // ── commentFile (pr-comment-file) ──────────────────────────────────────────────

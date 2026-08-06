@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Self-contained offline tests for external-scan.sh: fake gh/git/semgrep/codeql
+# Self-contained offline tests for external-scan.sh: fake Bun/Git/semgrep/codeql
 # shims on PATH (same technique as compact-prompt.test.sh), no network, no real
 # scanners. Any non-zero exit of this script is a test failure.
 set -euo pipefail
@@ -18,6 +18,8 @@ grep -Eq 'BOT_CODEQL_VERSION:-v[0-9]+\.[0-9]+\.[0-9]+' "$SCAN_SH" || fail "codeq
 grep -Fq 'semgrep==${SEMGREP_VERSION}' "$SCAN_SH" || fail "pinned semgrep version fallback missing"
 grep -Fq 'BOT_SEMGREP_VERSION:-1.169.0' "$SCAN_SH" || fail "semgrep version pin missing"
 grep -Fq 'codeql-bundle-linux64.tar.gz' "$SCAN_SH" || fail "codeql bundle asset name missing"
+grep -Fq 'external-scan-github.ts" changed-files' "$SCAN_SH" || fail "engine Octokit changed-files fallback missing"
+grep -Fq 'https://github.com/github/codeql-action/releases/download/' "$SCAN_SH" || fail "fixed CodeQL release URL missing"
 grep -Fq 'refs/pull/${BOT_PR_NUMBER}/head' "$SCAN_SH" || fail "base-repo pull head ref fetch missing"
 grep -Fq 'timeout 900' "$SCAN_SH" || fail "semgrep outer timeout missing"
 grep -Fq 'timeout 1500' "$SCAN_SH" || fail "codeql outer timeout missing"
@@ -28,6 +30,8 @@ grep -Fq 'GOEXPERIMENT=jsonv2' "$SCAN_SH" || fail "Go build needs GOEXPERIMENT=j
 if grep -Eq -- '--config[= ]auto' "$SCAN_SH"; then fail "forbidden: remote auto rule config"; fi
 if grep -Fq -- '--allow-local-builds' "$SCAN_SH"; then fail "forbidden semgrep flag present"; fi
 if grep -Fq -- '--autofix' "$SCAN_SH"; then fail "forbidden semgrep flag present"; fi
+if grep -Eq '(^|[[:space:]])gh[[:space:]]+(api|release)' "$SCAN_SH"; then fail "raw gh GitHub operation remains"; fi
+if grep -Fq 'TODO(cchp:' "$SCAN_SH"; then fail "migration TODO remains"; fi
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
 TEST_SHA="0123456789abcdef0123456789abcdef01234567"
@@ -139,22 +143,19 @@ esac
 MOCK
 chmod +x "${shim}/git"
 
-cat > "${shim}/gh" <<'MOCK'
+cat > "${shim}/bun" <<'MOCK'
 #!/usr/bin/env bash
 set -euo pipefail
-joined="$*"
-printf 'gh %s\n' "${joined}" >> "${FAKE_GH_LOG:-/dev/null}"
-case "${joined}" in
-  "api --paginate repos/example/repo/pulls/7/files?per_page=100 --jq .[].filename")
+printf 'bun %s\n' "$*" >> "${FAKE_GITHUB_HELPER_LOG:-/dev/null}"
+case "$*" in
+  *"external-scan-github.ts changed-files")
     printf 'pkg/a.go\nweb/src/b.ts\n' ;;
-  "release download"*)
-    exit 1 ;;
   *)
-    printf 'unexpected mock gh invocation: %s\n' "${joined}" >&2
+    printf 'unexpected mock bun invocation: %s\n' "$*" >&2
     exit 9 ;;
 esac
 MOCK
-chmod +x "${shim}/gh"
+chmod +x "${shim}/bun"
 
 cat > "${shim}/semgrep" <<'MOCK'
 #!/usr/bin/env bash
@@ -269,7 +270,7 @@ run_scan() { # extra VAR=value overrides win over the defaults
     BOT_HEAD_SHA="${TEST_SHA}" GH_TOKEN=test-token \
     BOT_SEMGREP_RULES_COMMIT="${TEST_RULES_COMMIT}" \
     BOT_CODEQL_VERSION="${TEST_CODEQL_VERSION}" \
-    FAKE_GIT_LOG="${CASE}/git.log" FAKE_GH_LOG="${CASE}/gh.log" \
+    FAKE_GIT_LOG="${CASE}/git.log" FAKE_GITHUB_HELPER_LOG="${CASE}/github-helper.log" \
     FAKE_SEMGREP_LOG="${CASE}/semgrep.log" FAKE_CODEQL_LOG="${CASE}/codeql.log" \
     FAKE_GIT_HEAD_SHA="${TEST_SHA}" \
     FAKE_GIT_CREATE_FILES="pkg/a.go:web/src/b.ts" \
@@ -358,7 +359,7 @@ grep -Fq 'your independent review must go far beyond them' "${WORK}/prompt.md" \
 grep -Fq 'Some scanners were skipped or failed' "${WORK}/prompt.md" \
   && fail "happy: all-ran run must not carry the skip note"
 grep -Fq 'refs/pull/7/head' "${CASE}/git.log" || fail "happy: must fetch base-repo pull head ref"
-[[ ! -s "${CASE}/gh.log" ]] || fail "happy: gh must not be called when patch + caches exist"
+[[ ! -s "${CASE}/github-helper.log" ]] || fail "happy: GitHub fallback must not run when the trusted patch exists"
 
 # ── 3. Head SHA mismatch → everything skipped, fail-open ─────────────────────
 new_case mismatch
@@ -411,20 +412,20 @@ jq -e '
 jq -e '(.findings | length) == 2' "${WORK}/ctx/external/findings.json" >/dev/null \
   || fail "crash: findings must carry the codeql entries only"
 
-# ── 6. Missing trusted diff → gh api fallback for the changed-file list ──────
-new_case gh-fallback
+# ── 6. Missing trusted diff → engine Octokit changed-file fallback ──────────
+new_case github-fallback
 seed_caches
 run_scan   # no write_patch
 st="${WORK}/ctx/external/status.json"
-grep -Fq 'pulls/7/files?per_page=100' "${CASE}/gh.log" \
-  || fail "gh-fallback: must query pulls/files when the trusted diff is missing"
+grep -Fq 'external-scan-github.ts changed-files' "${CASE}/github-helper.log" \
+  || fail "github-fallback: must query pulls/files when the trusted diff is missing"
 jq -e '
   .scanners.semgrep.status == "ran" and
   .scanners.semgrep.findings_in_diff == 1 and
   .scanners.codeql_javascript.findings_in_diff == 1 and
   .scanners.codeql_go.findings_in_diff == 1
-' "$st" >/dev/null || fail "gh-fallback: scanners must run on gh-derived file list"
+' "$st" >/dev/null || fail "github-fallback: scanners must run on Octokit-derived file list"
 jq -e '(.findings | length) == 3' "${WORK}/ctx/external/findings.json" >/dev/null \
-  || fail "gh-fallback: findings must match the happy path"
+  || fail "github-fallback: findings must match the happy path"
 
 echo "external-scan tests passed"

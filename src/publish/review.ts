@@ -18,6 +18,7 @@ export interface ReviewComment {
 export interface SubmitReviewInput {
   event: Verdict
   body: string
+  headSha: string
   comments?: ReviewComment[]
   /** Org-var kill-switch: when true, an APPROVE is downgraded to COMMENT. */
   autoApproveDisabled?: boolean
@@ -37,7 +38,7 @@ export async function submitReview(
   }
   const { owner, name } = splitRepo(repo)
   await octokit.rest.pulls.createReview({
-    owner, repo: name, pull_number: prNumber, event, body,
+    owner, repo: name, pull_number: prNumber, event, body, commit_id: input.headSha,
     ...(input.comments ? { comments: input.comments } : {}),
   })
   return { event }

@@ -1,6 +1,7 @@
 node_modules/
 dist/
 *.log
+/artifacts/
 
 # serena per-project workspace (created at runtime via --project-from-cwd)
 .serena/
@@ -9,4 +10,6 @@ dist/
 # push code only). Remove these two lines to publish the glossary + ADRs when the
 # repo goes public.
 /CONTEXT.md
-/docs/
+/docs/*
+!/docs/ci/
+!/docs/ci/codex-cli-full-migration-plan.md

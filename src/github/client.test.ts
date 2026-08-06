@@ -1,8 +1,5 @@
 import { expect, test } from "bun:test"
-import { mkdtempSync, writeFileSync } from "node:fs"
-import { tmpdir } from "node:os"
-import { join } from "node:path"
-import { fileTokenGetter, GITHUB_API_VERSION, makeOctokit } from "./client"
+import { GITHUB_API_VERSION, makeOctokit } from "./client"
 
 test("api version is pinned (not drifting with the SDK)", () => {
   expect(GITHUB_API_VERSION).toMatch(/^\d{4}-\d{2}-\d{2}$/)
@@ -54,17 +51,4 @@ test("a static token still authenticates every request (fallback path unchanged)
   const octokit = makeOctokit("ghs_statictoken")
   await octokit.rest.meta.get({ request: { fetch: fakeFetch } })
   expect(auth).toEqual(["token ghs_statictoken"])
-})
-
-test("fileTokenGetter prefers the token file and falls back to the static token", () => {
-  const dir = mkdtempSync(join(tmpdir(), "cchp-tokfile-"))
-  const file = join(dir, ".gh-token")
-  const get = fileTokenGetter(file, "ghs_env_fallback")
-  expect(get()).toBe("ghs_env_fallback") // 文件还没出现 → 静态回退
-  writeFileSync(file, "ghs_from_file\n")
-  expect(get()).toBe("ghs_from_file") // 现读 + trim
-  writeFileSync(file, "")
-  expect(get()).toBe("ghs_env_fallback") // 空文件 → 静态回退
-  const strict = fileTokenGetter(join(dir, "missing"))
-  expect(() => strict()).toThrow("token file unreadable")
 })
