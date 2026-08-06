@@ -8,6 +8,8 @@ trap 'rm -rf "$fixture_root"' EXIT
 fake_bin="$fixture_root/bin"
 fixtures="$fixture_root/fixtures"
 mkdir -p "$fake_bin" "$fixtures/wrapper/package/bin" "$fixtures/platform/package/bin" "$fixtures/platform-arm64/package/bin" "$fixture_root/home" "$fixture_root/work"
+real_node_bin="$(command -v node)"
+[[ -x "$real_node_bin" ]]
 
 cat >"$fixtures/wrapper/package/package.json" <<'EOF'
 {
@@ -230,6 +232,8 @@ done
 printf 'process.exit(Number(process.env.FAKE_SIGSTORE_STATUS || 0))\n' >"$outfile"
 EOF
 chmod +x "$fake_bin"/*
+ln -s "$real_node_bin" "$fake_bin/node"
+[[ "$(PATH="$fake_bin:/usr/bin:/bin" command -v node)" == "$fake_bin/node" ]]
 
 run_install() {
   env \

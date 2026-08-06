@@ -390,9 +390,12 @@ serena (§2.4) to orient yourself in the codebase before you decide anything.
 Wait with `agents.wait_agent`; use `agents.list_agents` to audit state, and
 `agents.interrupt_agent` when a child exceeds its deadline. Native Codex
 0.146.0 has no `close_agent` operation: an interrupted native child is closed
-by interrupting it and waiting for its terminal state. The explicit fallback
-MCP server may additionally expose `agents.close_agent`; call it only when
-that tool is present in the active catalog.
+by interrupting it and confirming its terminal state with `agents.list_agents`.
+Do not call native `agents.wait_agent` solely after a synchronous interrupt: it
+waits for a future mailbox update and can miss the terminal event that the
+interrupt already consumed. The explicit fallback MCP server may additionally
+expose `agents.close_agent`; call it only when that tool is present in the
+active catalog.
 
 **Then plan before modifying code.** For any task that will modify files
 (`reaction_execute`, `ci_fix`, engage implement-for-member, `lgtm_merge`

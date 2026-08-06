@@ -1,5 +1,10 @@
 import { expect, test } from "bun:test"
-import { collaborationLifecycleObserved, customToolCall, extractToolRefs, isChildProviderRequest, isCollaborationToolName, parentObservedChildOutput, parentObservedNativeChildOutput, toolCall } from "./codex-capability-smoke"
+import { collaborationLifecycleObserved, customToolCall, extractToolRefs, isChildProviderRequest, isCollaborationToolName, parentObservedChildOutput, parentObservedNativeChildOutput, toolCall, waitAgentArguments } from "./codex-capability-smoke"
+
+test("maps wait_agent arguments to the selected collaboration ABI", () => {
+  expect(waitAgentArguments("native-v2", "/root/child", 2_000)).toEqual({ timeout_ms: 2_000 })
+  expect(waitAgentArguments("explicit-exec", "child", 2_000)).toEqual({ target: "child", timeout_ms: 2_000 })
+})
 
 test("extracts collaboration tools from classic Responses and Responses Lite requests", () => {
   expect(extractToolRefs({

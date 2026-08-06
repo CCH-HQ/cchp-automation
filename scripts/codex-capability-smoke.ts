@@ -18,6 +18,14 @@ export interface ToolRef {
   namespace?: string
 }
 
+export function waitAgentArguments(
+  mode: "explicit-exec" | "native-v2",
+  target: string,
+  timeoutMs = 10_000,
+): { timeout_ms: number; target?: string } {
+  return mode === "native-v2" ? { timeout_ms: timeoutMs } : { target, timeout_ms: timeoutMs }
+}
+
 export function isChildProviderRequest(requestThreadId: string | undefined, rootThreadId: string | undefined): boolean {
   return Boolean(requestThreadId && rootThreadId && requestThreadId !== rootThreadId)
 }
@@ -203,7 +211,7 @@ async function main(): Promise<void> {
     throw new Error(`failed to initialize capability fixture repository: ${initializedRepo.stderr.toString()}`)
   }
   let requestNumber = 0
-  let rootStage: "fff" | "serena" | "spawn" | "send" | "wait" | "followup" | "wait-followup" | "list" | "spawn-interrupt" | "interrupt" | "wait-interrupt" | "close-interrupt" | "final" = "fff"
+  let rootStage: "fff" | "serena" | "spawn" | "send" | "wait" | "followup" | "wait-followup" | "list" | "spawn-interrupt" | "interrupt" | "wait-interrupt" | "audit-interrupt" | "close-interrupt" | "final" = "fff"
   let childStage: "fff" | "serena" | "final" = "fff"
   let rootModelThreadId: string | undefined
   const parentObservedSentinels = new Set<string>()
@@ -212,6 +220,7 @@ async function main(): Promise<void> {
   const operationByCallId = new Map<string, string>()
   let interruptRequestObserved = false
   let interruptStreamCancelled = false
+  let nativeInterruptListObserved = false
   let resolveInterruptRequest!: () => void
   const interruptRequest = new Promise<void>((resolve) => { resolveInterruptRequest = resolve })
   const requestTools: string[][] = []
@@ -268,6 +277,11 @@ async function main(): Promise<void> {
         if (!/\"isError\"\s*:\s*true|\"is_error\"\s*:\s*true|^\"?error:/i.test(serialized)) {
           completedOperations.add(operation)
         }
+        if (
+          selectedMode === "native-v2" &&
+          serialized.includes("/root/interrupt_child") &&
+          /interrupted|cancelled|canceled|completed/i.test(serialized)
+        ) nativeInterruptListObserved = true
       }
     }
     if (childRequest) childRequestTools.push(names)
@@ -339,7 +353,7 @@ async function main(): Promise<void> {
       rootStage = "followup"
       requestedOperations.add("wait_agent")
       operationByCallId.set(`call_${id}`, "wait_agent")
-      return sse(toolCall(id, selectedMode === "explicit-exec" ? { ...wait, namespace: "mcp__agents" } : wait, { target: primaryTarget, timeout_ms: 10000 }))
+      return sse(toolCall(id, selectedMode === "explicit-exec" ? { ...wait, namespace: "mcp__agents" } : wait, waitAgentArguments(selectedMode, primaryTarget)))
     }
     if (rootStage === "followup" && followup) {
       rootStage = "wait-followup"
@@ -354,7 +368,7 @@ async function main(): Promise<void> {
       rootStage = "list"
       requestedOperations.add("wait_followup_agent")
       operationByCallId.set(`call_${id}`, "wait_followup_agent")
-      return sse(toolCall(id, selectedMode === "explicit-exec" ? { ...wait, namespace: "mcp__agents" } : wait, { target: primaryTarget, timeout_ms: 10000 }))
+      return sse(toolCall(id, selectedMode === "explicit-exec" ? { ...wait, namespace: "mcp__agents" } : wait, waitAgentArguments(selectedMode, primaryTarget)))
     }
     if (rootStage === "list" && list) {
       rootStage = "spawn-interrupt"
@@ -375,7 +389,7 @@ async function main(): Promise<void> {
     }
     if (rootStage === "interrupt" && interrupt) {
       await Promise.race([interruptRequest, new Promise<void>((resolve) => setTimeout(resolve, 3000))])
-      rootStage = "wait-interrupt"
+      rootStage = selectedMode === "explicit-exec" ? "wait-interrupt" : "audit-interrupt"
       requestedOperations.add("interrupt_agent")
       operationByCallId.set(`call_${id}`, "interrupt_agent")
       return sse(toolCall(id, selectedMode === "explicit-exec" ? { ...interrupt, namespace: "mcp__agents" } : interrupt, { target: interruptTarget }))
@@ -384,7 +398,13 @@ async function main(): Promise<void> {
       rootStage = "close-interrupt"
       requestedOperations.add("wait_interrupt_agent")
       operationByCallId.set(`call_${id}`, "wait_interrupt_agent")
-      return sse(toolCall(id, selectedMode === "explicit-exec" ? { ...wait, namespace: "mcp__agents" } : wait, { target: interruptTarget, timeout_ms: 10000 }))
+      return sse(toolCall(id, selectedMode === "explicit-exec" ? { ...wait, namespace: "mcp__agents" } : wait, waitAgentArguments(selectedMode, interruptTarget)))
+    }
+    if (rootStage === "audit-interrupt" && list) {
+      rootStage = "final"
+      requestedOperations.add("audit_interrupt_agent")
+      operationByCallId.set(`call_${id}`, "audit_interrupt_agent")
+      return sse(toolCall(id, list, {}))
     }
     if (rootStage === "close-interrupt" && close) {
       rootStage = "final"
@@ -429,6 +449,7 @@ async function main(): Promise<void> {
     serenaCommand: join(process.cwd(), "scripts", "fixtures", "readonly-mcp-fixture.ts"),
   })
   const notifications: JsonRpcNotification[] = []
+  const appServerStderr: string[] = []
   let expectedRootThreadId = ""
   let resolveCompleted!: () => void
   const completed = new Promise<void>((resolve) => { resolveCompleted = resolve })
@@ -468,6 +489,10 @@ async function main(): Promise<void> {
         String((notification.params as Json).threadId ?? "") === expectedRootThreadId
       ) resolveCompleted()
     },
+    onStderr(line) {
+      appServerStderr.push(line)
+      process.stderr.write(`[codex-app-server] ${line}\n`)
+    },
   })
   try {
     await app.start()
@@ -484,9 +509,9 @@ async function main(): Promise<void> {
     expectedRootThreadId = String((thread.thread as Json).id)
     const closeInstruction = selectedMode === "explicit-exec"
       ? "close the interrupted child with close_agent"
-      : "native-v2 has no close_agent; interrupt the second child and wait for its terminal state"
+      : "native-v2 has no close_agent; interrupt the second child and confirm its terminal state with list_agents"
     await app.request("turn/start", { threadId: expectedRootThreadId, input: [{ type: "text", text: `Call fff and serena. Spawn one child, send it a queued message, wait, follow it up, list agents, spawn a second child, interrupt it, wait for interruption, ${closeInstruction}, and finish with ROOT_OK_FINAL.` }] })
-    await Promise.race([completed, new Promise((_, reject) => setTimeout(() => reject(new Error(`capability turn timed out; requests=${requestNumber} tools=${requestTools.map((entries) => entries.join("|")).join(";")}`)), 20_000))])
+    await Promise.race([completed, new Promise((_, reject) => setTimeout(() => reject(new Error(`capability turn timed out; requests=${requestNumber} rootStage=${rootStage} childStage=${childStage} requested=${[...requestedOperations].join("|")} completed=${[...completedOperations].join("|")} decisions=${decisions.join("|")} tools=${requestTools.map((entries) => entries.join("|")).join(";")}`)), 20_000))])
     const methods = notifications.map((item) => item.method)
     if (!methods.includes("turn/completed")) throw new Error("root turn completion was not observed")
     const lifecycleItems = notifications.map((notification) => {
@@ -520,9 +545,10 @@ async function main(): Promise<void> {
       : ["CHILD_FOLLOWUP_OK"]
     const requiredOperations = [
       "spawn_agent", "send_message", "wait_agent", "followup_task", "wait_followup_agent", "list_agents",
-      "spawn_interrupt_agent", "interrupt_agent", "wait_interrupt_agent",
+      "spawn_interrupt_agent", "interrupt_agent",
     ]
-    if (selectedMode === "explicit-exec") requiredOperations.push("close_agent")
+    if (selectedMode === "explicit-exec") requiredOperations.push("wait_interrupt_agent", "close_agent")
+    else requiredOperations.push("audit_interrupt_agent")
     const missingOperations = requiredOperations.filter((operation) => !requestedOperations.has(operation) || !completedOperations.has(operation))
     if (
       (!sawLifecycle || childRequestTools.length === 0 || childCollaborationTools.length > 0)
@@ -532,6 +558,7 @@ async function main(): Promise<void> {
       || missingOperations.length > 0
       || !interruptRequestObserved
       || (selectedMode === "native-v2" && !nativeInterruptLifecycle)
+      || (selectedMode === "native-v2" && !nativeInterruptListObserved)
       || (selectedMode === "native-v2" && nativeInteractions.size < 2)
       || requestNumber > 32
     ) {
@@ -552,7 +579,7 @@ async function main(): Promise<void> {
         .filter((item) => item.type === "subAgentActivity" || item.type === "collabAgentToolCall")
         .map((item) => JSON.stringify(item))
         .join("|")
-      throw new Error(`collab agent lifecycle/final root message was not observed; missingOperations=${missingOperations.join("|")} parentObservedSentinels=${[...parentObservedSentinels].join("|")} nativeInteractions=${nativeInteractions.size} interruptRequestObserved=${interruptRequestObserved} interruptStreamCancelled=${interruptStreamCancelled} nativeInterruptLifecycle=${nativeInterruptLifecycle} childCollaborationTools=${childCollaborationTools.join("|")} methods=${methods.join(",")} items=${items} lifecycle=${lifecycleDetails} finalMessages=${finalMessages.join("|")} warnings=${warnings} startup=${startup} shapes=${requestShapes.join(";")} tools=${requestTools.map((entries) => entries.join("|")).join(";")} decisions=${decisions.join("|")} catalogs=${requestCatalogs.join(";")}`)
+      throw new Error(`collab agent lifecycle/final root message was not observed; missingOperations=${missingOperations.join("|")} parentObservedSentinels=${[...parentObservedSentinels].join("|")} nativeInteractions=${nativeInteractions.size} interruptRequestObserved=${interruptRequestObserved} interruptStreamCancelled=${interruptStreamCancelled} nativeInterruptLifecycle=${nativeInterruptLifecycle} nativeInterruptListObserved=${nativeInterruptListObserved} childCollaborationTools=${childCollaborationTools.join("|")} methods=${methods.join(",")} items=${items} lifecycle=${lifecycleDetails} finalMessages=${finalMessages.join("|")} warnings=${warnings} startup=${startup} stderr=${appServerStderr.join("|")} shapes=${requestShapes.join(";")} tools=${requestTools.map((entries) => entries.join("|")).join(";")} decisions=${decisions.join("|")} catalogs=${requestCatalogs.join(";")}`)
     }
     const childHome = join(root, "explicit-codex-home")
     for (const fixture of ["fff", "serena"] as const) {
@@ -588,6 +615,7 @@ async function main(): Promise<void> {
       completed_operations: [...completedOperations],
       interrupt_request_observed: interruptRequestObserved,
       interrupt_stream_cancelled: interruptStreamCancelled,
+      native_interrupt_list_observed: nativeInterruptListObserved,
       native_child_collaboration_tools: childCollaborationTools,
     }
     writeFileSync(join(root, `capability-${selectedMode}.json`), JSON.stringify(report, null, 2))

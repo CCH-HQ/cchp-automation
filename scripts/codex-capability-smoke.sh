@@ -76,6 +76,8 @@ for mode in explicit-exec native-v2; do
   status=${PIPESTATUS[0]}
   set -e
   if [[ "$status" -ne 0 ]]; then
+    printf '[codex-capability] mode=%s failed status=%s log=%s\n' \
+      "$mode" "$status" "$CCHP_SMOKE_ARTIFACT_DIR/$mode.log" >&2
     if [[ "$mode" == "explicit-exec" ]]; then explicit_state="failed"; else native_state="failed"; fi
     if [[ "$explicit_state" == "pending" ]]; then explicit_state="skipped"; fi
     if [[ "$native_state" == "pending" ]]; then native_state="skipped"; fi
@@ -83,6 +85,8 @@ for mode in explicit-exec native-v2; do
     exit "$status"
   fi
   if ! validate_mode_artifact "$mode"; then
+    printf '[codex-capability] mode=%s artifact validation failed log=%s\n' \
+      "$mode" "$CCHP_SMOKE_ARTIFACT_DIR/$mode.log" >&2
     if [[ "$mode" == "explicit-exec" ]]; then explicit_state="failed"; else native_state="failed"; fi
     write_summary failed 1
     exit 1

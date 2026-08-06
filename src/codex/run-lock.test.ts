@@ -24,10 +24,12 @@ test("run lease reclaims only a dead owner and rejects malformed lock state", ()
   const owner = JSON.parse(readFileSync(lock, "utf8")) as Record<string, unknown>
   owner.owner = { pid: 999_999_999, bootId: "dead", startTicks: "dead" }
   writeFileSync(lock, `${JSON.stringify(owner)}\n`)
+  // Drop the kernel lease while preserving the intentionally drifted stale
+  // owner directory so the next writer exercises the recovery path.
+  first.release()
   const second = acquireRunLease(workdir, "run-2")
   expect(second.fence.generation).toBe(first.fence.generation + 1)
-  expect(() => first.assertOwned()).toThrow("no longer owned")
-  first.release()
+  expect(() => first.assertOwned()).toThrow("released")
   second.assertOwned()
   second.release()
 })
@@ -39,6 +41,7 @@ test("concurrent stale reclaim elects exactly one live writer", async () => {
   const stale = JSON.parse(readFileSync(ownerPath, "utf8")) as Record<string, unknown>
   stale.owner = { pid: 999_999_999, bootId: "dead", startTicks: "dead" }
   writeFileSync(ownerPath, `${JSON.stringify(stale)}\n`)
+  first.release()
 
   const moduleUrl = new URL("./run-lock.ts", import.meta.url).href
   const program = `

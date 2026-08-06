@@ -27,6 +27,7 @@ env PATH="$fixture_root/bin:/usr/bin:/bin" \
 status=$?
 set -e
 [[ "$status" -eq 17 ]]
+grep -F "[codex-capability] mode=native-v2 failed status=17 log=$artifact_dir/native-v2.log" "$fixture_root/output" >/dev/null
 node - "$artifact_dir/summary.json" <<'NODE'
 const summary = require(process.argv[2])
 if (summary.run_id !== "run-42-2" || summary.status !== "failed" || summary.stage !== "native-v2") process.exit(1)
@@ -50,6 +51,7 @@ env PATH="$fixture_root/bin:/usr/bin:/bin" \
 status=$?
 set -e
 [[ "$status" -ne 0 ]]
+grep -F "[codex-capability] mode=explicit-exec artifact validation failed log=$empty_artifact_dir/explicit-exec.log" "$fixture_root/empty-output" >/dev/null
 node - "$empty_artifact_dir/summary.json" <<'NODE'
 const summary = require(process.argv[2])
 if (summary.run_id !== "run-empty" || summary.status !== "failed" || summary.modes["explicit-exec"] !== "failed") process.exit(1)

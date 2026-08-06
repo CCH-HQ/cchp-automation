@@ -1,7 +1,20 @@
 import { randomUUID } from "node:crypto"
-import { existsSync, mkdirSync, readFileSync, readFileSync as read, renameSync, rmSync } from "node:fs"
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readFileSync as read, rmSync } from "node:fs"
 import { join } from "node:path"
+import { dlopen, FFIType } from "bun:ffi"
 import { durableWriteFile } from "./durable-file"
+
+const LOCK_EX = 2
+const LOCK_NB = 4
+const LOCK_UN = 8
+const libc = process.platform === "linux"
+  ? dlopen("libc.so.6", {
+      flock: {
+        args: [FFIType.i32, FFIType.i32],
+        returns: FFIType.i32,
+      },
+    })
+  : undefined
 
 export interface ProcessIdentity {
   pid: number
@@ -56,6 +69,25 @@ function fencePath(workdir: string): string {
   return join(workdir, "ctx", "codex", "run-fence.json")
 }
 
+function kernelLockPath(workdir: string): string {
+  return join(workdir, "ctx", "codex", "run.flock")
+}
+
+function acquireKernelLock(workdir: string): number {
+  if (!libc) throw new Error("run lease requires Linux libc flock support")
+  const fd = openSync(kernelLockPath(workdir), "a+", 0o600)
+  if (libc.symbols.flock(fd, LOCK_EX | LOCK_NB) !== 0) {
+    closeSync(fd)
+    throw new Error("run lease is already owned")
+  }
+  return fd
+}
+
+function releaseKernelLock(fd: number): void {
+  try { libc?.symbols.flock(fd, LOCK_UN) } catch { /* the descriptor is closed below */ }
+  closeSync(fd)
+}
+
 function readFence(path: string): RunFence | undefined {
   if (!existsSync(path)) return undefined
   const value = JSON.parse(readFileSync(path, "utf8")) as Partial<RunFence>
@@ -87,69 +119,63 @@ function ownerLive(owner: ProcessIdentity): boolean {
 export function acquireRunLease(workdir: string, runId?: string): RunLease {
   const path = lockPath(workdir)
   mkdirSync(join(workdir, "ctx", "codex"), { recursive: true, mode: 0o700 })
-  for (let attempt = 0; attempt < 8; attempt++) {
-    try {
-      mkdirSync(path, { mode: 0o700 })
-      const previous = readFence(fencePath(workdir))
-      const fence: RunFence = {
-        schemaVersion: 1,
-        ...(runId ? { runId } : {}),
-        writerId: randomUUID(),
-        generation: (previous?.generation ?? 0) + 1,
-        owner: processIdentity(),
-        acquiredAt: new Date().toISOString(),
-      }
-      durableWriteFile(join(path, "owner.json"), `${JSON.stringify(fence, null, 2)}\n`)
-      // Publish the global fence only after the lock directory has a complete
-      // owner record. Readers can therefore never observe a fence for a
-      // partially initialized lock.
-      durableWriteFile(fencePath(workdir), `${JSON.stringify(fence, null, 2)}\n`)
-      let released = false
-      return {
-        fence,
-        assertOwned() {
-          if (released) throw new Error("run lease is released")
-          const current = readOwner(path)
-          const global = readFence(fencePath(workdir))
-          if (!global || !sameFence(current, fence) || !sameFence(global, fence) || !sameIdentity(current.owner, processIdentity())) {
-            throw new Error("run lease fencing token is no longer owned")
-          }
-        },
-        release() {
-          if (released) return
-          released = true
-          try {
-            const current = readOwner(path)
-            const global = readFence(fencePath(workdir))
-            if (global && sameFence(current, fence) && sameFence(global, fence)) rmSync(path, { recursive: true, force: true })
-          } catch { /* cleanup must not remove a newer owner's lock */ }
-        },
-      }
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error
-      let current: RunFence
+  const kernelFd = acquireKernelLock(workdir)
+  try {
+    let current: RunFence | undefined
+    if (existsSync(path)) {
       try {
         current = readOwner(path)
       } catch (ownerError) {
-        // A live contender may have created the directory but not published
-        // owner.json yet. Never delete an unproven owner; retry briefly and
-        // fail closed if it remains malformed.
-        if ((ownerError as NodeJS.ErrnoException).code === "ENOENT") continue
-        throw ownerError
+        if ((ownerError as NodeJS.ErrnoException).code !== "ENOENT") throw ownerError
+        // No well-formed owner can be writing while the kernel lock is held.
+        // Remove only this incomplete stale directory before rebuilding it.
+        rmSync(path, { recursive: true, force: true })
       }
-      if (ownerLive(current.owner)) throw new Error(`run ${runId ?? "<unknown>"} is already owned by writer ${current.writerId}`)
-      // Reclaim only after winning an atomic rename. A competing reclaimer
-      // cannot subsequently delete a newly-created run.lock path.
-      const quarantine = `${path}.reclaim.${process.pid}.${randomUUID()}`
-      try {
-        renameSync(path, quarantine)
-      } catch (renameError) {
-        const code = (renameError as NodeJS.ErrnoException).code
-        if (code === "ENOENT" || code === "EEXIST") continue
-        throw renameError
+      if (current && ownerLive(current.owner)) {
+        throw new Error(`run ${runId ?? "<unknown>"} is already owned by writer ${current.writerId}`)
       }
-      rmSync(quarantine, { recursive: true, force: true })
+      if (current) rmSync(path, { recursive: true, force: true })
     }
+
+    mkdirSync(path, { mode: 0o700 })
+    const previous = readFence(fencePath(workdir))
+    const fence: RunFence = {
+      schemaVersion: 1,
+      ...(runId ? { runId } : {}),
+      writerId: randomUUID(),
+      generation: (previous?.generation ?? 0) + 1,
+      owner: processIdentity(),
+      acquiredAt: new Date().toISOString(),
+    }
+    durableWriteFile(join(path, "owner.json"), `${JSON.stringify(fence, null, 2)}\n`)
+    // Publish the global fence only after the lock directory has a complete
+    // owner record. Readers can therefore never observe a fence for a
+    // partially initialized lock.
+    durableWriteFile(fencePath(workdir), `${JSON.stringify(fence, null, 2)}\n`)
+    let released = false
+    return {
+      fence,
+      assertOwned() {
+        if (released) throw new Error("run lease is released")
+        const current = readOwner(path)
+        const global = readFence(fencePath(workdir))
+        if (!global || !sameFence(current, fence) || !sameFence(global, fence) || !sameIdentity(current.owner, processIdentity())) {
+          throw new Error("run lease fencing token is no longer owned")
+        }
+      },
+      release() {
+        if (released) return
+        released = true
+        try {
+          const current = readOwner(path)
+          const global = readFence(fencePath(workdir))
+          if (global && sameFence(current, fence) && sameFence(global, fence)) rmSync(path, { recursive: true, force: true })
+        } catch { /* cleanup must not remove a newer owner's lock */ }
+        releaseKernelLock(kernelFd)
+      },
+    }
+  } catch (error) {
+    releaseKernelLock(kernelFd)
+    throw error
   }
-  throw new Error("could not acquire run lease")
 }
