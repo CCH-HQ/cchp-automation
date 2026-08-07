@@ -10,6 +10,7 @@ import {
   configureGitRemote,
   createRuntimeDiagnosticBuffer,
   createProgressPublisher,
+  createTerminalProgressPublisher,
   redactRuntimeDiagnostic,
   resolveRuntimeBrokerBindings,
   resolveRuntimePermission,
@@ -218,6 +219,72 @@ test("rejects progress repository and target drift before publishing", () => {
     BOT_ISSUE_NUMBER: "9",
     BOT_PROGRESS_TARGET: "10",
   }, octokit)).toThrow(/target/)
+})
+
+test("terminal progress replaces the task sticky only while the trusted PR head is open", async () => {
+  const calls: Array<Record<string, unknown>> = []
+  const listComments = Object.assign(() => {}, { tag: "comments" })
+  const octokit = {
+    rest: {
+      pulls: {
+        get: async () => ({ data: { number: 42, state: "open", merged: false, merged_at: null, head: { sha: "head" } } }),
+      },
+      issues: {
+        listComments,
+        updateComment: async (args: Record<string, unknown>) => {
+          calls.push(args)
+          return { data: { id: args.comment_id, html_url: "https://example.invalid/comment/9" } }
+        },
+      },
+    },
+    paginate: async () => [{ id: 9, body: "working\n<!-- cchp-bot:progress:pr_opened -->" }],
+  } as unknown as GitHubClient
+  const publish = createTerminalProgressPublisher({
+    BOT_REPO: "CCH-HQ/fixture",
+    GH_REPO: "CCH-HQ/fixture",
+    BOT_TASK: "pr_opened",
+    BOT_PR_NUMBER: "42",
+    BOT_PROGRESS_TARGET: "42",
+    BOT_HEAD_SHA: "head",
+    GITHUB_RUN_ID: "123",
+  }, octokit, (value) => value.replace("ghp_runtime_secret", "[REDACTED]"))
+  expect(await publish!({
+    state: "FAILED",
+    terminalReason: "review failed authorization: Bearer ghp_runtime_secret",
+    usage: { acceptedRaw: true, consumed: 1200, limit: 2000, fraction: 0.6, state: "normal", blockingAnomalies: 0 },
+  })).toBe(true)
+  expect(calls).toHaveLength(1)
+  expect(calls[0]!.comment_id).toBe(9)
+  expect(String(calls[0]!.body)).toContain("Run complete — `pr_opened`")
+  expect(String(calls[0]!.body)).toContain("<!-- cchp-bot:progress:pr_opened -->")
+  expect(String(calls[0]!.body)).not.toContain("ghp_runtime_secret")
+})
+
+test("terminal progress skips a closed PR without creating or updating comments", async () => {
+  let writes = 0
+  const octokit = {
+    rest: {
+      pulls: { get: async () => ({ data: { state: "closed", merged: true, merged_at: "2026-08-07", head: { sha: "head" } } }) },
+      issues: {
+        listComments: Object.assign(() => {}, { tag: "comments" }),
+        createComment: async () => { writes++; return { data: {} } },
+        updateComment: async () => { writes++; return { data: {} } },
+      },
+    },
+    paginate: async () => [],
+  } as unknown as GitHubClient
+  const publish = createTerminalProgressPublisher({
+    BOT_REPO: "CCH-HQ/fixture",
+    BOT_TASK: "pr_opened",
+    BOT_PR_NUMBER: "42",
+    BOT_PROGRESS_TARGET: "42",
+    BOT_HEAD_SHA: "head",
+  }, octokit)
+  expect(await publish!({
+    state: "CANCELLED",
+    usage: { acceptedRaw: false, consumed: 0, limit: 2000, fraction: 0, state: "normal", blockingAnomalies: 0 },
+  })).toBe(false)
+  expect(writes).toBe(0)
 })
 
 test("injects the complete review protocol only for pr_opened", () => {

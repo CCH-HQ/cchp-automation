@@ -4,7 +4,7 @@ import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import type { CodexAppServer } from "./app-server"
 import { resolveRuntimeRecovery } from "./runtime"
-import { buildCodexEnvironment, Supervisor } from "./supervisor"
+import { buildCodexEnvironment, fatalSandboxError, Supervisor } from "./supervisor"
 import type { ExplicitChildLifecycle, ExplicitChildSnapshot } from "./explicit-lifecycle"
 import { ProvenanceLedger } from "./provenance"
 
@@ -44,6 +44,18 @@ async function runProcessResumePhase(phase: "seed" | "resume", workdir: string) 
   ])
   return { pid: child.pid, exitCode, stdout, stderr }
 }
+
+test("classifies deterministic sandbox startup failures without echoing stderr", () => {
+  expect(fatalSandboxError("Unable to spawn codex-linux-sandbox because: No viable candidates found in PATH"))
+    .toBe("Codex Linux sandbox helper is unavailable")
+  expect(fatalSandboxError("fs sandbox helper failed: bwrap exited 1"))
+    .toBe("Codex Linux sandbox initialization failed")
+  expect(fatalSandboxError("bwrap: Failed to make / slave: Permission denied"))
+    .toBe("Codex Linux sandbox initialization failed")
+  expect(fatalSandboxError("plugin lookup: No viable candidates found in PATH; continuing"))
+    .toBeUndefined()
+  expect(fatalSandboxError("ordinary command failed")).toBeUndefined()
+})
 
 test("builds an explicit Codex environment without caller provider or App credentials", () => {
   const env = buildCodexEnvironment({

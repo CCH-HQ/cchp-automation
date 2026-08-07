@@ -2,10 +2,13 @@
 import { existsSync, mkdirSync, readFileSync } from "node:fs"
 import { join } from "node:path"
 import { spawnSync } from "node:child_process"
+import { splitRepo } from "../context"
 import { makeOctokit, type GitHubClient, type TokenSource } from "../github/client"
 import { hideProcEnviron, startTokenRotation } from "../github/token-rotation"
 import { startGitHubBroker } from "../mcp/github-broker"
-import { progressMarkerKey, upsertSticky } from "../publish/sticky"
+import { reviewPublicationBundle } from "../mcp/server"
+import { publishFinalizedReview } from "../publish/finalized-review"
+import { progressMarkerKey, renderTerminalProgress, upsertSticky } from "../publish/sticky"
 import { finalizeReview, selectFinalizerProvenance } from "../review/finalize"
 import { TASKS, type Task } from "../types"
 import { parseCallerContract } from "./caller-contract"
@@ -20,7 +23,7 @@ import { startGitHttpProxy } from "./git-http-proxy"
 import { startProviderBridge } from "./provider-bridge"
 import { hasDurableRunState, readRunManifest, resumeStateFromManifest, type SupervisorResumeState } from "./run-manifest"
 import { acquireRunLease, type RunLease } from "./run-lock"
-import { createSupervisor, type Supervisor } from "./supervisor"
+import { createSupervisor, type Supervisor, type SupervisorResult } from "./supervisor"
 
 function required(name: string): string {
   const value = process.env[name]
@@ -246,6 +249,35 @@ export function createProgressPublisher(
   return async (body) => { await upsertSticky(octokit, repo, issueNumber, marker, body) }
 }
 
+export function createTerminalProgressPublisher(
+  env: RuntimeEnv,
+  octokit: GitHubClient,
+  redact: (value: string) => string = (value) => value,
+): ((result: Pick<SupervisorResult, "state" | "terminalReason" | "usage">) => Promise<boolean>) | undefined {
+  const publish = createProgressPublisher(env, octokit)
+  if (!publish) return undefined
+  const task = env.BOT_TASK ?? "task"
+  const runId = env.GITHUB_RUN_ID ?? env.BOT_RUN_ID ?? "unknown"
+  const prNumber = optionalPositiveInt(env, "BOT_PR_NUMBER")
+  const repo = env.BOT_REPO
+  return async (result) => {
+    if (prNumber && repo) {
+      const { owner, name } = splitRepo(repo)
+      const { data } = await octokit.rest.pulls.get({ owner, repo: name, pull_number: prNumber })
+      if (data.state !== "open" || data.merged || data.merged_at) return false
+      if (env.BOT_HEAD_SHA && data.head.sha !== env.BOT_HEAD_SHA) return false
+    }
+    await publish(renderTerminalProgress(task, {
+      state: result.state,
+      runId,
+      terminalReason: result.terminalReason ? redact(result.terminalReason) : undefined,
+      consumedTokens: result.usage.consumed,
+      tokenLimit: result.usage.limit,
+    }))
+    return true
+  }
+}
+
 export function resolveRuntimeRecovery(
   env: RuntimeEnv,
   workdir: string,
@@ -309,6 +341,7 @@ export async function main(): Promise<number> {
   let primaryError: unknown
   let cleanupErrors: RuntimeCleanupError[] = []
   let lease: RunLease | undefined
+  let publishTerminalProgress: ReturnType<typeof createTerminalProgressPublisher>
   const diagnosticSecrets = new Set<string>([
     process.env.GH_TOKEN,
     process.env.CCHP_GH_TOKEN_FILE,
@@ -401,6 +434,11 @@ export async function main(): Promise<number> {
     diagnosticSecrets.add(broker.token)
     process.env.CCHP_GITHUB_BROKER_FINALIZER = finalizerMarker
     const publishProgress = createProgressPublisher(process.env, githubClient)
+    publishTerminalProgress = createTerminalProgressPublisher(
+      process.env,
+      githubClient,
+      (value) => redactRuntimeDiagnostic(value, [...diagnosticSecrets]),
+    )
     delete process.env.GH_TOKEN
     delete process.env.CCHP_GH_TOKEN_FILE
     delete process.env.SEE_API_KEY
@@ -459,7 +497,7 @@ export async function main(): Promise<number> {
       onAppServerStderr: (line) => {
         appServerDiagnostics.push(line)
       },
-      finalizer: process.env.BOT_TASK === "pr_opened" ? (context) => {
+      finalizer: process.env.BOT_TASK === "pr_opened" ? async (context) => {
         const provenance = new ProvenanceLedger(join(workdir, "ctx", "codex", "provenance.jsonl"), context.runId)
         const evidenceProvenanceSha256 = selectFinalizerProvenance(
           finalizerMarker,
@@ -478,6 +516,17 @@ export async function main(): Promise<number> {
             admissionLedgerPath: join(workdir, "ctx", "codex", "review-admission.jsonl"),
           },
         )
+        const bundle = reviewPublicationBundle(process.env, marker)
+        await publishFinalizedReview({
+          octokit: githubClient,
+          repository: repo,
+          prNumber: marker.pr_number,
+          marker,
+          bundle,
+          idempotencyKey: context.idempotencyKey,
+          statePath: join(workdir, "ctx", "codex", "review-publication.json"),
+          env: process.env,
+        })
         return {
           ...marker,
           preterminal_provenance_sha256: context.preterminalProvenanceSha256,
@@ -486,11 +535,29 @@ export async function main(): Promise<number> {
       } : undefined,
     })
     const result = await supervisor.run()
+    if (!(permission.task === "pr_opened" && result.state === "SUCCEEDED") && publishTerminalProgress) {
+      try {
+        await publishTerminalProgress(result)
+      } catch (error) {
+        appServerDiagnostics.push(`terminal progress publication failed: ${error instanceof Error ? error.message : String(error)}`)
+      }
+    }
     flushAppServerDiagnostics()
     process.stderr.write(`[run-codex] supervisor result: ${redactRuntimeDiagnostic(JSON.stringify(result), [...diagnosticSecrets])}\n`)
     primaryExitCode = exitCodeFor(result.state, result.exitCode)
   } catch (error) {
     primaryError = error
+    if (publishTerminalProgress) {
+      try {
+        await publishTerminalProgress({
+          state: "FAILED",
+          terminalReason: error instanceof Error ? error.message : String(error),
+          usage: { acceptedRaw: false, consumed: 0, limit: 0, fraction: 0, state: "normal", blockingAnomalies: 0 },
+        })
+      } catch (publishError) {
+        appServerDiagnostics.push(`terminal progress publication failed: ${publishError instanceof Error ? publishError.message : String(publishError)}`)
+      }
+    }
     flushAppServerDiagnostics()
     process.stderr.write(`[run-codex] supervisor error: ${redactRuntimeDiagnostic(error instanceof Error ? error.stack ?? error.message : String(error), [...diagnosticSecrets])}\n`)
   } finally {

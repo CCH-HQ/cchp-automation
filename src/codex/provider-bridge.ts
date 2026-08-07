@@ -694,28 +694,78 @@ function openAiResponsesStream(upstream: Response, model: string): Response {
   const headers = responseHeaders(upstream)
   headers.set("content-type", "text/event-stream; charset=utf-8")
   const encoder = new TextEncoder()
+  let responseId = randomId("resp")
+  let closed = false
+  let terminal = false
+  let doneEmitted = false
+  const stopReading = Symbol("openai-responses-terminal")
   const stream = new ReadableStream<Uint8Array>({
     async start(controller) {
+      const close = () => {
+        if (closed) return
+        closed = true
+        controller.close()
+      }
+      const enqueue = (value: Uint8Array) => {
+        if (!closed) controller.enqueue(value)
+      }
+      const emitDone = () => {
+        if (doneEmitted) return
+        doneEmitted = true
+        enqueue(encoder.encode("data: [DONE]\n\n"))
+      }
+      const fail = (error: unknown) => {
+        if (terminal) return
+        terminal = true
+        enqueue(sseEvent({
+          type: "response.failed",
+          response: {
+            id: responseId,
+            model,
+            status: "failed",
+            error: {
+              code: "upstream_stream_error",
+              message: error instanceof Error ? error.message : String(error),
+            },
+          },
+        }))
+      }
       try {
         await consumeSse(upstreamReader, (event, data) => {
           if (data === "[DONE]") {
-            controller.enqueue(encoder.encode(`${event ? `event: ${event}\n` : ""}data: [DONE]\n\n`))
-            return
+            throw stopReading
           }
           const value = JSON.parse(data) as JsonRecord
           if (typeof value.model === "string") value.model = model
           if (value.response && typeof value.response === "object" && !Array.isArray(value.response)) {
-            ;(value.response as JsonRecord).model = model
+            const response = value.response as JsonRecord
+            if (typeof response.id === "string") responseId = response.id
+            response.model = model
           }
-          const eventName = event ?? (typeof value.type === "string" ? value.type : undefined)
-          controller.enqueue(encoder.encode(`${eventName ? `event: ${eventName}\n` : ""}data: ${JSON.stringify(value)}\n\n`))
+          const payloadType = typeof value.type === "string" ? value.type : undefined
+          const eventName = event ?? payloadType
+          enqueue(encoder.encode(`${eventName ? `event: ${eventName}\n` : ""}data: ${JSON.stringify(value)}\n\n`))
+          if (payloadType && ["response.completed", "response.failed", "response.incomplete", "response.cancelled"].includes(payloadType)) {
+            terminal = true
+            throw stopReading
+          }
         })
-        controller.close()
+        if (!terminal) fail(new Error("upstream Responses stream closed before a terminal response event"))
+        emitDone()
+        close()
       } catch (error) {
-        controller.error(error)
+        if (closed) return
+        if (error !== stopReading) fail(error)
+        else if (!terminal) fail(new Error("upstream Responses stream ended before a terminal response event"))
+        await upstreamReader.cancel().catch(() => undefined)
+        emitDone()
+        close()
       }
     },
     cancel() {
+      // The consumer owns cancellation; prevent a racing reader failure from
+      // enqueueing after the stream has already been cancelled.
+      closed = true
       void upstreamReader.cancel().catch(() => undefined)
     },
   })
@@ -1400,6 +1450,7 @@ export function startProviderBridge(
   const server = Bun.serve({
     hostname,
     port: 0,
+    idleTimeout: 0,
     async fetch(request) {
       const url = new URL(request.url)
       if (request.method === "GET" && url.pathname === "/health") {
@@ -1421,13 +1472,17 @@ export function startProviderBridge(
     },
   })
 
+  let closeTask: Promise<void> | undefined
   return {
     baseUrl: `http://${hostname}:${server.port}`,
     token,
     drain: drainUsage,
     async close() {
-      await server.stop(true)
-      await drainUsage()
+      closeTask ??= (async () => {
+        await server.stop(true)
+        await drainUsage()
+      })()
+      await closeTask
     },
   }
 }

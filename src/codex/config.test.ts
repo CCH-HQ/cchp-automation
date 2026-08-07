@@ -57,6 +57,7 @@ test("writes an isolated strict Codex config with loopback providers and no call
   expect(config).toContain('env_key = "CCHP_CODEX_BRIDGE_TOKEN"')
   expect(config).toContain(`model_catalog_json = "${join(result.codexHome, "models.json")}"`)
   expect(config).toContain("[features.multi_agent_v2]")
+  expect(config).toContain("use_legacy_landlock = true")
   // gpt-5.6-sol is code-mode-only. This setting makes collaboration tools
   // DirectModelOnly so they remain top-level and cannot be swallowed by exec.
   expect(config).toContain("non_code_mode_only = true")

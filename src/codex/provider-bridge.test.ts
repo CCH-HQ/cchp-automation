@@ -364,10 +364,13 @@ test("restores internal leaf model aliases in openai-responses SSE events", asyn
       body: JSON.stringify({ model: providers.reviewModelKey, input: "leaf", stream: true }),
     })
     expect(response.status).toBe(200)
-    const events = (await response.text())
+    const raw = await response.text()
+    const events = raw
       .split("\n")
       .filter((line) => line.startsWith("data: ") && line !== "data: [DONE]")
       .map((line) => JSON.parse(line.slice(6)) as Record<string, unknown>)
+    expect(raw.match(/^data: \[DONE\]$/gm)).toHaveLength(1)
+    expect(raw.endsWith("data: [DONE]\n\n")).toBe(true)
     expect(observedModel).toBe("gpt-5.6-sol-mini")
     expect(events).toEqual([
       {
@@ -393,6 +396,164 @@ test("restores internal leaf model aliases in openai-responses SSE events", asyn
   } finally {
     await bridge.close()
     await upstream.stop(true)
+  }
+})
+
+test("converts openai-responses stream failures into one redacted terminal event", async () => {
+  const secret = "provider-stream-secret"
+  const upstream = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    fetch() {
+      return new Response(
+        'event: response.created\ndata: {"type":"response.created","response":{"id":"resp_failed","model":"upstream/model","status":"in_progress"}}\n\n' +
+        `event: response.output_text.delta\ndata: {"leak":"${secret}"\n\n`,
+        { headers: { "content-type": "text/event-stream" } },
+      )
+    },
+  })
+  const providers = parseProviders({
+    providerJson: JSON.stringify({
+      relay: {
+        format: "openai-responses",
+        base_url: `${upstream.url}v1`,
+        models: { primary: { upstream_id: "gpt-5.6-sol" } },
+      },
+    }),
+    providerKeysJson: JSON.stringify({ relay: secret }),
+    model: "relay/primary",
+  })
+  const bridge = startProviderBridge(providers)
+
+  try {
+    const response = await fetch(`${bridge.baseUrl}/providers/relay/v1/responses`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${bridge.token}`, "content-type": "application/json" },
+      body: JSON.stringify({ model: "primary", input: "fail", stream: true }),
+    })
+    const raw = await response.text()
+    const events = raw
+      .split("\n")
+      .filter((line) => line.startsWith("data: ") && line !== "data: [DONE]")
+      .map((line) => JSON.parse(line.slice(6)) as Record<string, unknown>)
+    const failures = events.filter((event) => event.type === "response.failed")
+    expect(failures).toHaveLength(1)
+    expect(raw.match(/^data: \[DONE\]$/gm)).toHaveLength(1)
+    expect(failures[0]).toMatchObject({
+      response: {
+        id: "resp_failed",
+        model: "primary",
+        status: "failed",
+        error: { code: "upstream_stream_error" },
+      },
+    })
+    expect(raw).not.toContain(secret)
+  } finally {
+    await bridge.close()
+    await upstream.stop(true)
+  }
+})
+
+test("adds one failed terminal event when an openai-responses stream ends early", async () => {
+  const upstream = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    fetch() {
+      return new Response(
+        'event: response.created\ndata: {"type":"response.created","response":{"id":"resp_early","model":"upstream/model","status":"in_progress"}}\n\n',
+        { headers: { "content-type": "text/event-stream" } },
+      )
+    },
+  })
+  const providers = parseProviders({
+    providerJson: JSON.stringify({
+      relay: {
+        format: "openai-responses",
+        base_url: `${upstream.url}v1`,
+        models: { primary: { upstream_id: "gpt-5.6-sol" } },
+      },
+    }),
+    providerKeysJson: JSON.stringify({ relay: "provider-key" }),
+    model: "relay/primary",
+  })
+  const bridge = startProviderBridge(providers)
+
+  try {
+    const response = await fetch(`${bridge.baseUrl}/providers/relay/v1/responses`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${bridge.token}`, "content-type": "application/json" },
+      body: JSON.stringify({ model: "primary", input: "fail", stream: true }),
+    })
+    const raw = await response.text()
+    const events = raw
+      .split("\n")
+      .filter((line) => line.startsWith("data: ") && line !== "data: [DONE]")
+      .map((line) => JSON.parse(line.slice(6)) as Record<string, unknown>)
+    expect(events.filter((event) => event.type === "response.failed")).toHaveLength(1)
+    expect(raw.match(/^data: \[DONE\]$/gm)).toHaveLength(1)
+    expect(events.at(-1)).toMatchObject({
+      type: "response.failed",
+      response: { id: "resp_early", model: "primary", status: "failed" },
+    })
+  } finally {
+    await bridge.close()
+    await upstream.stop(true)
+  }
+})
+
+test("does not append a second terminal event and cancels a broken upstream stream", async () => {
+  let cancelled = false
+  const realFetch = globalThis.fetch
+  globalThis.fetch = ((input, init) => {
+    if (String(input).startsWith("https://upstream.invalid/")) {
+      return Promise.resolve(new Response(new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode(
+            'event: message\ndata: {"type":"response.completed","response":{"id":"resp_done","model":"upstream/model","status":"completed"}}\n\n' +
+            'event: response.output_text.delta\ndata: {broken\n\n',
+          ))
+        },
+        cancel() {
+          cancelled = true
+        },
+      }), { headers: { "content-type": "text/event-stream" } }))
+    }
+    return realFetch(input, init)
+  }) as typeof globalThis.fetch
+  const providers = parseProviders({
+    providerJson: JSON.stringify({
+      relay: {
+        format: "openai-responses",
+        base_url: "https://upstream.invalid/v1",
+        models: { primary: { upstream_id: "gpt-5.6-sol" } },
+      },
+    }),
+    providerKeysJson: JSON.stringify({ relay: "provider-key" }),
+    model: "relay/primary",
+  })
+  const bridge = startProviderBridge(providers)
+
+  try {
+    const response = await realFetch(`${bridge.baseUrl}/providers/relay/v1/responses`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${bridge.token}`, "content-type": "application/json" },
+      body: JSON.stringify({ model: "primary", input: "done", stream: true }),
+    })
+    const raw = await response.text()
+    const events = raw
+      .split("\n")
+      .filter((line) => line.startsWith("data: ") && line !== "data: [DONE]")
+      .map((line) => JSON.parse(line.slice(6)) as Record<string, unknown>)
+    expect(events.filter((event) => ["response.completed", "response.failed", "response.incomplete", "response.cancelled"].includes(String(event.type))))
+      .toHaveLength(1)
+    expect(events.at(-1)?.type).toBe("response.completed")
+    expect(raw.match(/^data: \[DONE\]$/gm)).toHaveLength(1)
+    expect(raw.endsWith("data: [DONE]\n\n")).toBe(true)
+    for (let attempt = 0; attempt < 20 && !cancelled; attempt++) await Bun.sleep(5)
+    expect(cancelled).toBe(true)
+  } finally {
+    globalThis.fetch = realFetch
+    await bridge.close()
   }
 })
 
@@ -511,6 +672,22 @@ test("drains delayed usage observers before the bridge closes", async () => {
     await bridge.close()
     await upstream.stop(true)
   }
+})
+
+test("provider bridge close is idempotent", async () => {
+  const providers = parseProviders({
+    providerJson: JSON.stringify({
+      relay: {
+        format: "openai-responses",
+        base_url: "https://provider.invalid/v1",
+        models: { primary: { upstream_id: "gpt-5.6-sol" } },
+      },
+    }),
+    model: "relay/primary",
+  })
+  const bridge = startProviderBridge(providers)
+  await expect(Promise.all([bridge.close(), bridge.close()])).resolves.toBeDefined()
+  await expect(bridge.close()).resolves.toBeUndefined()
 })
 
 test("converts Responses messages and tool history to OpenAI Chat without changing caller config", () => {

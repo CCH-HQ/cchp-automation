@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-import { mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs"
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs"
 import { join, resolve } from "node:path"
 import { tmpdir } from "node:os"
 import { CodexAppServer, type JsonRpcNotification } from "../src/codex/app-server"
@@ -209,6 +209,7 @@ async function main(): Promise<void> {
 
   const root = mkdtempSync(join(tmpdir(), "cchp-capability-"))
   const repo = join(root, "repo")
+  const readonlyProbePath = join(repo, ".codex-read-only-probe")
   mkdirSync(repo, { recursive: true })
   writeFileSync(join(repo, "README.md"), "smoke\n")
   const initializedRepo = Bun.spawnSync(["git", "init", "--quiet", repo], { stdout: "pipe", stderr: "pipe" })
@@ -216,7 +217,7 @@ async function main(): Promise<void> {
     throw new Error(`failed to initialize capability fixture repository: ${initializedRepo.stderr.toString()}`)
   }
   let requestNumber = 0
-  let rootStage: "fff" | "serena" | "spawn" | "send" | "wait" | "followup" | "wait-followup" | "list" | "spawn-interrupt" | "interrupt" | "wait-interrupt" | "audit-interrupt" | "close-interrupt" | "final" = "fff"
+  let rootStage: "sandbox" | "fff" | "serena" | "spawn" | "send" | "wait" | "followup" | "list" | "spawn-interrupt" | "interrupt" | "wait-interrupt" | "audit-interrupt" | "close-interrupt" | "final" = "sandbox"
   let childStage: "fff" | "serena" | "final" = "fff"
   let rootModelThreadId: string | undefined
   const parentObservedSentinels = new Set<string>()
@@ -278,11 +279,15 @@ async function main(): Promise<void> {
           parentObservedSentinels.add(sentinel)
         }
       }
-      for (const output of outputs) {
+      for (const output of [...outputs, ...customOutputs]) {
         const callId = typeof output.call_id === "string" ? output.call_id : undefined
         const operation = callId ? operationByCallId.get(callId) : undefined
         if (!operation) continue
         const serialized = JSON.stringify(output.output ?? output.result ?? "")
+        if (operation === "sandbox_exec") {
+          if (serialized.includes("SANDBOX_READ_ONLY_ENFORCED")) completedOperations.add(operation)
+          continue
+        }
         if (!/\"isError\"\s*:\s*true|\"is_error\"\s*:\s*true|^\"?error:/i.test(serialized)) {
           completedOperations.add(operation)
         }
@@ -321,6 +326,12 @@ async function main(): Promise<void> {
         return sse(customToolCall(id, exec, "const result = await tools.mcp__serena__get_current_config({}); text(result);"))
       }
       return sse(outputMessage(id, "CHILD_INITIAL_OK"))
+    }
+    if (rootStage === "sandbox" && exec) {
+      rootStage = "fff"
+      requestedOperations.add("sandbox_exec")
+      operationByCallId.set(`call_${id}`, "sandbox_exec")
+      return sse(customToolCall(id, exec, `const result = await tools.exec_command({ cmd: "pwd; touch .codex-read-only-probe", workdir: ${JSON.stringify(repo)} }); const output = result.output ?? ""; const startupFailed = /Unable to spawn codex-linux-sandbox|fs sandbox helper failed|bwrap: Failed .*Permission denied/i.test(output); text(!startupFailed && result.exit_code !== 0 && output.includes(${JSON.stringify(repo)}) ? "SANDBOX_READ_ONLY_ENFORCED" : "SANDBOX_READ_ONLY_FAILED");`))
     }
     if (rootStage === "fff" && exec) {
       rootStage = "serena"
@@ -365,19 +376,16 @@ async function main(): Promise<void> {
       return sse(toolCall(id, selectedMode === "explicit-exec" ? { ...wait, namespace: "mcp__agents" } : wait, waitAgentArguments(selectedMode, primaryTarget)))
     }
     if (rootStage === "followup" && followup) {
-      rootStage = "wait-followup"
+      // followup_task itself owns the child turn and reports its terminal
+      // output. Waiting again races with an already terminal child and can
+      // leave the capability probe waiting for provider traffic forever.
+      rootStage = "list"
       requestedOperations.add("followup_task")
       operationByCallId.set(`call_${id}`, "followup_task")
       return sse(toolCall(id, selectedMode === "explicit-exec" ? { ...followup, namespace: "mcp__agents" } : followup, {
         target: primaryTarget,
         message: "CHILD_FOLLOWUP_PROBE: reply exactly CHILD_FOLLOWUP_OK",
       }))
-    }
-    if (rootStage === "wait-followup" && wait) {
-      rootStage = "list"
-      requestedOperations.add("wait_followup_agent")
-      operationByCallId.set(`call_${id}`, "wait_followup_agent")
-      return sse(toolCall(id, selectedMode === "explicit-exec" ? { ...wait, namespace: "mcp__agents" } : wait, waitAgentArguments(selectedMode, primaryTarget)))
     }
     if (rootStage === "list" && list) {
       rootStage = "spawn-interrupt"
@@ -572,7 +580,7 @@ async function main(): Promise<void> {
       ? ["CHILD_QUEUED_OK", "CHILD_FOLLOWUP_OK"]
       : ["CHILD_FOLLOWUP_OK"]
     const requiredOperations = [
-      "spawn_agent", "send_message", "wait_agent", "followup_task", "wait_followup_agent", "list_agents",
+      "sandbox_exec", "spawn_agent", "send_message", "wait_agent", "followup_task", "list_agents",
       "spawn_interrupt_agent", "interrupt_agent",
     ]
     if (selectedMode === "explicit-exec") requiredOperations.push("wait_interrupt_agent", "close_agent")
@@ -609,6 +617,7 @@ async function main(): Promise<void> {
         .join("|")
       throw new Error(`collab agent lifecycle/final root message was not observed; missingOperations=${missingOperations.join("|")} parentObservedSentinels=${[...parentObservedSentinels].join("|")} nativeInteractions=${nativeInteractions.size} interruptRequestObserved=${interruptRequestObserved} interruptStreamCancelled=${interruptStreamCancelled} nativeInterruptLifecycle=${nativeInterruptLifecycle} nativeInterruptListObserved=${nativeInterruptListObserved} childCollaborationTools=${childCollaborationTools.join("|")} methods=${methods.join(",")} items=${items} lifecycle=${lifecycleDetails} finalMessages=${finalMessages.join("|")} warnings=${warnings} startup=${startup} stderr=${appServerStderr.join("|")} shapes=${requestShapes.join(";")} tools=${requestTools.map((entries) => entries.join("|")).join(";")} decisions=${decisions.join("|")} catalogs=${requestCatalogs.join(";")}`)
     }
+    if (existsSync(readonlyProbePath)) throw new Error("read-only sandbox allowed a repository write")
     const childHome = join(root, "explicit-codex-home")
     for (const fixture of ["fff", "serena"] as const) {
       const rootRows = readFixtureRows(prepared.codexHome, fixture)

@@ -311,6 +311,10 @@ export function prepareCodexHome(input: PrepareCodexHomeInput): PreparedCodexHom
     "enabled = false",
     "",
     "[features]",
+    // GitHub/self-hosted runner containers frequently deny the user namespaces
+    // required by Codex 0.146 bubblewrap. The pinned legacy backend preserves
+    // read-only/workspace-write enforcement with Landlock + seccomp.
+    "use_legacy_landlock = true",
     ...(allowShell ? [] : ["shell_tool = false", "unified_exec = false"]),
     `multi_agent = ${collaborationMode === "native-v2" ? "true" : "false"}`,
     "prevent_idle_sleep = true",

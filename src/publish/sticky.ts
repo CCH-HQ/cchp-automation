@@ -74,6 +74,32 @@ export function renderProgress(todos: readonly Todo[], task: string): string {
   ].join("\n")
 }
 
+export interface TerminalProgress {
+  state: string
+  runId: string
+  terminalReason?: string
+  consumedTokens?: number
+  tokenLimit?: number
+}
+
+export function renderTerminalProgress(task: string, terminal: TerminalProgress): string {
+  const reason = sanitizeTodo(terminal.terminalReason)
+  const usage = terminal.consumedTokens == null
+    ? undefined
+    : `${terminal.consumedTokens.toLocaleString("en-US")}${terminal.tokenLimit == null ? "" : ` / ${terminal.tokenLimit.toLocaleString("en-US")}`} tokens`
+  return [
+    `### ${LOGO_HEADING} Run complete — \`${sanitizeTaskName(task)}\``,
+    "",
+    `**State:** \`${sanitizeTodo(terminal.state) || "UNKNOWN"}\``,
+    `**Run:** \`${sanitizeTodo(terminal.runId) || "unknown"}\``,
+    ...(usage ? [`**Usage:** ${usage}`] : []),
+    ...(reason ? ["", `**Result:** ${reason}`] : []),
+    "",
+    "---",
+    `<sub>${BRAND_FOOTER_PREFIX} · Final status from the CCHP supervisor.</sub>`,
+  ].join("\n")
+}
+
 /** The frozen marker key for a Progress Comment on a given task
  *  (`cchp-bot:progress:<slug>`); the caller passes this to `upsertSticky`. */
 export const progressMarkerKey = (task: string): string => MARKER.progress(sanitizeTaskName(task))

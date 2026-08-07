@@ -207,6 +207,7 @@ export interface HistoryEntry {
   start_side?: string
   commit_id?: string
   body?: string
+  state?: string
   html_url?: string
   user?: string
   created_at?: string
@@ -225,6 +226,7 @@ interface RawComment {
   start_side?: string
   commit_id?: string
   body?: string | null
+  state?: string | null
   html_url?: string
   user?: { login?: string | null } | null
   created_at?: string
@@ -242,6 +244,7 @@ const simplify = (items: readonly RawComment[], kind: HistoryEntry["kind"]): His
     start_side: x.start_side,
     commit_id: x.commit_id,
     body: x.body ?? undefined,
+    state: x.state ?? undefined,
     html_url: x.html_url,
     user: x.user?.login ?? undefined,
     created_at: x.created_at,

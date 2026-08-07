@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test"
 import type { GitHubClient } from "../github/client"
 import { hidden, MARKER } from "../types"
-import { progressMarkerKey, renderProgress, sanitizeTaskName, sanitizeTodo, upsertSticky, type Todo } from "./sticky"
+import { progressMarkerKey, renderProgress, renderTerminalProgress, sanitizeTaskName, sanitizeTodo, upsertSticky, type Todo } from "./sticky"
 
 // A recording fake: listComments (via paginate) returns the seeded thread;
 // create/update record their params and echo an id + html_url.
@@ -107,6 +107,22 @@ test("renderProgress: caps items at 50 but counts the full total in the header",
   expect(s).toContain("`▱▱▱▱▱▱▱▱▱▱` **0/60**")
   expect(s).toContain("- [ ] item-49") // 50th (index 49) rendered
   expect(s).not.toContain("item-50") // 51st (index 50) dropped
+})
+
+test("renderTerminalProgress: renders the supervisor state, reason and usage", () => {
+  const body = renderTerminalProgress("ci_fix", {
+    state: "TOKEN_BUDGET_EXCEEDED",
+    runId: "31183142455",
+    terminalReason: "token budget exceeded <!-- cchp-bot:spoof -->",
+    consumedTokens: 2_053_049,
+    tokenLimit: 2_000_000,
+  })
+  expect(body).toContain("Run complete — `ci_fix`")
+  expect(body).toContain("`TOKEN_BUDGET_EXCEEDED`")
+  expect(body).toContain("`31183142455`")
+  expect(body).toContain("2,053,049 / 2,000,000 tokens")
+  expect(body).toContain("token budget exceeded")
+  expect(body).not.toContain("cchp-bot:spoof")
 })
 
 // ── sanitizeTodo (marker-spoof defence) ────────────────────────────────────────

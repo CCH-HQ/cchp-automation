@@ -15,11 +15,13 @@ WRAPPER_REGISTRY_INTEGRITY="sha512-yG3sPWNda/2YAIQIDq9MrrjoCTIQ7rxYM5IasrG3VBcuh
 case "$(uname -s):$(uname -m)" in
   Linux:x86_64|Linux:amd64)
     CODEX_TARGET="linux-x64"
+    CODEX_TARGET_TRIPLE="x86_64-unknown-linux-musl"
     EXPECTED_PLATFORM_SHA512="7ecc2fc86a6b00f08c88e12e7bfecc28c93ba428e1f6464825f257e62f5ab667e798661b602714859b041fd2c43f4fb4b79c723ea0db7cd5d8ecd4b1215b97c4"
     PLATFORM_REGISTRY_INTEGRITY="sha512-fswvyGprAPCMiOEue/7MKMk7pCjh9kZIJfJX5i9atmfnmGYbYCcUhZsEH9LEP0+0t5xyPqDbfNXY7NSxIVuXxA=="
     ;;
   Linux:aarch64|Linux:arm64)
     CODEX_TARGET="linux-arm64"
+    CODEX_TARGET_TRIPLE="aarch64-unknown-linux-musl"
     EXPECTED_PLATFORM_SHA512="aa2603c649041675c6ee3a1a7495ba43e5dc8320d70a919da5af6793f73e8b4804a26babd63edb1efc75d8d7d658217fcbc4eaae2e9acbe14bb82d8c8dd7a1b4"
     PLATFORM_REGISTRY_INTEGRITY="sha512-qiYDxkkEFnXG7joadJW6Q+XcgyDXCpGdpa9nk/c+i0gEomur1j7bHvx12NfWWCF/y8Tqri6ay+FLuC2MjdehtA=="
     ;;
@@ -195,6 +197,14 @@ bwrap_bin="$(find "$platform_dir/vendor" -type f -path '*/codex-resources/bwrap'
 bwrap_target="$(realpath --relative-to="$stage/bin" "$bwrap_bin")"
 ln -s "$bwrap_target" "$stage/bin/bwrap"
 
+native_codex="$platform_dir/vendor/$CODEX_TARGET_TRIPLE/bin/codex"
+[[ -x "$native_codex" ]] || {
+  printf '[codex-install] native Codex binary is missing from the verified platform package: %s\n' "$native_codex" >&2
+  exit 2
+}
+native_codex_target="$(realpath --relative-to="$stage/bin" "$native_codex")"
+ln -s "$native_codex_target" "$stage/bin/codex-linux-sandbox"
+
 chmod 0755 "$wrapper_dir/bin/codex.js"
 ln -s "../lib/node_modules/@openai/codex/bin/codex.js" "$stage/bin/codex"
 rm -rf -- "$PREFIX"
@@ -205,6 +215,8 @@ codex_bin="$PREFIX/bin/codex"
 [[ -x "$codex_bin" ]] || { printf '[codex-install] installed Codex binary is missing: %s\n' "$codex_bin" >&2; exit 2; }
 bwrap_bin="$PREFIX/bin/bwrap"
 [[ -x "$bwrap_bin" ]] || { printf '[codex-install] installed bundled bubblewrap is missing: %s\n' "$bwrap_bin" >&2; exit 2; }
+sandbox_bin="$PREFIX/bin/codex-linux-sandbox"
+[[ -x "$sandbox_bin" ]] || { printf '[codex-install] installed Codex Linux sandbox is missing: %s\n' "$sandbox_bin" >&2; exit 2; }
 version_output="$("$codex_bin" --version)"
 [[ "$version_output" == "codex-cli ${CODEX_VERSION}" ]] || {
   printf '[codex-install] version mismatch: %s\n' "$version_output" >&2
@@ -216,4 +228,4 @@ fi
 if [[ -n "${GITHUB_PATH:-}" ]]; then
   printf '%s\n' "$PREFIX/bin" >>"$GITHUB_PATH"
 fi
-printf '[codex-install] %s (%s) bundled_bwrap=%s\n' "$version_output" "$codex_bin" "$bwrap_bin"
+printf '[codex-install] %s (%s) bundled_bwrap=%s linux_sandbox=%s\n' "$version_output" "$codex_bin" "$bwrap_bin" "$sandbox_bin"

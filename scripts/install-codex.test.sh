@@ -7,7 +7,12 @@ trap 'rm -rf "$fixture_root"' EXIT
 
 fake_bin="$fixture_root/bin"
 fixtures="$fixture_root/fixtures"
-mkdir -p "$fake_bin" "$fixtures/wrapper/package/bin" "$fixtures/platform/package/bin" "$fixtures/platform/package/vendor/x86_64-unknown-linux-musl/codex-resources" "$fixtures/platform-arm64/package/bin" "$fixtures/platform-arm64/package/vendor/aarch64-unknown-linux-musl/codex-resources" "$fixture_root/home" "$fixture_root/work"
+mkdir -p "$fake_bin" "$fixtures/wrapper/package/bin" \
+  "$fixtures/platform/package/vendor/x86_64-unknown-linux-musl/bin" \
+  "$fixtures/platform/package/vendor/x86_64-unknown-linux-musl/codex-resources" \
+  "$fixtures/platform-arm64/package/vendor/aarch64-unknown-linux-musl/bin" \
+  "$fixtures/platform-arm64/package/vendor/aarch64-unknown-linux-musl/codex-resources" \
+  "$fixture_root/home" "$fixture_root/work"
 real_node_bin="$(command -v node)"
 [[ -x "$real_node_bin" ]]
 
@@ -35,11 +40,15 @@ EOF
 cat >"$fixtures/platform-arm64/package/package.json" <<'EOF'
 {"name":"@openai/codex","version":"0.146.0-linux-arm64"}
 EOF
-printf 'verified native payload\n' >"$fixtures/platform/package/bin/codex"
-printf 'verified arm native payload\n' >"$fixtures/platform-arm64/package/bin/codex"
+printf '#!/usr/bin/env bash\n[[ "$(basename "$0")" == "codex-linux-sandbox" ]] && printf "Linux sandbox helper\\n"\nexit 0\n' >"$fixtures/platform/package/vendor/x86_64-unknown-linux-musl/bin/codex"
+printf '#!/usr/bin/env bash\n[[ "$(basename "$0")" == "codex-linux-sandbox" ]] && printf "Linux sandbox helper\\n"\nexit 0\n' >"$fixtures/platform-arm64/package/vendor/aarch64-unknown-linux-musl/bin/codex"
 printf '#!/usr/bin/env bash\nexit 0\n' >"$fixtures/platform/package/vendor/x86_64-unknown-linux-musl/codex-resources/bwrap"
 printf '#!/usr/bin/env bash\nexit 0\n' >"$fixtures/platform-arm64/package/vendor/aarch64-unknown-linux-musl/codex-resources/bwrap"
-chmod +x "$fixtures/platform/package/vendor/x86_64-unknown-linux-musl/codex-resources/bwrap" "$fixtures/platform-arm64/package/vendor/aarch64-unknown-linux-musl/codex-resources/bwrap"
+chmod +x \
+  "$fixtures/platform/package/vendor/x86_64-unknown-linux-musl/bin/codex" \
+  "$fixtures/platform-arm64/package/vendor/aarch64-unknown-linux-musl/bin/codex" \
+  "$fixtures/platform/package/vendor/x86_64-unknown-linux-musl/codex-resources/bwrap" \
+  "$fixtures/platform-arm64/package/vendor/aarch64-unknown-linux-musl/codex-resources/bwrap"
 tar -czf "$fixtures/wrapper.tgz" -C "$fixtures/wrapper" package
 tar -czf "$fixtures/platform.tgz" -C "$fixtures/platform" package
 tar -czf "$fixtures/platform-arm64.tgz" -C "$fixtures/platform-arm64" package
@@ -269,6 +278,10 @@ grep -Fx "$fixture_root/work/codex-install/npm/bin" "$fixture_root/github-path" 
 [[ "$(wc -l <"$fixture_root/curl.trace")" -eq 6 ]]
 [[ -x "$codex_bin" ]]
 [[ -x "$fixture_root/work/codex-install/npm/bin/bwrap" ]]
+[[ -x "$fixture_root/work/codex-install/npm/bin/codex-linux-sandbox" ]]
+[[ "$("$fixture_root/work/codex-install/npm/bin/codex-linux-sandbox" --help)" == "Linux sandbox helper" ]]
+[[ "$(readlink -f "$fixture_root/work/codex-install/npm/bin/codex-linux-sandbox")" == \
+  "$fixture_root/work/codex-install/npm/lib/node_modules/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl/bin/codex" ]]
 [[ -f "$fixture_root/work/codex-install/npm/lib/node_modules/@openai/codex-linux-x64/package.json" ]]
 [[ -s "$fixture_root/installed.marker" ]]
 [[ ! -e "$fixture_root/poison.marker" ]]
@@ -285,6 +298,9 @@ fi
 grep -F '[codex-install] target=linux-arm64 platform_package=@openai/codex@0.146.0-linux-arm64' "$arm_log" >/dev/null
 [[ "$(wc -l <"$fixture_root/curl.trace")" -eq 6 ]]
 [[ -f "$fixture_root/work/codex-install/npm/lib/node_modules/@openai/codex-linux-arm64/package.json" ]]
+[[ "$("$fixture_root/work/codex-install/npm/bin/codex-linux-sandbox" --help)" == "Linux sandbox helper" ]]
+[[ "$(readlink -f "$fixture_root/work/codex-install/npm/bin/codex-linux-sandbox")" == \
+  "$fixture_root/work/codex-install/npm/lib/node_modules/@openai/codex-linux-arm64/vendor/aarch64-unknown-linux-musl/bin/codex" ]]
 
 : >"$fixture_root/github-env"
 : >"$fixture_root/curl.trace"

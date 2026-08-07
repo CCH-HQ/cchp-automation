@@ -155,10 +155,11 @@ test("times out with bounded process-group escalation and removes descendants", 
       termGraceMs: 40,
       killGraceMs: 1_000,
     })
+    const completion = expect(run.completed).rejects.toThrow("codex exec exceeded 80ms")
     await run.started
     await eventually(() => existsSync(descendantPath))
     const descendantPid = Number(readFileSync(descendantPath, "utf8").trim())
-    await expect(run.completed).rejects.toThrow("codex exec exceeded 80ms")
+    await completion
     const traceText = readFileSync(trace, "utf8")
     expect(traceText).toContain("SIGINT")
     expect(traceText).toContain("SIGTERM")

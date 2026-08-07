@@ -79,6 +79,16 @@ export interface SupervisorResult {
   usage: UsageResult
 }
 
+export function fatalSandboxError(line: string): string | undefined {
+  if (/Unable to spawn codex-linux-sandbox/i.test(line)) {
+    return "Codex Linux sandbox helper is unavailable"
+  }
+  if (/fs sandbox helper failed|bwrap: Failed .*Permission denied/i.test(line)) {
+    return "Codex Linux sandbox initialization failed"
+  }
+  return undefined
+}
+
 type RuntimeUsage = UsageResult
 
 const CODEX_ENV_ALLOWLIST = [
@@ -533,6 +543,13 @@ export class Supervisor {
     const normalized = normalizeAppServerNotification(notification)
     this.lastEventAt = Date.now()
     await this.handleEvent(normalized)
+  }
+
+  public async handleAppServerStderr(line: string): Promise<void> {
+    const reason = fatalSandboxError(line)
+    if (!reason || this.settled || this.terminalIntent) return
+    this.append({ event: "fatal_sandbox_error", reason })
+    await this.abort(reason, "FAILED", 1)
   }
 
   public async handleAppServerExit(event: CodexAppServerExit): Promise<void> {
@@ -1802,7 +1819,10 @@ export function createSupervisor(options: Omit<SupervisorOptions, "appServer"> &
     cwd: options.repoDir,
     env: { ...buildCodexEnvironment(process.env), CODEX_HOME: options.codexHome },
     onNotification: (notification) => supervisor.handleNotification(notification),
-    onStderr: options.onAppServerStderr,
+    onStderr: (line) => {
+      options.onAppServerStderr?.(line)
+      void supervisor.handleAppServerStderr(line)
+    },
     onExit: (event) => supervisor.handleAppServerExit(event),
     processRecordPath: options.processRecordPath,
     runId: options.runId,
