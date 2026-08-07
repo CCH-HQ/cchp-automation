@@ -4,7 +4,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { UsageLedger } from "./usage"
 
-test("keeps cumulative snapshots and rejects multiple terminal responses for one Codex turn", () => {
+test("keeps cumulative snapshots and bills multiple provider responses for one Codex turn exactly once", () => {
   const path = join(mkdtempSync(join(tmpdir(), "usage-")), "usage.jsonl")
   const ledger = new UsageLedger({ path, totalBudget: 1_000 })
   const update = {
@@ -38,13 +38,13 @@ test("keeps cumulative snapshots and rejects multiple terminal responses for one
   expect(readFileSync(path, "utf8").trim().split("\n")).toHaveLength(1)
 
   expect(ledger.recordRaw({ threadId: "thread_1", turnId: "turn_1", responseId: "resp_1", totalTokens: 150 })).toMatchObject({ acceptedRaw: true, consumed: 150 })
-  expect(ledger.recordRaw({ threadId: "thread_1", turnId: "turn_1", responseId: "resp_2", totalTokens: 150 })).toMatchObject({ acceptedRaw: false, consumed: 150, blockingAnomalies: 1 })
-  expect(ledger.recordRaw({ threadId: "thread_1", turnId: "turn_1", responseId: "resp_2", totalTokens: 150 })).toMatchObject({ acceptedRaw: false, consumed: 150, blockingAnomalies: 1 })
-  expect(ledger.rawCompletions).toHaveLength(1)
-  expect(ledger.anomalies.map((anomaly) => anomaly.type)).toEqual(["turn_multiple_terminal_responses"])
+  expect(ledger.recordRaw({ threadId: "thread_1", turnId: "turn_1", responseId: "resp_2", totalTokens: 150 })).toMatchObject({ acceptedRaw: true, consumed: 300, blockingAnomalies: 0 })
+  expect(ledger.recordRaw({ threadId: "thread_1", turnId: "turn_1", responseId: "resp_2", totalTokens: 150 })).toMatchObject({ acceptedRaw: false, consumed: 300, blockingAnomalies: 0 })
+  expect(ledger.rawCompletions).toHaveLength(2)
+  expect(ledger.anomalies).toHaveLength(0)
 })
 
-test("replay fails closed without rebilling a legacy second terminal response for one turn", () => {
+test("replay restores multiple provider responses for one turn without rebilling", () => {
   const path = join(mkdtempSync(join(tmpdir(), "usage-turn-replay-")), "usage.jsonl")
   const recordedAt = new Date().toISOString()
   writeFileSync(path, [
@@ -54,9 +54,9 @@ test("replay fails closed without rebilling a legacy second terminal response fo
   ].join("\n"))
 
   const restored = new UsageLedger({ path, totalBudget: 1_000 })
-  expect(restored.budget).toMatchObject({ consumed: 10, blockingAnomalies: 1 })
-  expect(restored.rawCompletions.map((record) => record.responseId)).toEqual(["first"])
-  expect(restored.anomalies.at(-1)?.type).toBe("turn_multiple_terminal_responses")
+  expect(restored.budget).toMatchObject({ consumed: 109, blockingAnomalies: 0 })
+  expect(restored.rawCompletions.map((record) => record.responseId)).toEqual(["first", "second"])
+  expect(restored.anomalies).toHaveLength(0)
 })
 
 test("keeps context and billable input semantics separate and isolates prompt jumps by thread", () => {

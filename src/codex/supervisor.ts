@@ -336,6 +336,7 @@ export class Supervisor {
   private readonly explicitProgressByChild = new Map<string, string>()
   private readonly rawResponseOwners = new Map<string, { threadId: string; turnId: string }>()
   private readonly rawResponseUsage = new Map<string, RawUsageInput>()
+  private readonly providerResponseUsage = new Map<string, ProviderBridgeUsage>()
   private readonly pendingRootTurnCompletions: NormalizedEvent[] = []
   private drainDeadlineAt?: number
   private finalizationAttempt = false
@@ -398,7 +399,10 @@ export class Supervisor {
       this.finalizationPhase = options.resume.finalizationPhase
       this.finalizerAttestation = options.resume.finalizerAttestation
       this.finalizerIdempotencyKey = options.resume.finalizerIdempotencyKey
-      for (const usage of options.resume.pendingProviderUsage ?? []) this.pendingProviderUsage.set(usage.responseId, usage)
+      for (const usage of options.resume.pendingProviderUsage ?? []) {
+        this.pendingProviderUsage.set(usage.responseId, usage)
+        this.providerResponseUsage.set(usage.responseId, usage)
+      }
     }
     this.progress = new ProgressTracker({
       path: join(codexDir, "todo.json"),
@@ -459,12 +463,15 @@ export class Supervisor {
         await this.reconcileCycle()
         return await terminal
       }
+      // Codex 0.146.0 gates exact per-response usage IDs behind this internal
+      // field. The pinned-binary capability smoke guards the wire contract.
       const thread = await this.options.appServer.request<Record<string, unknown>>("thread/start", {
         model: this.options.model,
         modelProvider: this.options.modelProvider,
         cwd: this.options.repoDir,
         approvalPolicy: this.options.approvalPolicy ?? "never",
         sandbox: this.options.sandboxMode ?? "read-only",
+        experimentalRawEvents: true,
       })
       const threadRecord = record(thread.thread)
       this.rootThreadId = text(threadRecord.id) ?? text(thread.id)
@@ -788,9 +795,55 @@ export class Supervisor {
 
   public async recordProviderUsage(usage: ProviderBridgeUsage): Promise<UsageResult> {
     if (this.options.executionMode === "native_v2") {
-      const owner = this.rawResponseOwners.get(usage.responseId)
+      this.providerResponseUsage.set(usage.responseId, usage)
+      const rawOwner = this.rawResponseOwners.get(usage.responseId)
+      const metadataOwnerKnown = Boolean(
+        usage.threadId &&
+        usage.turnId &&
+        (usage.threadId === this.rootThreadId || this.graph.edge(usage.threadId)),
+      )
+      const rawOwnerKnown = Boolean(
+        rawOwner &&
+        (!this.rootThreadId || rawOwner.threadId === this.rootThreadId || this.graph.edge(rawOwner.threadId)),
+      )
+      if (
+        rawOwner &&
+        metadataOwnerKnown &&
+        (rawOwner.threadId !== usage.threadId || rawOwner.turnId !== usage.turnId)
+      ) {
+        const result = this.usage.recordTerminalUsageConflict({
+          threadId: usage.threadId!,
+          turnId: usage.turnId!,
+          responseId: usage.responseId,
+          billingScopeId: this.options.runId,
+          provider: usage.providerId,
+          model: usage.model,
+          inputTokens: usage.inputTokens,
+          contextInputTokens: usage.contextInputTokens,
+          billableInputTokens: usage.billableInputTokens,
+          cachedInputTokens: usage.cachedInputTokens,
+          cacheWriteInputTokens: usage.cacheWriteInputTokens,
+          outputTokens: usage.outputTokens,
+          reasoningOutputTokens: usage.reasoningOutputTokens,
+          totalTokens: usage.totalTokens,
+          contextWindow: usage.contextWindow ?? this.options.contextWindow,
+          source: "provider-bridge:response.completed",
+        }, `raw/provider response owner mismatch for ${usage.responseId}: raw=${rawOwner.threadId}/${rawOwner.turnId}, provider=${usage.threadId}/${usage.turnId}`)
+        const anomaly = this.usage.anomalies.at(-1)
+        this.append({ event: "TOKEN_ANOMALY", anomaly })
+        await this.abort(`TOKEN_ANOMALY: ${anomaly?.message ?? "raw/provider response owner mismatch"}`, "FAILED")
+        return result
+      }
+      const owner = metadataOwnerKnown
+        ? { threadId: usage.threadId!, turnId: usage.turnId! }
+        : rawOwnerKnown
+          ? rawOwner
+          : undefined
       if (!owner) {
-        return this.rememberPendingProviderUsage(usage, "pending_raw_response")
+        return this.rememberPendingProviderUsage(
+          usage,
+          usage.threadId && usage.turnId ? "pending_native_child_graph" : "pending_raw_response",
+        )
       }
       const providerInput: RawUsageInput = {
         ...owner,
@@ -850,7 +903,7 @@ export class Supervisor {
 
   private async rememberPendingProviderUsage(
     usage: ProviderBridgeUsage,
-    attribution: "pending_raw_response" | "pending_explicit_child_graph",
+    attribution: "pending_raw_response" | "pending_native_child_graph" | "pending_explicit_child_graph",
   ): Promise<UsageResult> {
     const existing = this.pendingProviderUsage.get(usage.responseId)
     if (existing && !sameProviderUsage(existing, usage)) {
@@ -1006,7 +1059,7 @@ export class Supervisor {
     if (event.kind === "raw_usage") {
       const responseId = text(event.params.responseId)
       if (responseId && event.threadId && event.turnId) {
-        const provider = this.pendingProviderUsage.get(responseId)
+        const provider = this.providerResponseUsage.get(responseId) ?? this.pendingProviderUsage.get(responseId)
         const raw = record(event.params.usage)
         const rawObservation: RawUsageInput = {
           threadId: event.threadId,
@@ -1022,7 +1075,12 @@ export class Supervisor {
           totalTokens: optionalNumber(raw, "totalTokens") ?? provider?.totalTokens ?? 0,
           source: "app-server:rawResponse/completed",
         }
-        const conflict = provider ? usageObservationConflict(provider, rawObservation) : undefined
+        const ownerConflict = provider?.threadId && provider.threadId !== event.threadId
+          ? `threadId provider=${provider.threadId} raw=${event.threadId}`
+          : provider?.turnId && provider.turnId !== event.turnId
+            ? `turnId provider=${provider.turnId} raw=${event.turnId}`
+            : undefined
+        const conflict = ownerConflict ?? (provider ? usageObservationConflict(provider, rawObservation) : undefined)
         if (conflict) {
           this.pendingProviderUsage.delete(responseId)
           const result = this.usage.recordTerminalUsageConflict(rawObservation, `raw/provider terminal usage mismatch for ${responseId}: ${conflict}`)
@@ -1034,6 +1092,10 @@ export class Supervisor {
         }
         this.rawResponseOwners.set(responseId, { threadId: event.threadId, turnId: event.turnId })
         this.rawResponseUsage.set(responseId, rawObservation)
+        if (this.rootThreadId && event.threadId !== this.rootThreadId && !this.graph.edge(event.threadId)) {
+          this.writeRunManifest()
+          return
+        }
         this.pendingProviderUsage.delete(responseId)
         const totalTokens = rawObservation.totalTokens
         if (Object.keys(raw).length || provider) {
@@ -1288,7 +1350,10 @@ export class Supervisor {
   }
 
   private async reconcileExplicitChildren(): Promise<ExplicitChildSnapshot | undefined> {
-    if (!this.explicitChildren) return { active: [], terminal: [], stale: [] }
+    if (!this.explicitChildren) {
+      await this.flushPendingProviderUsage()
+      return { active: [], terminal: [], stale: [] }
+    }
     let snapshot: ExplicitChildSnapshot
     try {
       snapshot = this.explicitChildren.reconcile()

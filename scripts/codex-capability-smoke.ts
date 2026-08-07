@@ -233,6 +233,7 @@ async function main(): Promise<void> {
   const requestShapes: string[] = []
   const requestCatalogs: string[] = []
   const decisions: string[] = []
+  const requestOwners = new Map<string, { threadId: string; turnId: string }>()
   const smokeBasePort = Number(process.env.CCHP_SMOKE_PORT ?? 39765)
   if (!Number.isInteger(smokeBasePort) || smokeBasePort < 1024 || smokeBasePort > 64000) throw new Error("CCHP_SMOKE_PORT must be a valid unprivileged port")
   let upstream: ReturnType<typeof Bun.serve> | undefined
@@ -266,6 +267,9 @@ async function main(): Promise<void> {
       : {}
     const requestThreadId = typeof metadata.thread_id === "string" ? metadata.thread_id : undefined
     if (!requestThreadId) throw new Error("provider request is missing client_metadata.thread_id")
+    const requestTurnId = typeof metadata.turn_id === "string" ? metadata.turn_id : undefined
+    if (!requestTurnId) throw new Error("provider request is missing client_metadata.turn_id")
+    requestOwners.set(id, { threadId: requestThreadId, turnId: requestTurnId })
     rootModelThreadId ??= requestThreadId
     const childRequest = isChildProviderRequest(requestThreadId, rootModelThreadId)
     if (!childRequest) {
@@ -290,7 +294,7 @@ async function main(): Promise<void> {
       }
     }
     if (childRequest) childRequestTools.push(names)
-    decisions.push(`${requestNumber}:thread=${requestThreadId ?? "<missing>"}:child=${childRequest}:root=${rootStage}:childStage=${childStage}:functionOutputs=${outputs.length}:${outputs.map((item) => JSON.stringify(item.output)).join(",").slice(-500)}:customOutputs=${customOutputs.length}`)
+    decisions.push(`${requestNumber}:thread=${requestThreadId}:turn=${requestTurnId}:child=${childRequest}:root=${rootStage}:childStage=${childStage}:functionOutputs=${outputs.length}:${outputs.map((item) => JSON.stringify(item.output)).join(",").slice(-500)}:customOutputs=${customOutputs.length}`)
     if (childRequest) {
       const serializedInput = JSON.stringify(body.input ?? [])
       if (serializedInput.includes("INTERRUPT_CHILD_PROBE")) {
@@ -510,7 +514,14 @@ async function main(): Promise<void> {
     ]) {
       if (environ.includes(forbidden)) throw new Error(`app-server environment leaked ${forbidden}`)
     }
-    const thread = await app.request<Json>("thread/start", { model: "gpt-5.6-sol", modelProvider: providers.providers[0]!.codexId, cwd: repo, approvalPolicy: "never", sandbox: "read-only" })
+    const thread = await app.request<Json>("thread/start", {
+      model: "gpt-5.6-sol",
+      modelProvider: providers.providers[0]!.codexId,
+      cwd: repo,
+      approvalPolicy: "never",
+      sandbox: "read-only",
+      experimentalRawEvents: true,
+    })
     expectedRootThreadId = String((thread.thread as Json).id)
     const closeInstruction = selectedMode === "explicit-exec"
       ? "close the interrupted child with close_agent"
@@ -519,6 +530,18 @@ async function main(): Promise<void> {
     await Promise.race([completed, new Promise((_, reject) => setTimeout(() => reject(new Error(`capability turn timed out; requests=${requestNumber} rootStage=${rootStage} childStage=${childStage} requested=${[...requestedOperations].join("|")} completed=${[...completedOperations].join("|")} decisions=${decisions.join("|")} tools=${requestTools.map((entries) => entries.join("|")).join(";")}`)), 20_000))])
     const methods = notifications.map((item) => item.method)
     if (!methods.includes("turn/completed")) throw new Error("root turn completion was not observed")
+    const rawCompletions = notifications
+      .filter((notification) => notification.method === "rawResponse/completed")
+      .map((notification) => notification.params as Json)
+    if (!rawCompletions.some((raw) => raw.responseId === "resp_1")) {
+      throw new Error("Codex 0.146.0 did not correlate the first upstream completion through rawResponse/completed")
+    }
+    for (const raw of rawCompletions) {
+      const owner = requestOwners.get(String(raw.responseId ?? ""))
+      if (owner && (raw.threadId !== owner.threadId || raw.turnId !== owner.turnId)) {
+        throw new Error(`rawResponse/completed owner drifted for ${String(raw.responseId)}: expected ${owner.threadId}/${owner.turnId}, got ${String(raw.threadId)}/${String(raw.turnId)}`)
+      }
+    }
     const lifecycleItems = notifications.map((notification) => {
       const params = notification.params as Json
       return params.item && typeof params.item === "object" ? params.item as Json : {}

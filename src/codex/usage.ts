@@ -108,7 +108,6 @@ export class UsageLedger {
   private readonly rawKeys = new Map<string, RawUsageRecord>()
   private readonly responseOwners = new Map<string, string>()
   private readonly responseRecords = new Map<string, RawUsageRecord>()
-  private readonly terminalResponseByScopedThreadTurn = new Map<string, string>()
   private readonly recordsByScopedTurn = new Map<string, RawUsageRecord[]>()
   private readonly previousByModel = new Map<string, RawUsageRecord>()
   private readonly anomalyIds = new Set<string>()
@@ -167,16 +166,6 @@ export class UsageLedger {
       this.addAnomaly("invalid_usage_lineage", normalized, "usage lineage does not terminate at the billed thread or parent")
       return this.result(false)
     }
-    const scopedThreadTurn = `${scope}\0${normalized.threadId}\0${normalized.turnId}`
-    const terminalResponse = this.terminalResponseByScopedThreadTurn.get(scopedThreadTurn)
-    if (terminalResponse && terminalResponse !== normalized.responseId) {
-      this.addAnomaly(
-        "turn_multiple_terminal_responses",
-        normalized,
-        `turn ${normalized.turnId} already emitted terminal response ${terminalResponse}`,
-      )
-      return this.result(false)
-    }
     const scopedTurn = `${scope}\0${normalized.turnId}`
     const turnOverlap = (this.recordsByScopedTurn.get(scopedTurn) ?? []).find((record) =>
       record.threadId !== normalized.threadId && this.isLineageOverlap(record, normalized),
@@ -220,7 +209,6 @@ export class UsageLedger {
     this.rawKeys.set(key, normalized)
     this.responseOwners.set(input.responseId, key)
     this.responseRecords.set(input.responseId, normalized)
-    this.terminalResponseByScopedThreadTurn.set(scopedThreadTurn, normalized.responseId)
     this.recordsByScopedTurn.set(scopedTurn, [...(this.recordsByScopedTurn.get(scopedTurn) ?? []), normalized])
     this.previousByModel.set(modelScope, normalized)
     this.rawCompletions.push(normalized)
@@ -363,17 +351,6 @@ export class UsageLedger {
         return
       }
       if (record.lineage !== undefined && !this.validLineage(record)) throw new Error(`invalid usage lineage replay for ${record.responseId}`)
-      const scopedThreadTurn = `${scope}\0${record.threadId}\0${record.turnId}`
-      const terminalResponse = this.terminalResponseByScopedThreadTurn.get(scopedThreadTurn)
-      if (terminalResponse && terminalResponse !== record.responseId) {
-        this.addAnomaly(
-          "turn_multiple_terminal_responses",
-          record,
-          `turn ${record.turnId} already emitted terminal response ${terminalResponse}`,
-          false,
-        )
-        return
-      }
       const scopedTurn = `${scope}\0${record.turnId}`
       const turnOverlap = (this.recordsByScopedTurn.get(scopedTurn) ?? []).find((previous) =>
         previous.threadId !== record.threadId && this.isLineageOverlap(previous, record),
@@ -405,7 +382,6 @@ export class UsageLedger {
       this.rawKeys.set(key, record)
       this.responseOwners.set(record.responseId, key)
       this.responseRecords.set(record.responseId, record)
-      this.terminalResponseByScopedThreadTurn.set(scopedThreadTurn, record.responseId)
       this.recordsByScopedTurn.set(scopedTurn, [...(this.recordsByScopedTurn.get(scopedTurn) ?? []), record])
       this.previousByModel.set(`${record.threadId}\0${record.provider ?? "unknown"}\0${record.model ?? "unknown"}`, record)
       this.rawCompletions.push(record)

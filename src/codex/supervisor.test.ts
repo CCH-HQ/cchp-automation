@@ -91,10 +91,14 @@ test("persists a successful app-server root lifecycle and runs finalizer once", 
   const workdir = mkdtempSync(join(tmpdir(), "cchp-supervisor-"))
   let supervisor!: Supervisor
   let finalized = 0
+  let threadStartParams: Record<string, unknown> | undefined
   const fake = {
     start: async () => ({ userAgent: "fake" }),
-    request: async (method: string) => {
-      if (method === "thread/start") return { thread: { id: "root" } }
+    request: async (method: string, params?: Record<string, unknown>) => {
+      if (method === "thread/start") {
+        threadStartParams = params
+        return { thread: { id: "root" } }
+      }
       if (method === "turn/start") {
         queueMicrotask(() => void supervisor.handleNotification({
           method: "turn/completed",
@@ -125,6 +129,7 @@ test("persists a successful app-server root lifecycle and runs finalizer once", 
   })
   const result = await supervisor.run()
   expect(result).toMatchObject({ state: "SUCCEEDED", exitCode: 0, rootThreadId: "root", rootTurnId: "turn" })
+  expect(threadStartParams).toMatchObject({ experimentalRawEvents: true })
   expect(finalized).toBe(1)
   expect(supervisor.currentState).toBe("SUCCEEDED")
   expect(JSON.parse(readFileSync(join(workdir, "ctx", "codex", "run-manifest.json"), "utf8"))).toMatchObject({
@@ -1186,6 +1191,8 @@ test("attributes native raw response usage to the owning root and child turns wi
 
   const rootBridge = {
     responseId: "resp-root",
+    threadId: "root",
+    turnId: "root-turn",
     providerId: "gpt-cchp",
     model: "gpt-5.6-sol",
     inputTokens: 60,
@@ -1197,6 +1204,8 @@ test("attributes native raw response usage to the owning root and child turns wi
   }
   const childBridge = {
     responseId: "resp-child",
+    threadId: "child",
+    turnId: "child-turn",
     providerId: "gpt-cchp",
     model: "gpt-5.6-sol",
     inputTokens: 120,
@@ -1206,8 +1215,8 @@ test("attributes native raw response usage to the owning root and child turns wi
     reasoningOutputTokens: 0,
     totalTokens: 200,
   }
-  expect(await supervisor.recordProviderUsage(rootBridge)).toMatchObject({ acceptedRaw: false, consumed: 0 })
-  expect(await supervisor.recordProviderUsage(childBridge)).toMatchObject({ acceptedRaw: false, consumed: 0 })
+  expect(await supervisor.recordProviderUsage(rootBridge)).toMatchObject({ acceptedRaw: true, consumed: 100 })
+  expect(await supervisor.recordProviderUsage(childBridge)).toMatchObject({ acceptedRaw: true, consumed: 300 })
 
   await supervisor.handleNotification({
     method: "rawResponse/completed",
@@ -1252,6 +1261,120 @@ test("attributes native raw response usage to the owning root and child turns wi
 
   expect(await supervisor.recordProviderUsage(childBridge)).toMatchObject({ acceptedRaw: false, consumed: 300 })
   expect(readJsonl(join(workdir, "ctx", "codex", "usage.jsonl")).filter((row) => row.kind === "raw_completion_usage")).toHaveLength(2)
+})
+
+test("bills every distinct provider response in one native Codex tool-loop turn", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "cchp-supervisor-native-tool-loop-"))
+  const fake = { stop: async () => 0 } as unknown as CodexAppServer
+  const options = {
+    appServer: fake,
+    codexHome: join(workdir, "codex-home"), repoDir: workdir, workdir,
+    task: "manual", runId: "run-native-tool-loop", prompt: "status", model: "gpt-5.6-sol", modelProvider: "cchp",
+    totalTokenBudget: 10_000,
+    executionMode: "native_v2" as const,
+    resume: { state: "ROOT_RUNNING" as const, rootThreadId: "root", rootTurnId: "turn", restartAttempts: 0 },
+  }
+  const supervisor = new Supervisor(options)
+  for (let index = 1; index <= 14; index++) {
+    expect(await supervisor.recordProviderUsage({
+      providerId: "provider",
+      model: "model",
+      responseId: `response-${index}`,
+      threadId: "root",
+      turnId: "turn",
+      inputTokens: index,
+      cachedInputTokens: 0,
+      cacheWriteInputTokens: 0,
+      outputTokens: 1,
+      reasoningOutputTokens: 0,
+      totalTokens: index + 1,
+    })).toMatchObject({ acceptedRaw: true, blockingAnomalies: 0 })
+  }
+  expect(supervisor.currentUsage).toMatchObject({ consumed: 119, blockingAnomalies: 0 })
+  expect(readJsonl(join(workdir, "ctx", "codex", "usage.jsonl")).filter((row) => row.kind === "raw_completion_usage")).toHaveLength(14)
+
+  expect(await supervisor.recordProviderUsage({
+    providerId: "provider",
+    model: "model",
+    responseId: "response-14",
+    threadId: "root",
+    turnId: "turn",
+    inputTokens: 14,
+    cachedInputTokens: 0,
+    cacheWriteInputTokens: 0,
+    outputTokens: 1,
+    reasoningOutputTokens: 0,
+    totalTokens: 15,
+  })).toMatchObject({ acceptedRaw: false, consumed: 119, blockingAnomalies: 0 })
+
+  const restored = new Supervisor(options)
+  expect(restored.currentUsage).toMatchObject({ consumed: 119, blockingAnomalies: 0 })
+})
+
+test("waits for the native child graph before billing early provider and raw observations", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "cchp-supervisor-native-early-child-"))
+  const fake = {
+    request: async (method: string, params?: Record<string, unknown>) => {
+      if (method === "thread/read" && params?.threadId === "root") {
+        return { thread: { id: "root", turns: [{ id: "root-turn", status: "completed" }] } }
+      }
+      if (method === "thread/read" && params?.threadId === "child") {
+        return { thread: { id: "child", parentThreadId: "root", turns: [{ id: "child-turn", status: "inProgress" }] } }
+      }
+      return {}
+    },
+    stop: async () => 0,
+  } as unknown as CodexAppServer
+  const supervisor = new Supervisor({
+    appServer: fake,
+    codexHome: join(workdir, "codex-home"), repoDir: workdir, workdir,
+    task: "manual", runId: "run-native-early-child", prompt: "status", model: "gpt-5.6-sol", modelProvider: "cchp",
+    totalTokenBudget: 1_000,
+    executionMode: "native_v2",
+    resume: { state: "ROOT_RUNNING", rootThreadId: "root", rootTurnId: "root-turn", restartAttempts: 0 },
+  })
+  const provider = {
+    providerId: "provider", model: "model", responseId: "child-response",
+    threadId: "child", turnId: "child-turn",
+    inputTokens: 8, cachedInputTokens: 0, cacheWriteInputTokens: 0,
+    outputTokens: 3, reasoningOutputTokens: 0, totalTokens: 11,
+  }
+  await supervisor.handleNotification({
+    method: "rawResponse/completed",
+    params: { threadId: "child", turnId: "child-turn", responseId: "child-response", usage: { inputTokens: 8, outputTokens: 3, totalTokens: 11 } },
+  })
+  expect(await supervisor.recordProviderUsage(provider)).toMatchObject({ acceptedRaw: false, consumed: 0 })
+
+  await supervisor.handleNotification({
+    method: "item/completed",
+    params: {
+      threadId: "root",
+      turnId: "root-turn",
+      item: {
+        id: "spawn-child",
+        type: "collabAgentToolCall",
+        tool: "spawnAgent",
+        senderThreadId: "root",
+        receiverThreadIds: ["child"],
+        prompt: "inspect",
+        agentType: "explorer",
+        agentsStates: { child: { status: "running" } },
+      },
+    },
+  })
+  await supervisor.handleNotification({
+    method: "turn/completed",
+    params: { threadId: "root", turn: { id: "root-turn", status: "completed" } },
+  })
+
+  expect(supervisor.currentUsage).toMatchObject({ consumed: 11, blockingAnomalies: 0 })
+  expect(readJsonl(join(workdir, "ctx", "codex", "usage.jsonl")).filter((row) => row.kind === "raw_completion_usage")).toContainEqual(expect.objectContaining({
+    threadId: "child",
+    turnId: "child-turn",
+    parentThreadId: "root",
+    lineage: ["root", "child"],
+    responseId: "child-response",
+  }))
 })
 
 test("binds a native review completion to a durable result artifact from thread/read", async () => {
@@ -1756,6 +1879,38 @@ test("fails closed when raw and provider terminal usage disagree in either arriv
       responseId: "response",
     })
   }
+})
+
+test("fails closed when provider metadata and raw event claim different response owners", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "cchp-supervisor-owner-conflict-"))
+  const fake = { stop: async () => 0 } as unknown as CodexAppServer
+  const supervisor = new Supervisor({
+    appServer: fake,
+    codexHome: join(workdir, "codex-home"), repoDir: workdir, workdir,
+    task: "manual", runId: "run-owner-conflict", prompt: "status", model: "gpt-5.6-sol", modelProvider: "cchp",
+    totalTokenBudget: 1_000,
+    executionMode: "native_v2",
+    resume: { state: "ROOT_RUNNING", rootThreadId: "root", rootTurnId: "turn", restartAttempts: 0 },
+  })
+  expect(await supervisor.recordProviderUsage({
+    providerId: "provider", model: "model", responseId: "response",
+    threadId: "root", turnId: "turn",
+    inputTokens: 8, cachedInputTokens: 0, cacheWriteInputTokens: 0,
+    outputTokens: 3, reasoningOutputTokens: 0, totalTokens: 11,
+  })).toMatchObject({ acceptedRaw: true, consumed: 11 })
+
+  await supervisor.handleNotification({
+    method: "rawResponse/completed",
+    params: { threadId: "other", turnId: "other-turn", responseId: "response", usage: { inputTokens: 8, outputTokens: 3, totalTokens: 11 } },
+  })
+
+  expect(supervisor.currentState).toBe("FAILED")
+  expect(supervisor.currentUsage).toMatchObject({ consumed: 11, blockingAnomalies: 1 })
+  expect(readJsonl(join(workdir, "ctx", "codex", "usage.jsonl")).at(-1)).toMatchObject({
+    kind: "token_anomaly",
+    type: "terminal_usage_changed",
+    responseId: "response",
+  })
 })
 
 test("durably enriches raw-first usage with provider provenance", async () => {

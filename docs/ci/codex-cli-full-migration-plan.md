@@ -687,7 +687,9 @@ codex_rollout_budget_units, source_event, source_offset, is_replay
 
 ### 12.2 Deduplication rules
 
-- A raw completion is unique by `(thread_id, turn_id, response_id)` when response id exists.
+- A raw completion is unique by `(billing_scope_id, thread_id, turn_id, response_id)`.
+  One Codex turn may contain multiple upstream response completions during tool
+  loops; distinct response ids are billed independently.
 - A JSONL `turn.completed` usage event is unique by `(attempt_id, turn_id)`.
 - A replayed `thread/tokenUsage/updated` event updates the cumulative snapshot but never adds a billable row.
 - Root and child rows are separate. A parent total is not added again when child rows are present.
@@ -1052,9 +1054,10 @@ Final implementation evidence captured on 2026-08-06:
 - finalizer retry and crash recovery use a stable idempotency key derived from
   immutable run provenance; review attestation must echo the same key before
   terminal success is allowed;
-- usage accounting rejects a second terminal response for the same turn,
-  validates root/child billing lineage, keeps token-jump baselines thread-local
-  and separates context input from billable input semantics;
+- usage accounting accepts multiple distinct provider responses in one Codex
+  turn, deduplicates and validates conflicts by response id, validates
+  root/child billing lineage, keeps token-jump baselines thread-local and
+  separates context input from billable input semantics;
 - Gate G scans the complete `docs/` tree, README, workflow/runtime sources and
   nested package/lock manifests, with only this exact historical migration plan
   exempted from legacy terminology checks.
