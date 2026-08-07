@@ -9,7 +9,7 @@ import { normalizeAppServerNotification, type NormalizedEvent } from "./events"
 import { ChildGraph, type ChildTerminalState } from "./graph"
 import { ProgressTracker } from "./progress"
 import { ProvenanceLedger } from "./provenance"
-import type { ProviderBridgeUsage } from "./provider-bridge"
+import type { ProviderBridgeAdmission, ProviderBridgeRequest, ProviderBridgeUsage } from "./provider-bridge"
 import { UsageLedger, type CodexUsageUpdate, type RawUsageInput, type UsageResult } from "./usage"
 import type { SupervisorResumeState } from "./run-manifest"
 import { parseReviewTaskIdentity, ReviewAdmissionLedger, type ReviewPassKind, type ReviewResultBinding } from "./review-admission"
@@ -42,6 +42,8 @@ export interface SupervisorOptions {
   modelProvider: string
   contextWindow?: number
   totalTokenBudget: number
+  tokenAdmissionFraction?: number
+  maxResponsesPerTurn?: number
   drainUsage?: () => Promise<void>
   finalizer?: (context: SupervisorFinalizerContext) => unknown | Promise<unknown>
   publishProgress?: (body: string) => Promise<void>
@@ -83,7 +85,11 @@ export function fatalSandboxError(line: string): string | undefined {
   if (/Unable to spawn codex-linux-sandbox/i.test(line)) {
     return "Codex Linux sandbox helper is unavailable"
   }
-  if (/fs sandbox helper failed|bwrap: Failed .*Permission denied/i.test(line)) {
+  if (
+    /fs sandbox helper failed|bwrap: Failed .*Permission denied/i.test(line) ||
+    /permission profiles requiring direct runtime enforcement are incompatible with --use-legacy-landlock/i.test(line) ||
+    /panicked at .*linux-sandbox/i.test(line)
+  ) {
     return "Codex Linux sandbox initialization failed"
   }
   return undefined
@@ -374,7 +380,13 @@ export class Supervisor {
     this.unknownPath = join(codexDir, "events-unknown.jsonl")
     this.manifestPath = join(codexDir, "run-manifest.json")
     this.provenance = new ProvenanceLedger(join(codexDir, "provenance.jsonl"), options.runId, options.assertWriterOwnership)
-    this.usage = new UsageLedger({ path: join(codexDir, "usage.jsonl"), totalBudget: options.totalTokenBudget, assertWriterOwnership: options.assertWriterOwnership })
+    this.usage = new UsageLedger({
+      path: join(codexDir, "usage.jsonl"),
+      totalBudget: options.totalTokenBudget,
+      admissionFraction: options.tokenAdmissionFraction,
+      maxResponsesPerTurn: options.maxResponsesPerTurn,
+      assertWriterOwnership: options.assertWriterOwnership,
+    })
     for (const completion of this.usage.rawCompletions) {
       this.rawResponseOwners.set(completion.responseId, { threadId: completion.threadId, turnId: completion.turnId })
       this.rawResponseUsage.set(completion.responseId, completion)
@@ -810,6 +822,43 @@ export class Supervisor {
     return { billingScopeId: this.options.runId, lineage }
   }
 
+  public async authorizeProviderRequest(request: ProviderBridgeRequest): Promise<ProviderBridgeAdmission> {
+    const threadId = request.threadId ?? this.rootThreadId ?? this.options.runId
+    const turnId = request.turnId ?? (threadId === this.rootThreadId ? this.rootTurnId : undefined) ?? `pending:${threadId}`
+    const admission = this.usage.admitNextResponse({
+      billingScopeId: this.options.runId,
+      threadId,
+      turnId,
+      provider: request.providerId,
+      model: request.model,
+      contextWindow: request.contextWindow ?? this.options.contextWindow,
+    })
+    this.append({
+      event: "provider_request_admission",
+      threadId,
+      turnId,
+      provider: request.providerId,
+      model: request.model,
+      contextWindow: request.contextWindow,
+      ...admission,
+    })
+    this.writeRunManifest()
+    if (admission.allowed) return { allowed: true, reservationId: admission.reservationId }
+    const reason = `token budget admission denied: ${admission.reason}; consumed=${admission.consumed} threshold=${admission.threshold} reserved=${admission.reservedTokens} estimated_next=${admission.estimatedNextTokens} responses_in_turn=${admission.responsesInTurn} responses_in_flight=${admission.responsesInFlight}`
+    if (!this.settled) await this.abort(reason, "TOKEN_BUDGET_EXCEEDED")
+    return { allowed: false, reason }
+  }
+
+  public async releaseProviderReservation(reservationId: string, reason = "provider_request_finished"): Promise<void> {
+    if (!this.usage.releaseReservation(reservationId, reason)) return
+    this.append({
+      event: "provider_request_reservation_released",
+      reservationId,
+      reason,
+    })
+    this.writeRunManifest()
+  }
+
   public async recordProviderUsage(usage: ProviderBridgeUsage): Promise<UsageResult> {
     if (this.options.executionMode === "native_v2") {
       this.providerResponseUsage.set(usage.responseId, usage)
@@ -832,6 +881,7 @@ export class Supervisor {
           threadId: usage.threadId!,
           turnId: usage.turnId!,
           responseId: usage.responseId,
+          reservationId: usage.reservationId,
           billingScopeId: this.options.runId,
           provider: usage.providerId,
           model: usage.model,
@@ -867,6 +917,7 @@ export class Supervisor {
         ...this.usageAttribution(owner.threadId, this.graph.edge(owner.threadId)?.parentId),
         parentThreadId: this.graph.edge(owner.threadId)?.parentId,
         responseId: usage.responseId,
+        reservationId: usage.reservationId,
         provider: usage.providerId,
         model: usage.model,
         inputTokens: usage.inputTokens,
@@ -902,6 +953,7 @@ export class Supervisor {
       ...this.usageAttribution(threadId, parentThreadId),
       parentThreadId,
       responseId: usage.responseId,
+      reservationId: usage.reservationId,
       provider: usage.providerId,
       model: usage.model,
       inputTokens: usage.inputTokens,
@@ -928,6 +980,7 @@ export class Supervisor {
         threadId: usage.threadId ?? existing.threadId ?? "pending",
         turnId: usage.turnId ?? existing.turnId ?? usage.responseId,
         responseId: usage.responseId,
+        reservationId: usage.reservationId,
         billingScopeId: this.options.runId,
         provider: usage.providerId,
         model: usage.model,
@@ -974,6 +1027,7 @@ export class Supervisor {
         ...this.usageAttribution(threadId, parentThreadId),
         parentThreadId,
         responseId,
+        reservationId: usage.reservationId,
         provider: usage.providerId,
         model: usage.model,
         inputTokens: usage.inputTokens,
@@ -1082,6 +1136,7 @@ export class Supervisor {
           threadId: event.threadId,
           turnId: event.turnId,
           responseId,
+          reservationId: provider?.reservationId,
           inputTokens: optionalNumber(raw, "inputTokens"),
           contextInputTokens: optionalNumber(raw, "contextInputTokens"),
           billableInputTokens: optionalNumber(raw, "billableInputTokens"),
@@ -1123,6 +1178,7 @@ export class Supervisor {
             ...attribution,
             parentThreadId: this.graph.edge(event.threadId)?.parentId,
             responseId,
+            reservationId: provider?.reservationId,
             provider: provider?.providerId,
             model: provider?.model,
             inputTokens: Number(raw.inputTokens ?? provider?.inputTokens ?? 0),

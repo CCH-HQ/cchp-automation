@@ -645,6 +645,7 @@ test("reports stable provider response usage without exposing the upstream crede
   })
   const bridge = startProviderBridge(providers, {
     token: "loopback-token",
+    onBeforeRequest: () => ({ allowed: true, reservationId: "reservation-stable" }),
     onUsage: async (record) => { usage.push(record as unknown as Record<string, unknown>) },
   })
   try {
@@ -668,8 +669,134 @@ test("reports stable provider response usage without exposing the upstream crede
       reasoningOutputTokens: 400,
       totalTokens: 21_000,
       contextWindow: 372_000,
+      reservationId: "reservation-stable",
     }])
     expect(JSON.stringify(usage)).not.toContain("provider-secret")
+  } finally {
+    await bridge.close()
+    await upstream.stop(true)
+  }
+})
+
+test("denies a provider request before upstream dispatch when runtime admission rejects it", async () => {
+  let upstreamRequests = 0
+  const admissions: Array<Record<string, unknown>> = []
+  const upstream = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    fetch() {
+      upstreamRequests += 1
+      return Response.json({ id: "unexpected", status: "completed", output: [] })
+    },
+  })
+  const providers = parseProviders({
+    providerJson: JSON.stringify({
+      relay: {
+        format: "openai-responses",
+        base_url: `${upstream.url}v1`,
+        models: { primary: { upstream_id: "gpt-5.6-sol", context: 372000 } },
+      },
+    }),
+    providerKeysJson: JSON.stringify({ relay: "provider-secret" }),
+    model: "relay/primary",
+  })
+  const bridge = startProviderBridge(providers, {
+    onBeforeRequest(request) {
+      admissions.push(request as unknown as Record<string, unknown>)
+      return { allowed: false, reason: "projected token budget would exceed the threshold" }
+    },
+  })
+  try {
+    const response = await fetch(`${bridge.baseUrl}/providers/relay/v1/responses`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${bridge.token}`, "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "primary",
+        input: "inspect",
+        client_metadata: { thread_id: "thread", turn_id: "turn" },
+      }),
+    })
+    expect(response.status).toBe(429)
+    expect(await response.json()).toEqual({
+      error: {
+        type: "token_budget_admission_denied",
+        message: "projected token budget would exceed the threshold",
+      },
+    })
+    expect(admissions).toEqual([{
+      providerId: "relay",
+      model: "primary",
+      threadId: "thread",
+      turnId: "turn",
+      contextWindow: 372000,
+    }])
+    expect(upstreamRequests).toBe(0)
+  } finally {
+    await bridge.close()
+    upstream.stop(true)
+  }
+})
+
+test("releases an admitted reservation when upstream returns without terminal usage", async () => {
+  const finished: Array<{ id: string; outcome: string; reason?: string }> = []
+  const upstream = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    fetch() {
+      return Response.json({ error: { message: "temporary upstream failure" } }, { status: 502 })
+    },
+  })
+  const providers = parseProviders({
+    providerJson: JSON.stringify({ relay: { format: "openai-responses", base_url: `${upstream.url}v1`, models: { primary: { upstream_id: "gpt-5.6-sol", context: 1000 } } } }),
+    providerKeysJson: JSON.stringify({ relay: "provider-secret" }),
+    model: "relay/primary",
+  })
+  const bridge = startProviderBridge(providers, {
+    onBeforeRequest: () => ({ allowed: true, reservationId: "reservation-failure" }),
+    onRequestFinished: (id, outcome, reason) => { finished.push({ id, outcome, ...(reason ? { reason } : {}) }) },
+  })
+  try {
+    const response = await fetch(`${bridge.baseUrl}/providers/relay/v1/responses`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${bridge.token}`, "content-type": "application/json" },
+      body: JSON.stringify({ model: "primary", input: "inspect" }),
+    })
+    expect(response.status).toBe(502)
+    await bridge.drain()
+    expect(finished).toEqual([{ id: "reservation-failure", outcome: "released", reason: "upstream_status_502" }])
+  } finally {
+    await bridge.close()
+    await upstream.stop(true)
+  }
+})
+
+test("releases an admitted reservation when a successful upstream payload cannot be translated", async () => {
+  const finished: Array<{ id: string; outcome: string; reason?: string }> = []
+  const upstream = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    fetch() {
+      return Response.json({ id: "malformed", choices: [] })
+    },
+  })
+  const providers = parseProviders({
+    providerJson: JSON.stringify({ relay: { format: "openai-compatible", base_url: `${upstream.url}v1`, models: { primary: { upstream_id: "gpt-5.6-sol", context: 1000 } } } }),
+    providerKeysJson: JSON.stringify({ relay: "provider-secret" }),
+    model: "relay/primary",
+  })
+  const bridge = startProviderBridge(providers, {
+    onBeforeRequest: () => ({ allowed: true, reservationId: "reservation-malformed" }),
+    onRequestFinished: (id, outcome, reason) => { finished.push({ id, outcome, ...(reason ? { reason } : {}) }) },
+  })
+  try {
+    const response = await fetch(`${bridge.baseUrl}/providers/relay/v1/responses`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${bridge.token}`, "content-type": "application/json" },
+      body: JSON.stringify({ model: "primary", input: "inspect" }),
+    })
+    expect(response.status).toBe(502)
+    expect(await response.json()).toMatchObject({ error: { type: "upstream_response_error" } })
+    expect(finished).toEqual([{ id: "reservation-malformed", outcome: "released", reason: "response_translation_error" }])
   } finally {
     await bridge.close()
     await upstream.stop(true)

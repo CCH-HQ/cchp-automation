@@ -251,7 +251,10 @@ test("terminal progress replaces the task sticky only while the trusted PR head 
   expect(await publish!({
     state: "FAILED",
     terminalReason: "review failed authorization: Bearer ghp_runtime_secret",
-    usage: { acceptedRaw: true, consumed: 1200, limit: 2000, fraction: 0.6, state: "normal", blockingAnomalies: 0 },
+    usage: {
+      acceptedRaw: true, consumed: 1200, limit: 2000, fraction: 0.6, state: "normal",
+      blockingAnomalies: 0, responses: 1, turns: 1, admissionDenials: 0,
+    },
   })).toBe(true)
   expect(calls).toHaveLength(1)
   expect(calls[0]!.comment_id).toBe(9)
@@ -282,7 +285,10 @@ test("terminal progress skips a closed PR without creating or updating comments"
   }, octokit)
   expect(await publish!({
     state: "CANCELLED",
-    usage: { acceptedRaw: false, consumed: 0, limit: 2000, fraction: 0, state: "normal", blockingAnomalies: 0 },
+    usage: {
+      acceptedRaw: false, consumed: 0, limit: 2000, fraction: 0, state: "normal",
+      blockingAnomalies: 0, responses: 0, turns: 0, admissionDenials: 0,
+    },
   })).toBe(false)
   expect(writes).toBe(0)
 })

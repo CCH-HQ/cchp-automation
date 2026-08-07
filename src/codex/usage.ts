@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto"
 import { appendJsonl, readJsonl } from "./jsonl"
 
 export type TokenBudgetState = "normal" | "warning" | "throttled" | "exceeded"
@@ -41,6 +42,7 @@ export interface RawUsageInput {
   contextWindow?: number
   anomalyReason?: string
   source?: string
+  reservationId?: string
 }
 
 export interface RawUsageRecord extends RawUsageInput {
@@ -55,6 +57,22 @@ export interface UsageResult {
   fraction: number
   state: TokenBudgetState
   blockingAnomalies: number
+  responses: number
+  turns: number
+  admissionDenials: number
+}
+
+export interface UsageAdmission {
+  allowed: boolean
+  reason?: "budget_threshold" | "projected_budget" | "response_limit"
+  consumed: number
+  limit: number
+  threshold: number
+  estimatedNextTokens: number
+  responsesInTurn: number
+  responsesInFlight: number
+  reservedTokens: number
+  reservationId?: string
 }
 
 export type TokenAnomalyType =
@@ -82,6 +100,17 @@ export interface UsageLedgerOptions {
   path?: string
   totalBudget: number
   assertWriterOwnership?: () => void
+  admissionFraction?: number
+  maxResponsesPerTurn?: number
+}
+
+interface UsageReservation {
+  id: string
+  scopedTurn: string
+  provider?: string
+  model?: string
+  estimatedTokens: number
+  recordedAt: string
 }
 
 function finiteToken(value: unknown): number {
@@ -110,13 +139,21 @@ export class UsageLedger {
   private readonly responseRecords = new Map<string, RawUsageRecord>()
   private readonly recordsByScopedTurn = new Map<string, RawUsageRecord[]>()
   private readonly previousByModel = new Map<string, RawUsageRecord>()
+  private readonly reservations = new Map<string, UsageReservation>()
   private readonly anomalyIds = new Set<string>()
   private readonly anomalyKeys = new Set<string>()
   private consumed = 0
+  private admissionDenials = 0
 
   constructor(private readonly options: UsageLedgerOptions) {
     if (!Number.isSafeInteger(options.totalBudget) || options.totalBudget <= 0) {
       throw new Error("total token budget must be a positive integer")
+    }
+    if (options.admissionFraction !== undefined && (!Number.isFinite(options.admissionFraction) || options.admissionFraction <= 0 || options.admissionFraction > 1)) {
+      throw new Error("token admission fraction must be within (0, 1]")
+    }
+    if (options.maxResponsesPerTurn !== undefined && (!Number.isSafeInteger(options.maxResponsesPerTurn) || options.maxResponsesPerTurn <= 0)) {
+      throw new Error("max responses per turn must be a positive integer")
     }
     if (options.path) for (const row of readJsonl(options.path)) this.replay(row)
   }
@@ -160,10 +197,12 @@ export class UsageLedger {
       } else {
         if (this.enrichRecord(previous, normalized)) this.append(previous)
       }
+      if (input.reservationId) this.releaseReservation(input.reservationId, "duplicate_usage")
       return this.result(false)
     }
     if (normalized.lineage !== undefined && !this.validLineage(normalized)) {
       this.addAnomaly("invalid_usage_lineage", normalized, "usage lineage does not terminate at the billed thread or parent")
+      if (input.reservationId) this.releaseReservation(input.reservationId, "invalid_lineage")
       return this.result(false)
     }
     const scopedTurn = `${scope}\0${normalized.turnId}`
@@ -176,6 +215,7 @@ export class UsageLedger {
         normalized,
         `turn ${normalized.turnId} was already billed to overlapping lineage ${turnOverlap.lineage?.join("/") ?? turnOverlap.threadId}`,
       )
+      if (input.reservationId) this.releaseReservation(input.reservationId, "lineage_overlap")
       return this.result(false)
     }
     const responseOwner = this.responseOwners.get(input.responseId)
@@ -189,6 +229,7 @@ export class UsageLedger {
           ? "billing_scope_double_billing"
           : "response_double_billing"
       this.addAnomaly(anomalyType, normalized, `response ${input.responseId} was already billed to ${responseOwner}`)
+      if (input.reservationId) this.releaseReservation(input.reservationId, "response_conflict")
       return this.result(false)
     }
     const inputTokens = normalized.contextInputTokens ?? 0
@@ -214,6 +255,7 @@ export class UsageLedger {
     this.rawCompletions.push(normalized)
     this.consumed += normalized.totalTokens
     this.append(normalized)
+    if (input.reservationId) this.releaseReservation(input.reservationId, "usage_recorded")
     return this.result(true)
   }
 
@@ -221,8 +263,94 @@ export class UsageLedger {
     return this.result(false)
   }
 
+  admitNextResponse(input: {
+    billingScopeId: string
+    threadId: string
+    turnId: string
+    provider?: string
+    model?: string
+    contextWindow?: number
+  }): UsageAdmission {
+    const threshold = Math.floor(this.options.totalBudget * (this.options.admissionFraction ?? 0.85))
+    const scopedTurn = `${input.billingScopeId}\0${input.turnId}`
+    const records = this.recordsByScopedTurn.get(scopedTurn) ?? []
+    const turnReservations = [...this.reservations.values()].filter((reservation) => reservation.scopedTurn === scopedTurn)
+    const matchesModel = (record: RawUsageRecord): boolean =>
+      (!input.provider || record.provider === input.provider) && (!input.model || record.model === input.model)
+    const prior = [...records].reverse().find(matchesModel) ?? (
+      input.provider || input.model
+        ? this.previousByModel.get(`${input.threadId}\0${input.provider ?? "unknown"}\0${input.model ?? "unknown"}`)
+        : records.at(-1)
+    )
+    const estimatedNextTokens = prior
+      ? Math.max(prior.totalTokens, prior.contextInputTokens ?? 0)
+      : finiteToken(input.contextWindow) || threshold
+    const reservedBefore = [...this.reservations.values()].reduce((sum, reservation) => sum + reservation.estimatedTokens, 0)
+    const responsesInFlightBefore = turnReservations.length
+    let reason: UsageAdmission["reason"]
+    if (records.length + responsesInFlightBefore >= (this.options.maxResponsesPerTurn ?? 16)) {
+      reason = "response_limit"
+    } else if (this.consumed + reservedBefore >= threshold) {
+      reason = "budget_threshold"
+    } else if (this.consumed + reservedBefore + estimatedNextTokens > threshold) {
+      reason = "projected_budget"
+    }
+    let reservationId: string | undefined
+    if (reason) {
+      this.admissionDenials += 1
+    } else {
+      reservationId = randomUUID()
+      const recordedAt = new Date().toISOString()
+      this.reservations.set(reservationId, {
+        id: reservationId,
+        scopedTurn,
+        ...(input.provider ? { provider: input.provider } : {}),
+        ...(input.model ? { model: input.model } : {}),
+        estimatedTokens: estimatedNextTokens,
+        recordedAt,
+      })
+      this.append({
+        kind: "reservation_acquired",
+        reservationId,
+        scopedTurn,
+        billingScopeId: input.billingScopeId,
+        threadId: input.threadId,
+        turnId: input.turnId,
+        provider: input.provider,
+        model: input.model,
+        estimatedTokens: estimatedNextTokens,
+        recordedAt,
+      })
+    }
+    return {
+      allowed: !reason,
+      ...(reason ? { reason } : {}),
+      ...(reservationId ? { reservationId } : {}),
+      consumed: this.consumed,
+      limit: this.options.totalBudget,
+      threshold,
+      estimatedNextTokens,
+      responsesInTurn: records.length,
+      responsesInFlight: responsesInFlightBefore + (reservationId ? 1 : 0),
+      reservedTokens: reservedBefore + (reservationId ? estimatedNextTokens : 0),
+    }
+  }
+
   hasBlockingAnomalies(): boolean {
     return this.anomalies.some((anomaly) => anomaly.blocking)
+  }
+
+  releaseReservation(reservationId: string, reason = "request_finished"): boolean {
+    const reservation = this.reservations.get(reservationId)
+    if (!reservation) return false
+    this.reservations.delete(reservationId)
+    this.append({
+      kind: "reservation_released",
+      reservationId,
+      reason,
+      recordedAt: new Date().toISOString(),
+    })
+    return true
   }
 
   recordTerminalUsageConflict(input: RawUsageInput, message: string): UsageResult {
@@ -240,6 +368,7 @@ export class UsageLedger {
       totalTokens: finiteToken(input.totalTokens),
     }
     this.addAnomaly("terminal_usage_changed", record, message)
+    if (input.reservationId) this.releaseReservation(input.reservationId, "terminal_usage_conflict")
     return this.result(false)
   }
 
@@ -265,6 +394,9 @@ export class UsageLedger {
       fraction,
       state,
       blockingAnomalies: this.anomalies.filter((anomaly) => anomaly.blocking).length,
+      responses: this.rawCompletions.length,
+      turns: this.recordsByScopedTurn.size,
+      admissionDenials: this.admissionDenials,
     }
   }
 
@@ -342,6 +474,7 @@ export class UsageLedger {
         reasoningOutputTokens: finiteToken(row.reasoningOutputTokens),
         totalTokens: finiteToken(row.totalTokens),
       } as RawUsageRecord
+      if (record.reservationId) this.reservations.delete(record.reservationId)
       const scope = record.billingScopeId ?? record.threadId
       const key = `${scope}\0${record.threadId}\0${record.turnId}\0${record.responseId}`
       const existing = this.rawKeys.get(key)
@@ -386,6 +519,28 @@ export class UsageLedger {
       this.previousByModel.set(`${record.threadId}\0${record.provider ?? "unknown"}\0${record.model ?? "unknown"}`, record)
       this.rawCompletions.push(record)
       this.consumed += record.totalTokens
+      return
+    }
+    if (row.kind === "reservation_acquired") {
+      if (
+        typeof row.reservationId !== "string" || !row.reservationId ||
+        typeof row.scopedTurn !== "string" || !row.scopedTurn ||
+        typeof row.estimatedTokens !== "number" || !Number.isSafeInteger(row.estimatedTokens) || row.estimatedTokens < 0 ||
+        typeof row.recordedAt !== "string" || !row.recordedAt
+      ) throw new Error("invalid usage reservation acquisition replay row")
+      this.reservations.set(row.reservationId, {
+        id: row.reservationId,
+        scopedTurn: row.scopedTurn,
+        ...(typeof row.provider === "string" ? { provider: row.provider } : {}),
+        ...(typeof row.model === "string" ? { model: row.model } : {}),
+        estimatedTokens: row.estimatedTokens,
+        recordedAt: row.recordedAt,
+      })
+      return
+    }
+    if (row.kind === "reservation_released") {
+      if (typeof row.reservationId !== "string" || !row.reservationId) throw new Error("invalid usage reservation release replay row")
+      this.reservations.delete(row.reservationId)
       return
     }
     if (row.kind === "thread_cumulative_usage") {

@@ -105,10 +105,13 @@ jobs:
           if (summary.run_id !== process.env.CCHP_ARTIFACT_RUN_ID) throw new Error("capability evidence belongs to another run")
           if (summary.schema_version !== 1 || summary.stage !== "completed" || summary.status !== "passed") throw new Error("capability evidence is not a complete passed run")
           if (!summary.modes || summary.modes["explicit-exec"] !== "passed" || summary.modes["native-v2"] !== "passed") throw new Error("capability summary modes are incomplete")
+          if (!summary.workspace_write || summary.workspace_write["explicit-exec"] !== "passed" || summary.workspace_write["native-v2"] !== "passed") throw new Error("capability summary workspace-write modes are incomplete")
           const directory = process.env.CCHP_SMOKE_ARTIFACT_DIR
           for (const [name, mode] of [["capability-explicit-exec.json", "explicit-exec"], ["capability-native-v2.json", "native-v2"]]) {
             const artifact = JSON.parse(fs.readFileSync(`${directory}/${name}`, "utf8"))
             if (artifact.schema_version !== 1 || artifact.run_id !== process.env.CCHP_ARTIFACT_RUN_ID || artifact.status !== "passed" || artifact.collaborationMode !== mode) throw new Error(`invalid capability artifact ${name}`)
+            const workspace = artifact.workspace_write
+            if (!workspace || workspace.status !== "passed" || workspace.thread_completed !== true || workspace.apply_patch !== "passed" || workspace.ordinary_repo_write !== "passed" || workspace.git_metadata_protected !== "passed" || workspace.agents_metadata_protected !== "passed" || workspace.enforcement !== "direct") throw new Error(`invalid workspace-write capability artifact ${name}`)
           }
           NODE
 

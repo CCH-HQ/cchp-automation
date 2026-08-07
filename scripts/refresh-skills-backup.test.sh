@@ -2,10 +2,12 @@
 set -euo pipefail
 
 ROOT="$(cd -- "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+export CCHP_BUN_BIN="$(command -v bun)"
 test_root="$(mktemp -d)"
 trap 'rm -rf -- "$test_root"' EXIT
 mkdir -p "$test_root/repo/scripts" "$test_root/repo/skills" "$test_root/bin"
-cp "$ROOT/scripts/skills-lib.sh" "$ROOT/scripts/refresh-skills-backup.sh" "$test_root/repo/scripts/"
+cp "$ROOT/scripts/skills-lib.sh" "$ROOT/scripts/validate-skill-frontmatter.ts" \
+  "$ROOT/scripts/atomic-replace-directory.ts" "$ROOT/scripts/refresh-skills-backup.sh" "$test_root/repo/scripts/"
 cat > "$test_root/repo/skills/manifest.json" <<'JSON'
 {"schemaVersion":1,"sources":[{"id":"fixture","url":"https://github.com/example/skills/tree/main/skills/live","timeoutSeconds":5}]}
 JSON
@@ -14,7 +16,17 @@ cat > "$test_root/bin/bunx" <<'SH'
 set -euo pipefail
 [[ "${FAIL_SKILLS:-0}" != "1" ]] || exit 23
 mkdir -p .agents/skills/live
-printf '%s\n' '# live' > .agents/skills/live/SKILL.md
+if [[ "${MALFORMED_SKILLS:-0}" == "1" ]]; then
+  printf '%s\n' '# malformed' > .agents/skills/live/SKILL.md
+else
+  cat > .agents/skills/live/SKILL.md <<'EOF'
+---
+name: live
+description: Live refresh fixture.
+---
+# live
+EOF
+fi
 cat > skills-lock.json <<'JSON'
 {"version":1,"skills":{"live":{"source":"example/skills","ref":"main","sourceType":"github","skillPath":"skills/live/SKILL.md","computedHash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}}
 JSON
@@ -38,6 +50,12 @@ if PATH="$test_root/bin:/usr/bin:/bin" TMPDIR="$test_root" FAIL_SKILLS=1 bash "$
 fi
 after="$(sha256sum "$test_root/repo/skills-backup/manifest.json")"
 [[ "$before" == "$after" ]] || { echo 'failed refresh mutated previous backup' >&2; exit 1; }
+if PATH="$test_root/bin:/usr/bin:/bin" TMPDIR="$test_root" MALFORMED_SKILLS=1 bash "$test_root/repo/scripts/refresh-skills-backup.sh"; then
+  echo 'malformed refresh unexpectedly succeeded' >&2
+  exit 1
+fi
+after_malformed="$(sha256sum "$test_root/repo/skills-backup/manifest.json")"
+[[ "$before" == "$after_malformed" ]] || { echo 'malformed refresh mutated previous backup' >&2; exit 1; }
 
 cat > "$test_root/repo/skills/manifest.json" <<'JSON'
 {"schemaVersion":1,"sources":[

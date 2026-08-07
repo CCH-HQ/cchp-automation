@@ -241,6 +241,15 @@ test("PR edited by the bot (its own title fix echo) → no action", async () => 
   expect(r.act).toBe(false)
 })
 
+test("PR retargeted by the bot → full follow-up review", async () => {
+  const r = await run("pull_request_target", {
+    action: "edited", changes: { base: { ref: { from: "main" } } }, pull_request: { number: 8, base: { ref: "dev" }, head: { ref: "f", sha: "s", repo: { full_name: REPO } }, user: { login: BOT } }, sender: { login: BOT },
+  })
+  expect(r.env.BOT_TASK).toBe("pr_opened")
+  expect(r.env.BOT_SKIP_PR_INSPECT).toBeUndefined()
+  expect(r.intent?.vars.metadataOnly).toBe(false)
+})
+
 test("PR labeled LGTM by the bot itself → no action (no merge echo loop)", async () => {
   const r = await run("pull_request_target", {
     action: "labeled", label: { name: "LGTM" }, pull_request: { number: 8, base: { ref: "dev" }, head: { ref: "f", sha: "s", repo: { full_name: REPO } } }, sender: { login: BOT },

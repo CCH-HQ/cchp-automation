@@ -19,6 +19,8 @@ import type { GitHubClient } from "./github/client"
  *  larger is written to a file and referenced by path (mirrors context.sh's
  *  `wc -c` gate). Env-overridable exactly like the bash `CTX_INLINE_MAX` default. */
 export const CTX_INLINE_MAX = Number(process.env.CTX_INLINE_MAX) || 12000
+export const WORKFLOW_LOG_MAX_LINES = 300
+export const WORKFLOW_LOG_MAX_BYTES = 48 * 1024
 
 // The two framing headers, preserved verbatim from context.sh. They mark all
 // gathered text as UNTRUSTED so the agent never executes it as instructions.
@@ -67,6 +69,39 @@ export function splitRepo(repo: string): { owner: string; name: string } {
 const login = (u: { login?: string | null } | null | undefined): string => u?.login ?? "ghost"
 
 const bytes = (s: string): number => Buffer.byteLength(s, "utf8")
+
+function utf8SuffixWithin(text: string, maxBytes: number): string {
+  let used = 0
+  const kept: string[] = []
+  for (const character of Array.from(text).reverse()) {
+    const size = bytes(character)
+    if (used + size > maxBytes) break
+    kept.push(character)
+    used += size
+  }
+  return kept.reverse().join("")
+}
+
+/** Keep the high-signal failure tail of one job log under independent line and
+ * byte limits. Truncation happens after full UTF-8 decoding, so a multi-byte
+ * character is never split into a replacement glyph. */
+export function compactWorkflowLog(log: string): string {
+  const lines = log.split(/\r?\n/)
+  if (/\r?\n$/.test(log)) lines.pop()
+  const lineTruncated = lines.length > WORKFLOW_LOG_MAX_LINES
+  let tail = lineTruncated
+    ? lines.slice(-(WORKFLOW_LOG_MAX_LINES - 1)).join("\n")
+    : log
+  const byteTruncated = bytes(tail) > WORKFLOW_LOG_MAX_BYTES
+  if (!lineTruncated && !byteTruncated) return log
+
+  const marker = `[... earlier log omitted; showing failure tail (up to ${WORKFLOW_LOG_MAX_LINES} lines / ${WORKFLOW_LOG_MAX_BYTES} bytes) ...]`
+  const tailBudget = WORKFLOW_LOG_MAX_BYTES - bytes(marker) - 1
+  if (tailBudget <= 0) throw new Error("workflow log marker exceeds the byte budget")
+  if (bytes(tail) > tailBudget) tail = utf8SuffixWithin(tail, tailBudget)
+  tail = tail.replace(/\r?\n$/, "")
+  return `${marker}\n${tail}`
+}
 
 // Minimal structural shapes for the collections we render (Octokit returns wider
 // objects; structural typing lets the real responses flow in unchanged).
@@ -405,7 +440,7 @@ async function fetchFailedLogs(
           repo: name,
           job_id: j.id,
         })
-        return coerceText((res as { data?: unknown }).data)
+        return compactWorkflowLog(coerceText((res as { data?: unknown }).data))
       } catch (e) {
         return `(logs unavailable for job "${j.name ?? j.id}": ${(e as Error).message})`
       }

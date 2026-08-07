@@ -39,8 +39,11 @@ if [[ -d "$live_root" ]]; then
       live_invalid=$((live_invalid + 1))
       continue
     fi
-    mkdir -p "$target/$name"
-    cp -R "$directory/." "$target/$name/"
+    if ! replace_skill_directory "$directory" "$target" "$name"; then
+      printf '[skills][warn] live skill activation failed: %s\n' "$name" >&2
+      live_invalid=$((live_invalid + 1))
+      continue
+    fi
     live_valid=$((live_valid + 1))
   done
 fi
@@ -56,10 +59,14 @@ if (( failures > 0 || live_invalid > 0 )); then
     for directory in "$backup_root/skills"/*/; do
       [[ -d "$directory" && ! -L "$directory" ]] || continue
       name="$(basename "$directory")"
-      [[ ! -e "$target/$name" ]] || continue
+      if skill_content_hash "$target/$name" >/dev/null 2>&1; then continue; fi
       if validate_backup_skill "$backup_root" "$name" "$directory"; then
-        cp -R "$directory" "$target/$name"
-        restored=$((restored + 1))
+        if replace_skill_directory "$directory" "$target" "$name"; then
+          restored=$((restored + 1))
+        else
+          printf '[skills][warn] backup activation failed: %s\n' "$name" >&2
+          invalid=$((invalid + 1))
+        fi
       else
         printf '[skills][warn] backup hash or SKILL.md validation failed: %s\n' "$name" >&2
         invalid=$((invalid + 1))
@@ -75,7 +82,12 @@ fi
 ready=0
 for directory in "$target"/*; do
   [[ -e "$directory" || -L "$directory" ]] || continue
-  if skill_content_hash "$directory" >/dev/null; then ready=$((ready + 1)); fi
+  if skill_content_hash "$directory" >/dev/null; then
+    ready=$((ready + 1))
+  else
+    printf '[skills][warn] removing invalid target skill: %s\n' "$(basename "$directory")" >&2
+    rm -rf -- "$directory"
+  fi
 done
 (( ready > 0 )) || { printf '[skills][error] no valid skills are available after live install and backup recovery\n' >&2; exit 2; }
 

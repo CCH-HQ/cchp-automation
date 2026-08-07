@@ -382,6 +382,12 @@ export async function main(): Promise<number> {
     delete process.env.CCHP_BOT_PROVIDERS
     bridge = startProviderBridge(providerSet, {
       onUsage: async (usage) => { await supervisor?.recordProviderUsage(usage) },
+      onBeforeRequest: async (request) => supervisor
+        ? supervisor.authorizeProviderRequest(request)
+        : { allowed: true },
+      onRequestFinished: async (reservationId, outcome, reason) => {
+        if (outcome === "released") await supervisor?.releaseProviderReservation(reservationId, reason)
+      },
     })
     diagnosticSecrets.add(bridge.token)
     process.env[bridgeEnv] = bridge.token
@@ -482,6 +488,8 @@ export async function main(): Promise<number> {
       modelProvider: providerSet.providers.find((provider) => provider.id === providerSet.main.providerId)!.codexId,
       contextWindow: providerSet.main.context,
       totalTokenBudget: Number(process.env.CCHP_TOKEN_BUDGET || 2_000_000),
+      tokenAdmissionFraction: 0.85,
+      maxResponsesPerTurn: 16,
       drainUsage: () => bridge!.drain(),
       approvalPolicy: permission.approvalPolicy,
       sandboxMode: permission.sandboxMode,
@@ -552,7 +560,10 @@ export async function main(): Promise<number> {
         await publishTerminalProgress({
           state: "FAILED",
           terminalReason: error instanceof Error ? error.message : String(error),
-          usage: { acceptedRaw: false, consumed: 0, limit: 0, fraction: 0, state: "normal", blockingAnomalies: 0 },
+          usage: {
+            acceptedRaw: false, consumed: 0, limit: 0, fraction: 0, state: "normal",
+            blockingAnomalies: 0, responses: 0, turns: 0, admissionDenials: 0,
+          },
         })
       } catch (publishError) {
         appServerDiagnostics.push(`terminal progress publication failed: ${publishError instanceof Error ? publishError.message : String(publishError)}`)

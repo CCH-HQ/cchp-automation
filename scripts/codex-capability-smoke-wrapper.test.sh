@@ -17,7 +17,7 @@ cat >"$fixture_root/bin/bun" <<'EOF'
 set -euo pipefail
 printf '%s\n' "$CCHP_SMOKE_MODE" >>"${FAKE_SMOKE_TRACE:?}"
 if [[ "$CCHP_SMOKE_MODE" == "native-v2" ]]; then exit 17; fi
-printf '{"schema_version":1,"run_id":"run-42-2","status":"passed","collaborationMode":"explicit-exec"}\n' >"$CCHP_SMOKE_ARTIFACT_DIR/capability-$CCHP_SMOKE_MODE.json"
+printf '{"schema_version":1,"run_id":"run-42-2","status":"passed","collaborationMode":"explicit-exec","workspace_write":{"status":"passed","thread_completed":true,"apply_patch":"passed","ordinary_repo_write":"passed","git_metadata_protected":"passed","agents_metadata_protected":"passed","enforcement":"direct"}}\n' >"$CCHP_SMOKE_ARTIFACT_DIR/capability-$CCHP_SMOKE_MODE.json"
 EOF
 chmod +x "$fixture_root/bin/bun"
 
@@ -35,6 +35,7 @@ node - "$artifact_dir/summary.json" <<'NODE'
 const summary = require(process.argv[2])
 if (summary.run_id !== "run-42-2" || summary.status !== "failed" || summary.stage !== "native-v2") process.exit(1)
 if (summary.modes["explicit-exec"] !== "passed" || summary.modes["native-v2"] !== "failed") process.exit(1)
+if (summary.workspace_write["explicit-exec"] !== "passed" || summary.workspace_write["native-v2"] !== "failed") process.exit(1)
 NODE
 
 cat >"$fixture_root/bin/bun" <<'EOF'

@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test"
-import { capabilityEngineRoot, collaborationLifecycleObserved, customToolCall, extractToolRefs, isChildProviderRequest, isCollaborationToolName, parentObservedChildOutput, parentObservedNativeChildOutput, toolCall, waitAgentArguments } from "./codex-capability-smoke"
+import { capabilityEngineRoot, collaborationLifecycleObserved, customToolCall, extractToolRefs, isChildProviderRequest, isCollaborationToolName, metadataProbeProtected, parentObservedChildOutput, parentObservedNativeChildOutput, toolCall, waitAgentArguments, workspaceEnforcement } from "./codex-capability-smoke"
 
 test("resolves the engine root from the smoke script instead of the caller working directory", () => {
   expect(capabilityEngineRoot("/opt/cchp-engine/scripts")).toBe("/opt/cchp-engine")
@@ -126,4 +126,17 @@ test("observes native collaboration events and explicit agents MCP lifecycle ind
   expect(collaborationLifecycleObserved("explicit-exec", [
     { type: "mcpToolCall", server: "fff", tool: "grep" },
   ])).toBe(false)
+})
+
+test("accepts metadata protection only for a concrete sandbox denial", () => {
+  expect(metadataProbeProtected({ output: "touch: .git/probe: Permission denied", exit_code: 1 }, ".git/probe")).toBe(true)
+  expect(metadataProbeProtected({ output: "touch: .git/probe: command not found", exit_code: 127 }, ".git/probe")).toBe(false)
+  expect(metadataProbeProtected({ output: "exec tool unavailable", exit_code: undefined }, ".git/probe")).toBe(false)
+  expect(metadataProbeProtected({ output: "touch: /tmp/probe: Operation not permitted", exit_code: 1 }, ".git/probe")).toBe(false)
+})
+
+test("binds workspace enforcement evidence to the generated config", () => {
+  expect(workspaceEnforcement('sandbox_mode = "workspace-write"\n')).toBe("direct")
+  expect(workspaceEnforcement('sandbox_mode = "workspace-write"\nuse_legacy_landlock = true\n')).toBe("legacy-landlock")
+  expect(workspaceEnforcement('sandbox_mode = "read-only"\n')).toBe("unknown")
 })

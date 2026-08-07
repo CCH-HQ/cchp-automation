@@ -52,6 +52,10 @@ test("classifies deterministic sandbox startup failures without echoing stderr",
     .toBe("Codex Linux sandbox initialization failed")
   expect(fatalSandboxError("bwrap: Failed to make / slave: Permission denied"))
     .toBe("Codex Linux sandbox initialization failed")
+  expect(fatalSandboxError("permission profiles requiring direct runtime enforcement are incompatible with --use-legacy-landlock"))
+    .toBe("Codex Linux sandbox initialization failed")
+  expect(fatalSandboxError("thread 'main' panicked at linux-sandbox/src/linux_run_main.rs:318:9"))
+    .toBe("Codex Linux sandbox initialization failed")
   expect(fatalSandboxError("plugin lookup: No viable candidates found in PATH; continuing"))
     .toBeUndefined()
   expect(fatalSandboxError("ordinary command failed")).toBeUndefined()
@@ -1950,6 +1954,39 @@ test("durably enriches raw-first usage with provider provenance", async () => {
   expect(replayed.currentUsage).toMatchObject({ consumed: 11, blockingAnomalies: 0 })
   expect(readJsonl(join(workdir, "ctx", "codex", "usage.jsonl")).filter((row) => row.kind === "raw_completion_usage").at(-1))
     .toMatchObject({ responseId: "response", provider: "provider", model: "model" })
+})
+
+test("denies the next provider request before a projected token-budget overshoot", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "cchp-supervisor-admission-"))
+  let stops = 0
+  const fake = { stop: async () => { stops++; return 0 } } as unknown as CodexAppServer
+  const supervisor = new Supervisor({
+    appServer: fake,
+    codexHome: join(workdir, "codex-home"), repoDir: workdir, workdir,
+    task: "ci_fix", runId: "run-admission", prompt: "fix", model: "gpt-5.6-sol", modelProvider: "cchp",
+    totalTokenBudget: 1_000,
+    tokenAdmissionFraction: 0.85,
+    executionMode: "explicit_child",
+    resume: { state: "ROOT_RUNNING", rootThreadId: "root", rootTurnId: "turn", restartAttempts: 0 },
+  })
+  for (const responseId of ["first", "second"]) {
+    await supervisor.recordProviderUsage({
+      providerId: "provider", model: "model", responseId,
+      threadId: "root", turnId: "turn", inputTokens: 350,
+      cachedInputTokens: 0, cacheWriteInputTokens: 0,
+      outputTokens: 50, reasoningOutputTokens: 0, totalTokens: 400,
+    })
+  }
+
+  expect(await supervisor.authorizeProviderRequest({
+    providerId: "provider", model: "model", threadId: "root", turnId: "turn", contextWindow: 372_000,
+  })).toMatchObject({ allowed: false, reason: expect.stringContaining("projected_budget") })
+  expect(supervisor.currentState).toBe("TOKEN_BUDGET_EXCEEDED")
+  expect(supervisor.currentUsage).toMatchObject({ consumed: 800, responses: 2, turns: 1, admissionDenials: 1 })
+  expect(stops).toBe(1)
+  expect(readJsonl(join(workdir, "ctx", "codex", "supervisor.jsonl")).some((row) =>
+    row.event === "provider_request_admission" && row.allowed === false && row.reason === "projected_budget",
+  )).toBe(true)
 })
 
 test("whole-run timeout stops app-server even when turn interrupt never settles", async () => {

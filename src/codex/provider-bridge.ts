@@ -12,6 +12,22 @@ export interface ProviderBridgeOptions {
   token?: string
   hostname?: string
   onUsage?(usage: ProviderBridgeUsage): void | Promise<void>
+  onBeforeRequest?(request: ProviderBridgeRequest): ProviderBridgeAdmission | Promise<ProviderBridgeAdmission>
+  onRequestFinished?(reservationId: string, outcome: "usage" | "released", reason?: string): void | Promise<void>
+}
+
+export interface ProviderBridgeRequest {
+  providerId: string
+  model: string
+  threadId?: string
+  turnId?: string
+  contextWindow?: number
+}
+
+export interface ProviderBridgeAdmission {
+  allowed: boolean
+  reason?: string
+  reservationId?: string
 }
 
 export interface ProviderBridgeUsage {
@@ -29,6 +45,7 @@ export interface ProviderBridgeUsage {
   reasoningOutputTokens: number
   totalTokens: number
   contextWindow?: number
+  reservationId?: string
 }
 
 function authorized(request: Request, token: string): boolean {
@@ -1286,6 +1303,7 @@ function observedUsage(
   provider: ParsedProvider,
   model: string,
   attribution?: { threadId?: string; turnId?: string },
+  reservationId?: string,
 ): ProviderBridgeUsage | undefined {
   if (!payload || typeof payload !== "object" || Array.isArray(payload)) return undefined
   const envelope = payload as JsonRecord
@@ -1314,6 +1332,7 @@ function observedUsage(
     responseId,
     ...(attribution?.threadId ? { threadId: attribution.threadId } : {}),
     ...(attribution?.turnId ? { turnId: attribution.turnId } : {}),
+    ...(reservationId ? { reservationId } : {}),
     inputTokens,
     contextInputTokens: inputTokens,
     billableInputTokens: inputTokens,
@@ -1331,21 +1350,48 @@ function observeResponseUsage(
   provider: ParsedProvider,
   model: string,
   attribution: { threadId?: string; turnId?: string } | undefined,
+  reservationId: string | undefined,
   onUsage?: ProviderBridgeOptions["onUsage"],
+  onRequestFinished?: ProviderBridgeOptions["onRequestFinished"],
   track?: (task: Promise<void>) => void,
 ): Response {
-  if (!onUsage || !response.body || !response.ok) return response
+  const release = async (reason: string) => {
+    if (reservationId && onRequestFinished) await onRequestFinished(reservationId, "released", reason)
+  }
+  const scheduleRelease = (reason: string) => {
+    const task = release(reason)
+    if (track) track(task)
+    else void task.catch(() => undefined)
+  }
+  if (!response.ok) {
+    scheduleRelease(`upstream_status_${response.status}`)
+    return response
+  }
+  if (!response.body || !onUsage) {
+    scheduleRelease(!response.body ? "empty_response_body" : "usage_observer_disabled")
+    return response
+  }
   const contentType = response.headers.get("content-type") ?? ""
   if (contentType.includes("text/event-stream")) {
     const [client, observer] = response.body.tee()
     const task = (async () => {
       let terminal: ProviderBridgeUsage | undefined
-      await consumeSse(observer.getReader(), (_event, data) => {
-        if (data === "[DONE]") return
-        const usage = observedUsage(JSON.parse(data), provider, model, attribution)
-        if (usage) terminal = usage
-      })
-      if (terminal) await onUsage(terminal)
+      try {
+        await consumeSse(observer.getReader(), (_event, data) => {
+          if (data === "[DONE]") return
+          const usage = observedUsage(JSON.parse(data), provider, model, attribution, reservationId)
+          if (usage) terminal = usage
+        })
+        if (terminal) {
+          await onUsage(terminal)
+          if (reservationId && onRequestFinished) await onRequestFinished(reservationId, "usage", "usage_observed")
+        } else {
+          await release("stream_completed_without_usage")
+        }
+      } catch (error) {
+        await release("stream_usage_observer_error")
+        throw error
+      }
     })()
     if (track) track(task)
     else void task.catch(() => undefined)
@@ -1357,8 +1403,18 @@ function observeResponseUsage(
   }
   const copy = response.clone()
   const task = (async () => {
-    const usage = observedUsage(await copy.json(), provider, model, attribution)
-    if (usage) await onUsage(usage)
+    try {
+      const usage = observedUsage(await copy.json(), provider, model, attribution, reservationId)
+      if (usage) {
+        await onUsage(usage)
+        if (reservationId && onRequestFinished) await onRequestFinished(reservationId, "usage", "usage_observed")
+      } else {
+        await release("response_completed_without_usage")
+      }
+    } catch (error) {
+      await release("response_usage_observer_error")
+      throw error
+    }
   })()
   if (track) track(task)
   else void task.catch(() => undefined)
@@ -1371,6 +1427,8 @@ async function handleProviderRequest(
   providerSet: ProviderSet,
   providers: Map<string, ParsedProvider>,
   onUsage?: ProviderBridgeOptions["onUsage"],
+  onBeforeRequest?: ProviderBridgeOptions["onBeforeRequest"],
+  onRequestFinished?: ProviderBridgeOptions["onRequestFinished"],
   trackUsage?: (task: Promise<void>) => void,
 ): Promise<Response> {
   let body: Record<string, unknown>
@@ -1378,6 +1436,7 @@ async function handleProviderRequest(
   let responseModelKey = ""
   let effectiveProvider = provider
   let attribution: { threadId?: string; turnId?: string } | undefined
+  let reservationId: string | undefined
   try {
     const raw = await request.json()
     if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error("body must be an object")
@@ -1404,7 +1463,26 @@ async function handleProviderRequest(
     }
     const translated = translateResponsesRequest(effectiveProvider, raw as Record<string, unknown>)
     body = translated.body
+    if (onBeforeRequest) {
+      const configured = effectiveProvider.models[callerModelKey]
+      const admission = await onBeforeRequest({
+        providerId: effectiveProvider.id,
+        model: callerModelKey,
+        ...attribution,
+        ...(configured?.context ? { contextWindow: configured.context } : {}),
+      })
+      if (!admission.allowed) {
+        return scrubResponse(Response.json({
+          error: {
+            type: "token_budget_admission_denied",
+            message: admission.reason ?? "provider request denied by runtime admission policy",
+          },
+        }, { status: 429 }), effectiveProvider)
+      }
+      reservationId = admission.reservationId
+    }
   } catch (error) {
+    if (reservationId && onRequestFinished) await onRequestFinished(reservationId, "released", "request_translation_error")
     return scrubResponse(Response.json(
       { error: { type: "invalid_request_error", message: (error as Error).message } },
       { status: 400 },
@@ -1422,19 +1500,30 @@ async function handleProviderRequest(
       redirect: "error",
     })
   } catch (error) {
+    if (reservationId && onRequestFinished) await onRequestFinished(reservationId, "released", "upstream_transport_error")
     return scrubResponse(Response.json(
       { error: { type: "upstream_transport_error", message: (error as Error).message } },
       { status: 502 },
     ), effectiveProvider)
   }
-  return observeResponseUsage(
-    scrubResponse(await passthroughResponse(effectiveProvider, upstream, responseModelKey), effectiveProvider),
-    effectiveProvider,
-    callerModelKey,
-    attribution,
-    onUsage,
-    trackUsage,
-  )
+  try {
+    return observeResponseUsage(
+      scrubResponse(await passthroughResponse(effectiveProvider, upstream, responseModelKey), effectiveProvider),
+      effectiveProvider,
+      callerModelKey,
+      attribution,
+      reservationId,
+      onUsage,
+      onRequestFinished,
+      trackUsage,
+    )
+  } catch (error) {
+    if (reservationId && onRequestFinished) await onRequestFinished(reservationId, "released", "response_translation_error")
+    return scrubResponse(Response.json(
+      { error: { type: "upstream_response_error", message: (error as Error).message } },
+      { status: 502 },
+    ), effectiveProvider)
+  }
 }
 
 export function startProviderBridge(
@@ -1475,7 +1564,7 @@ export function startProviderBridge(
       }
       const provider = providers.get(providerId)
       if (!provider) return new Response("unknown provider", { status: 404 })
-      return handleProviderRequest(request, provider, providerSet, providers, options.onUsage, trackUsage)
+      return handleProviderRequest(request, provider, providerSet, providers, options.onUsage, options.onBeforeRequest, options.onRequestFinished, trackUsage)
     },
   })
 

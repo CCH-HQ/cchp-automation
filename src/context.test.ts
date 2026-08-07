@@ -4,6 +4,9 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import {
   CTX_INLINE_MAX,
+  WORKFLOW_LOG_MAX_BYTES,
+  WORKFLOW_LOG_MAX_LINES,
+  compactWorkflowLog,
   ctxDiscussion,
   ctxIssue,
   ctxPr,
@@ -409,4 +412,50 @@ test("coerceText path: binary log data is decoded to utf8", async () => {
   const { deps, text } = harness(octokit)
   await ctxWorkflow(deps, 100)
   expect(text()).toContain("binary log body")
+})
+
+test("compactWorkflowLog preserves small logs byte-for-byte and keeps the failure tail", () => {
+  const small = "setup\nassertion failed\n"
+  expect(compactWorkflowLog(small)).toBe(small)
+
+  const large = Array.from({ length: WORKFLOW_LOG_MAX_LINES + 5 }, (_, index) =>
+    index === WORKFLOW_LOG_MAX_LINES + 4 ? "FINAL ASSERTION FAILURE" : `line-${index + 1}`,
+  ).join("\n")
+  const compacted = compactWorkflowLog(large)
+  expect(compacted).toContain("earlier log omitted")
+  expect(compacted).toContain("FINAL ASSERTION FAILURE")
+  expect(compacted).not.toContain("line-1\n")
+  expect(Buffer.byteLength(compacted, "utf8")).toBeLessThanOrEqual(WORKFLOW_LOG_MAX_BYTES)
+  expect(compacted.split("\n")).toHaveLength(WORKFLOW_LOG_MAX_LINES)
+})
+
+test("compactWorkflowLog applies a UTF-8-safe byte limit to a single huge line", () => {
+  const compacted = compactWorkflowLog(`${"前置🧨".repeat(20_000)}最终失败：数据库连接中断 🧨`)
+  expect(Buffer.byteLength(compacted, "utf8")).toBeLessThanOrEqual(WORKFLOW_LOG_MAX_BYTES)
+  expect(compacted).toContain("最终失败：数据库连接中断 🧨")
+  expect(compacted).not.toContain("�")
+})
+
+test("ctxWorkflow compacts each failed job independently after binary decoding", async () => {
+  const logs = (label: string) => new TextEncoder().encode(
+    `${Array.from({ length: WORKFLOW_LOG_MAX_LINES + 10 }, (_, index) => `${label}-early-${index}`).join("\n")}\n${label}-FINAL-失败🧨`,
+  )
+  const octokit = fakeOctokit({
+    run: { name: "ci", conclusion: "failure" },
+    jobs: [
+      { id: 11, name: "first", conclusion: "failure" },
+      { id: 12, name: "second", conclusion: "failure" },
+    ],
+    jobLogs: { 11: logs("first"), 12: logs("second") },
+  })
+  const { deps, text } = harness(octokit)
+  await ctxWorkflow(deps, 101)
+  const rendered = text()
+  expect(rendered).toContain("### Job: first")
+  expect(rendered).toContain("### Job: second")
+  expect(rendered).toContain("first-FINAL-失败🧨")
+  expect(rendered).toContain("second-FINAL-失败🧨")
+  expect(rendered).not.toContain("first-early-0\n")
+  expect(rendered).not.toContain("second-early-0\n")
+  expect(rendered).not.toContain("�")
 })

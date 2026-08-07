@@ -37,7 +37,8 @@ write_summary() {
     printf '  "status": "%s",\n' "$status"
     printf '  "stage": "%s",\n' "$stage"
     if [[ -n "$exit_code" ]]; then printf '  "exit_code": %s,\n' "$exit_code"; fi
-    printf '  "modes": {"explicit-exec": "%s", "native-v2": "%s"}\n' "$explicit_state" "$native_state"
+    printf '  "modes": {"explicit-exec": "%s", "native-v2": "%s"},\n' "$explicit_state" "$native_state"
+    printf '  "workspace_write": {"explicit-exec": "%s", "native-v2": "%s"}\n' "$explicit_state" "$native_state"
     printf '}\n'
   } >"$tmp"
   mv "$tmp" "$CCHP_SMOKE_ARTIFACT_DIR/summary.json"
@@ -52,6 +53,13 @@ const [path, mode, runId] = process.argv.slice(2)
 const value = JSON.parse(fs.readFileSync(path, "utf8"))
 if (value.schema_version !== 1 || value.status !== "passed" || value.run_id !== runId || value.collaborationMode !== mode) {
   throw new Error(`invalid capability artifact: ${path}`)
+}
+const workspace = value.workspace_write
+if (!workspace || workspace.status !== "passed" || workspace.thread_completed !== true ||
+    workspace.apply_patch !== "passed" || workspace.ordinary_repo_write !== "passed" ||
+    workspace.git_metadata_protected !== "passed" || workspace.agents_metadata_protected !== "passed" ||
+    workspace.enforcement !== "direct") {
+  throw new Error(`workspace-write capability is incomplete: ${path}`)
 }
 NODE
 }

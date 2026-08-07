@@ -8,6 +8,7 @@ import { join } from "node:path"
 import { ProvenanceLedger } from "../codex/provenance"
 import type { GitHubClient } from "../github/client"
 import { CHECK_ACTIONS } from "../publish/checkrun"
+import { WORKFLOW_LOG_MAX_BYTES, WORKFLOW_LOG_MAX_LINES } from "../context"
 import type { FinalizedMarker } from "../review/finalize"
 import { fingerprint, TASKS, type Task } from "../types"
 import { buildTools, callTool, createServer, materializeInlinePublication, reviewPublicationBundle, SERVER_NAME, toolDefinitions, validateInlinePublication, type ServerDeps } from "./server"
@@ -288,6 +289,35 @@ function deps(extra: Partial<ServerDeps> = {}): ServerDeps {
 }
 
 const text = (r: CallToolResult): string => (r.content[0] as { text: string }).text
+
+test("get_failed_logs bounds each decoded failed-job log while retaining the error tail", async () => {
+  const failedJobs = [{ id: 77, name: "typecheck", status: "completed", conclusion: "failure" }]
+  const log = new TextEncoder().encode(
+    `${Array.from({ length: WORKFLOW_LOG_MAX_LINES + 20 }, (_, index) => `setup-${index}`).join("\n")}\nFINAL 类型错误 🧨`,
+  )
+  const octokit = {
+    paginate: async (fn: (args: unknown) => Promise<{ data: unknown[] }>, args: unknown) => (await fn(args)).data,
+    rest: {
+      actions: {
+        getWorkflowRun: async () => ({ data: { name: "ci", status: "completed", conclusion: "failure" } }),
+        listJobsForWorkflowRun: async () => ({ data: failedJobs }),
+        downloadJobLogsForWorkflowRun: async () => ({ data: log }),
+      },
+    },
+  } as unknown as GitHubClient
+  const result = JSON.parse(text(await callTool(
+    buildTools({ octokit, repo: REPO, env: { BOT_TASK: "ci_fix" } }),
+    "get_failed_logs",
+    { run_id: 123 },
+  ))) as { failed_jobs: Array<{ logs: string }> }
+  const compacted = result.failed_jobs[0]!.logs
+  expect(compacted).toContain("FINAL 类型错误 🧨")
+  expect(compacted).toContain("earlier log omitted")
+  expect(compacted).not.toContain("setup-0\n")
+  expect(compacted).not.toContain("�")
+  expect(Buffer.byteLength(compacted, "utf8")).toBeLessThanOrEqual(WORKFLOW_LOG_MAX_BYTES)
+  expect(compacted.split("\n")).toHaveLength(WORKFLOW_LOG_MAX_LINES)
+})
 
 // ── registration: tool list + input schemas ──────────────────────────────────
 

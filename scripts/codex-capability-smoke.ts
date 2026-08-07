@@ -5,7 +5,7 @@ import { tmpdir } from "node:os"
 import { CodexAppServer, type JsonRpcNotification } from "../src/codex/app-server"
 import { assertPinnedVersion, probeCapabilities } from "../src/codex/cli"
 import { prepareCodexHome } from "../src/codex/config"
-import { buildCodexEnvironment } from "../src/codex/supervisor"
+import { buildCodexEnvironment, fatalSandboxError } from "../src/codex/supervisor"
 import { startGitHubBroker } from "../src/mcp/github-broker"
 import type { GitHubClient } from "../src/github/client"
 import { parseProviders } from "../src/codex/providers"
@@ -32,6 +32,26 @@ export function waitAgentArguments(
 
 export function isChildProviderRequest(requestThreadId: string | undefined, rootThreadId: string | undefined): boolean {
   return Boolean(requestThreadId && rootThreadId && requestThreadId !== rootThreadId)
+}
+
+const SANDBOX_DENIAL_PATTERN = /permission denied|operation not permitted|read[- ]only|protected metadata|not permitted/i
+
+export function metadataProbeProtected(
+  result: { output?: unknown; exit_code?: unknown },
+  probePath: string,
+): boolean {
+  const output = typeof result.output === "string" ? result.output : ""
+  return typeof result.exit_code === "number" &&
+    Number.isInteger(result.exit_code) &&
+    result.exit_code !== 0 &&
+    output.includes(probePath) &&
+    SANDBOX_DENIAL_PATTERN.test(output)
+}
+
+export function workspaceEnforcement(config: string): "direct" | "legacy-landlock" | "unknown" {
+  if (/^\s*use_legacy_landlock\s*=\s*true\s*$/m.test(config)) return "legacy-landlock"
+  if (/^\s*sandbox_mode\s*=\s*"workspace-write"\s*$/m.test(config)) return "direct"
+  return "unknown"
 }
 
 export function parentObservedChildOutput(body: Json, sentinel = "CHILD_OK"): boolean {
@@ -210,16 +230,23 @@ async function main(): Promise<void> {
   const root = mkdtempSync(join(tmpdir(), "cchp-capability-"))
   const repo = join(root, "repo")
   const readonlyProbePath = join(repo, ".codex-read-only-probe")
+  const gitMetadataProbePath = join(repo, ".git", "cchp-workspace-write-probe")
+  const agentsMetadataProbePath = join(repo, ".agents", "cchp-workspace-write-probe")
   mkdirSync(repo, { recursive: true })
   writeFileSync(join(repo, "README.md"), "smoke\n")
   const initializedRepo = Bun.spawnSync(["git", "init", "--quiet", repo], { stdout: "pipe", stderr: "pipe" })
   if (initializedRepo.exitCode !== 0) {
     throw new Error(`failed to initialize capability fixture repository: ${initializedRepo.stderr.toString()}`)
   }
+  mkdirSync(join(repo, ".agents"), { recursive: true })
   let requestNumber = 0
   let rootStage: "sandbox" | "fff" | "serena" | "spawn" | "send" | "wait" | "followup" | "list" | "spawn-interrupt" | "interrupt" | "wait-interrupt" | "audit-interrupt" | "close-interrupt" | "final" = "sandbox"
   let childStage: "fff" | "serena" | "final" = "fff"
   let rootModelThreadId: string | undefined
+  let workspaceThreadId: string | undefined
+  let workspaceStage: "apply-patch" | "git-metadata" | "agents-metadata" | "final" = "apply-patch"
+  const workspaceRequestedOperations = new Set<string>()
+  const workspaceCompletedOperations = new Set<string>()
   const parentObservedSentinels = new Set<string>()
   const requestedOperations = new Set<string>()
   const completedOperations = new Set<string>()
@@ -271,6 +298,52 @@ async function main(): Promise<void> {
     const requestTurnId = typeof metadata.turn_id === "string" ? metadata.turn_id : undefined
     if (!requestTurnId) throw new Error("provider request is missing client_metadata.turn_id")
     requestOwners.set(id, { threadId: requestThreadId, turnId: requestTurnId })
+    if (workspaceThreadId && requestThreadId === workspaceThreadId) {
+      for (const output of [...outputs, ...customOutputs]) {
+        const callId = typeof output.call_id === "string" ? output.call_id : undefined
+        const operation = callId ? operationByCallId.get(callId) : undefined
+        if (!operation?.startsWith("workspace_")) continue
+        const serialized = JSON.stringify(output.output ?? output.result ?? "")
+        if (operation === "workspace_apply_patch" && !/\"isError\"\s*:\s*true|\"is_error\"\s*:\s*true|^\"?error:/i.test(serialized)) {
+          workspaceCompletedOperations.add(operation)
+        }
+        if (operation === "workspace_git_metadata" && serialized.includes("GIT_METADATA_PROTECTED")) {
+          workspaceCompletedOperations.add(operation)
+        }
+        if (operation === "workspace_agents_metadata" && serialized.includes("AGENTS_METADATA_PROTECTED")) {
+          workspaceCompletedOperations.add(operation)
+        }
+      }
+      if (workspaceStage === "apply-patch" && exec) {
+        workspaceStage = "git-metadata"
+        workspaceRequestedOperations.add("workspace_apply_patch")
+        operationByCallId.set(`call_${id}`, "workspace_apply_patch")
+        const patch = [
+          "*** Begin Patch",
+          "*** Update File: README.md",
+          "@@",
+          " smoke",
+          "+workspace-write-ok",
+          "*** End Patch",
+        ].join("\n")
+        return sse(customToolCall(id, exec, `const result = await tools.apply_patch(${JSON.stringify(patch)}); text(result);`))
+      }
+      const startupPattern = "Unable to spawn codex-linux-sandbox|fs sandbox helper failed|bwrap: Failed .*Permission denied|permission profiles requiring direct runtime enforcement are incompatible with --use-legacy-landlock|panicked at .*linux-sandbox"
+      const denialPattern = "permission denied|operation not permitted|read[- ]only|protected metadata|not permitted"
+      if (workspaceStage === "git-metadata" && exec) {
+        workspaceStage = "agents-metadata"
+        workspaceRequestedOperations.add("workspace_git_metadata")
+        operationByCallId.set(`call_${id}`, "workspace_git_metadata")
+        return sse(customToolCall(id, exec, `const result = await tools.exec_command({ cmd: "touch .git/cchp-workspace-write-probe", workdir: ${JSON.stringify(repo)} }); const output = result.output ?? ""; const startupFailed = new RegExp(${JSON.stringify(startupPattern)}, "i").test(output); const denied = typeof result.exit_code === "number" && Number.isInteger(result.exit_code) && result.exit_code !== 0 && output.includes(".git/cchp-workspace-write-probe") && new RegExp(${JSON.stringify(denialPattern)}, "i").test(output); text(!startupFailed && denied ? "GIT_METADATA_PROTECTED" : "GIT_METADATA_PROTECTION_FAILED:" + output.slice(-1000));`))
+      }
+      if (workspaceStage === "agents-metadata" && exec) {
+        workspaceStage = "final"
+        workspaceRequestedOperations.add("workspace_agents_metadata")
+        operationByCallId.set(`call_${id}`, "workspace_agents_metadata")
+        return sse(customToolCall(id, exec, `const result = await tools.exec_command({ cmd: "touch .agents/cchp-workspace-write-probe", workdir: ${JSON.stringify(repo)} }); const output = result.output ?? ""; const startupFailed = new RegExp(${JSON.stringify(startupPattern)}, "i").test(output); const denied = typeof result.exit_code === "number" && Number.isInteger(result.exit_code) && result.exit_code !== 0 && output.includes(".agents/cchp-workspace-write-probe") && new RegExp(${JSON.stringify(denialPattern)}, "i").test(output); text(!startupFailed && denied ? "AGENTS_METADATA_PROTECTED" : "AGENTS_METADATA_PROTECTION_FAILED:" + output.slice(-1000));`))
+      }
+      return sse(outputMessage(id, "WORKSPACE_WRITE_OK_FINAL"))
+    }
     rootModelThreadId ??= requestThreadId
     const childRequest = isChildProviderRequest(requestThreadId, rootModelThreadId)
     if (!childRequest) {
@@ -511,6 +584,7 @@ async function main(): Promise<void> {
       process.stderr.write(`[codex-app-server] ${line}\n`)
     },
   })
+  let workspaceApp: CodexAppServer | undefined
   try {
     await app.start()
     const environ = readFileSync(`/proc/${app.pid}/environ`, "utf8").split("\0").join("\n")
@@ -638,6 +712,132 @@ async function main(): Promise<void> {
         throw new Error(`${fixture} root MCP did not use the prepared CODEX_HOME`)
       }
     }
+    await app.stop()
+
+    const workspaceRoot = join(root, "workspace-write-smoke")
+    mkdirSync(workspaceRoot, { recursive: true })
+    const workspacePrepared = prepareCodexHome({
+      botWorkdir: workspaceRoot,
+      engineDir: engineRoot,
+      repoDir: repo,
+      bridgeBaseUrl: bridge.baseUrl,
+      bridgeTokenEnv: bridgeEnv,
+      providerSet: providers,
+      sandboxMode: "workspace-write",
+      collaborationMode: selectedMode,
+      baseInstructions: "You are the CCHP workspace-write capability probe.",
+      fffCommand: join(engineRoot, "scripts", "fixtures", "readonly-mcp-fixture.ts"),
+      serenaCommand: join(engineRoot, "scripts", "fixtures", "readonly-mcp-fixture.ts"),
+    })
+    const workspaceNotifications: JsonRpcNotification[] = []
+    const workspaceStderr: string[] = []
+    let resolveWorkspaceCompleted!: () => void
+    const workspaceCompleted = new Promise<void>((resolve) => { resolveWorkspaceCompleted = resolve })
+    workspaceApp = new CodexAppServer({
+      codexBin: process.env.CODEX_BIN ?? "codex",
+      codexHome: workspacePrepared.codexHome,
+      cwd: repo,
+      env: buildCodexEnvironment({
+        ...Object.fromEntries(
+          ["PATH", "HOME", "TMPDIR", "XDG_RUNTIME_DIR", "LANG", "LC_ALL", "TERM", "NO_COLOR"]
+            .flatMap((name) => typeof process.env[name] === "string" ? [[name, process.env[name]!]] : []),
+        ),
+        CODEX_HOME: workspacePrepared.codexHome,
+        [bridgeEnv]: bridge.token,
+        BOT_REPO: "CCH-HQ/fixture",
+        BOT_TASK: "manual",
+        BOT_WORKDIR: workspaceRoot,
+        REPO_DIR: repo,
+        BOT_RUN_ID: "capability-smoke-workspace-write",
+        CCHP_GITHUB_BROKER_SOCKET: broker.socketPath,
+        CCHP_GITHUB_BROKER_TOKEN: broker.token,
+        CCHP_GITHUB_BROKER_FINALIZER: join(root, "ctx", "review-finalized.json"),
+      }),
+      onNotification(notification) {
+        workspaceNotifications.push(notification)
+        if (
+          notification.method === "turn/completed" &&
+          workspaceThreadId &&
+          String((notification.params as Json).threadId ?? "") === workspaceThreadId
+        ) resolveWorkspaceCompleted()
+      },
+      onStderr(line) {
+        workspaceStderr.push(line)
+        process.stderr.write(`[codex-workspace-app-server] ${line}\n`)
+      },
+    })
+    await workspaceApp.start()
+    const workspaceThread = await workspaceApp.request<Json>("thread/start", {
+      model: "gpt-5.6-sol",
+      modelProvider: providers.providers[0]!.codexId,
+      cwd: repo,
+      approvalPolicy: "never",
+      sandbox: "workspace-write",
+      experimentalRawEvents: true,
+    })
+    workspaceThreadId = String((workspaceThread.thread as Json).id)
+    await workspaceApp.request("turn/start", {
+      threadId: workspaceThreadId,
+      input: [{ type: "text", text: "Use apply_patch to update README.md, then prove .git and .agents metadata remain protected, and finish with WORKSPACE_WRITE_OK_FINAL." }],
+    })
+    await Promise.race([
+      workspaceCompleted,
+      new Promise((_, reject) => setTimeout(() => reject(new Error(
+        `workspace-write turn timed out; stage=${workspaceStage} requested=${[...workspaceRequestedOperations].join("|")} completed=${[...workspaceCompletedOperations].join("|")}`,
+      )), 20_000)),
+    ])
+
+    const workspaceFinalMessages = workspaceNotifications
+      .filter((notification) => notification.method === "item/completed")
+      .map((notification) => {
+        const params = notification.params as Json
+        const item = params.item && typeof params.item === "object" ? params.item as Json : {}
+        return item.type === "agentMessage" ? String(item.text ?? "") : ""
+      })
+    const requiredWorkspaceOperations = ["workspace_apply_patch", "workspace_git_metadata", "workspace_agents_metadata"]
+    const missingWorkspaceOperations = requiredWorkspaceOperations.filter((operation) =>
+      !workspaceRequestedOperations.has(operation) || !workspaceCompletedOperations.has(operation),
+    )
+    const sandboxFailures = workspaceStderr.flatMap((line) => {
+      const failure = fatalSandboxError(line)
+      return failure ? [failure] : []
+    })
+    const rootSandboxFailures = appServerStderr.flatMap((line) => {
+      const failure = fatalSandboxError(line)
+      return failure ? [failure] : []
+    })
+    const workspaceConfig = readFileSync(workspacePrepared.configPath, "utf8")
+    const enforcement = workspaceEnforcement(workspaceConfig)
+    if (
+      missingWorkspaceOperations.length > 0 ||
+      !workspaceFinalMessages.includes("WORKSPACE_WRITE_OK_FINAL") ||
+      readFileSync(join(repo, "README.md"), "utf8") !== "smoke\nworkspace-write-ok\n" ||
+      existsSync(gitMetadataProbePath) ||
+      existsSync(agentsMetadataProbePath) ||
+      rootSandboxFailures.length > 0 ||
+      enforcement !== "direct" ||
+      sandboxFailures.length > 0
+    ) {
+      throw new Error(
+        `workspace-write capability failed; missing=${missingWorkspaceOperations.join("|")} final=${workspaceFinalMessages.join("|")} ` +
+        `gitProbe=${existsSync(gitMetadataProbePath)} agentsProbe=${existsSync(agentsMetadataProbePath)} ` +
+        `sandboxFailures=${[...rootSandboxFailures, ...sandboxFailures].join("|")} enforcement=${enforcement} stderr=${workspaceStderr.join("|")} ` +
+        `tools=${requestTools.slice(-6).map((entries) => entries.join("|")).join(";")} catalogs=${requestCatalogs.slice(-3).join(";")}`,
+      )
+    }
+    await workspaceApp.stop()
+    workspaceApp = undefined
+    const workspaceWriteEvidence = {
+      status: "passed",
+      thread_completed: true,
+      apply_patch: "passed",
+      ordinary_repo_write: "passed",
+      git_metadata_protected: "passed",
+      agents_metadata_protected: "passed",
+      enforcement,
+      requested_operations: [...workspaceRequestedOperations],
+      completed_operations: [...workspaceCompletedOperations],
+    }
     const report = {
       schema_version: 1,
       run_id: process.env.CCHP_ARTIFACT_RUN_ID ?? "local",
@@ -654,11 +854,13 @@ async function main(): Promise<void> {
       interrupt_stream_cancelled: interruptStreamCancelled,
       native_interrupt_list_observed: nativeInterruptListObserved,
       native_child_collaboration_tools: childCollaborationTools,
+      workspace_write: workspaceWriteEvidence,
     }
     writeFileSync(join(root, `capability-${selectedMode}.json`), JSON.stringify(report, null, 2))
     writeModeArtifact(report)
     process.stdout.write(`[codex-capability] passed version=${capability.version} mode=${selectedMode} requests=${requestNumber}\n`)
   } finally {
+    await workspaceApp?.stop().catch(() => 0)
     await app.stop().catch(() => 0)
     await broker.close()
     await bridge.close()

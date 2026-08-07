@@ -34,7 +34,7 @@ import {
   type CallToolResult,
   type Tool,
 } from "@modelcontextprotocol/sdk/types.js"
-import { splitRepo } from "../context"
+import { compactWorkflowLog, splitRepo } from "../context"
 import { ArtifactStore } from "../codex/artifacts"
 import { openRegularFileSnapshot } from "../codex/file-snapshot"
 import { ProvenanceLedger } from "../codex/provenance"
@@ -1037,7 +1037,7 @@ export function buildTools(deps: ServerDeps): ToolEntry[] {
           failed.map(async (j) => {
             try {
               const res = await octokit.rest.actions.downloadJobLogsForWorkflowRun({ owner, repo: name, job_id: j.id })
-              return coerceText((res as { data?: unknown }).data)
+              return compactWorkflowLog(coerceText((res as { data?: unknown }).data))
             } catch (e) {
               return `(logs unavailable for job "${j.name ?? j.id}": ${(e as Error).message})`
             }

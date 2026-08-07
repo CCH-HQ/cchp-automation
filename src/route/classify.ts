@@ -223,7 +223,9 @@ export async function classify(input: ClassifyInput, lookups: Lookups): Promise<
         // comments don't emit pull_request_target events. Only a bot's
         // `edited` is skipped — it is the echo of the bot's own title/body
         // normalization and the base branch did not change.
-        if (a === "edited" && isBotActor(e.sender?.login)) return noAct("PR edited by bot")
+        if (a === "edited" && isBotActor(e.sender?.login) && !e.changes?.base?.ref?.from) {
+          return noAct("PR edited by bot")
+        }
         const actor = String(e.pull_request?.user?.login ?? "")
         const metadataOnly = a === "edited" && !e.changes?.base?.ref?.from
         const prEnv: Partial<BotEnv> = {

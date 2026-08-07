@@ -2,6 +2,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+real_bun="$(command -v bun)"
 test_root="$(mktemp -d)"
 trap 'rm -rf -- "$test_root"' EXIT
 mkdir -p "$test_root/bin" "$test_root/work" "$test_root/home"
@@ -40,13 +41,15 @@ esac
 SH
 chmod +x "$test_root/bin/git"
 
-cat > "$test_root/bin/bun" <<'SH'
+cat > "$test_root/bin/bun" <<SH
 #!/usr/bin/env bash
 set -euo pipefail
-if [[ "${1:-}" == "install" ]]; then
-  env | sed 's/=.*//' | sort > "${HOME:?}/bun-env.names"
-  printf '%s\n' "${HEROUI_AUTH_TOKEN:-missing}" > "${HOME:?}/bun-env.log"
+if [[ "\${1:-}" == "install" ]]; then
+  env | sed 's/=.*//' | sort > "\${HOME:?}/bun-env.names"
+  printf '%s\n' "\${HEROUI_AUTH_TOKEN:-missing}" > "\${HOME:?}/bun-env.log"
+  exit 0
 fi
+exec "$real_bun" "\$@"
 SH
 chmod +x "$test_root/bin/bun"
 
@@ -58,7 +61,13 @@ for forbidden in BOT_TOKEN GH_TOKEN CCHP_APP_PRIVATE_KEY CCHP_BOT_PROVIDER_KEYS 
   [[ -z "${!forbidden:-}" ]] || { printf 'bunx inherited %s\n' "$forbidden" >&2; exit 97; }
 done
 mkdir -p "${HOME}/.agents/skills/fixture"
-printf '%s\n' '# fixture skill' > "${HOME}/.agents/skills/fixture/SKILL.md"
+cat > "${HOME}/.agents/skills/fixture/SKILL.md" <<'EOF'
+---
+name: fixture
+description: Prepare Codex environment fixture.
+---
+# fixture skill
+EOF
 SH
 chmod +x "$test_root/bin/bunx"
 

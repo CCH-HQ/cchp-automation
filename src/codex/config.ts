@@ -312,9 +312,10 @@ export function prepareCodexHome(input: PrepareCodexHomeInput): PreparedCodexHom
     "",
     "[features]",
     // GitHub/self-hosted runner containers frequently deny the user namespaces
-    // required by Codex 0.146 bubblewrap. The pinned legacy backend preserves
-    // read-only/workspace-write enforcement with Landlock + seccomp.
-    "use_legacy_landlock = true",
+    // required by Codex 0.146 bubblewrap. Legacy Landlock remains safe for the
+    // read-only profile, but workspace-write needs direct runtime enforcement
+    // for protected metadata names such as .git and .agents.
+    ...(input.sandboxMode === "read-only" ? ["use_legacy_landlock = true"] : []),
     ...(allowShell ? [] : ["shell_tool = false", "unified_exec = false"]),
     `multi_agent = ${collaborationMode === "native-v2" ? "true" : "false"}`,
     "prevent_idle_sleep = true",

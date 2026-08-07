@@ -1,5 +1,13 @@
 #!/usr/bin/env bash
 
+SKILLS_LIB_DIR="$(cd -- "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+validate_skill_frontmatter() {
+  local directory="$1" expected_name="${2:-$(basename "$1")}" bun_bin="${CCHP_BUN_BIN:-}"
+  if [[ -z "$bun_bin" ]]; then bun_bin="$(command -v bun)" || return 1; fi
+  "$bun_bin" "$SKILLS_LIB_DIR/validate-skill-frontmatter.ts" "$directory" "$expected_name" >/dev/null
+}
+
 skills_manifest_rows() {
   local manifest="$1"
   [[ -f "$manifest" && ! -L "$manifest" ]] || {
@@ -26,13 +34,29 @@ skills_manifest_rows() {
 }
 
 skill_content_hash() {
-  local directory="$1"
+  local directory="$1" expected_name="${2:-$(basename "$1")}"
   [[ -d "$directory" && ! -L "$directory" && -f "$directory/SKILL.md" && ! -L "$directory/SKILL.md" ]] || return 1
   if find "$directory" -type l -print -quit | grep -q .; then return 1; fi
+  validate_skill_frontmatter "$directory" "$expected_name" || return 1
   (
     cd "$directory"
     find . -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum | sha256sum | cut -d' ' -f1
   )
+}
+
+replace_skill_directory() {
+  local source="$1" target_root="$2" name="$3" stage bun_bin="${CCHP_BUN_BIN:-}"
+  [[ "$name" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || return 1
+  if [[ -z "$bun_bin" ]]; then bun_bin="$(command -v bun)" || return 1; fi
+  stage="$(mktemp -d "$target_root/.${name}.XXXXXX")" || return 1
+  if ! cp -R "$source/." "$stage/" || ! skill_content_hash "$stage" "$name" >/dev/null; then
+    rm -rf -- "$stage"
+    return 1
+  fi
+  if ! "$bun_bin" "$SKILLS_LIB_DIR/atomic-replace-directory.ts" "$stage" "$target_root/$name"; then
+    rm -rf -- "$stage"
+    return 1
+  fi
 }
 
 validate_backup_skill() {
