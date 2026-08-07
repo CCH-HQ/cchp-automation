@@ -501,7 +501,7 @@ test("adds one failed terminal event when an openai-responses stream ends early"
   }
 })
 
-test("does not append a second terminal event and cancels a broken upstream stream", async () => {
+test("fails closed on Responses event and payload type drift and cancels upstream", async () => {
   let cancelled = false
   const realFetch = globalThis.fetch
   globalThis.fetch = ((input, init) => {
@@ -546,11 +546,65 @@ test("does not append a second terminal event and cancels a broken upstream stre
       .map((line) => JSON.parse(line.slice(6)) as Record<string, unknown>)
     expect(events.filter((event) => ["response.completed", "response.failed", "response.incomplete", "response.cancelled"].includes(String(event.type))))
       .toHaveLength(1)
-    expect(events.at(-1)?.type).toBe("response.completed")
+    expect(events.at(-1)?.type).toBe("response.failed")
+    expect(events.at(-1)).toMatchObject({
+      response: { error: { code: "upstream_stream_error" } },
+    })
     expect(raw.match(/^data: \[DONE\]$/gm)).toHaveLength(1)
     expect(raw.endsWith("data: [DONE]\n\n")).toBe(true)
     for (let attempt = 0; attempt < 20 && !cancelled; attempt++) await Bun.sleep(5)
     expect(cancelled).toBe(true)
+  } finally {
+    globalThis.fetch = realFetch
+    await bridge.close()
+  }
+})
+
+test("finishes a terminal Responses stream without waiting for upstream cancellation", async () => {
+  let cancelStarted = false
+  const realFetch = globalThis.fetch
+  globalThis.fetch = ((input, init) => {
+    if (String(input).startsWith("https://upstream.invalid/")) {
+      return Promise.resolve(new Response(new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode(
+            'event: response.completed\ndata: {"type":"response.completed","response":{"id":"resp_done","model":"upstream/model","status":"completed"}}\n\n',
+          ))
+        },
+        cancel() {
+          cancelStarted = true
+          return new Promise<void>(() => undefined)
+        },
+      }), { headers: { "content-type": "text/event-stream" } }))
+    }
+    return realFetch(input, init)
+  }) as typeof globalThis.fetch
+  const providers = parseProviders({
+    providerJson: JSON.stringify({
+      relay: {
+        format: "openai-responses",
+        base_url: "https://upstream.invalid/v1",
+        models: { primary: { upstream_id: "gpt-5.6-sol" } },
+      },
+    }),
+    providerKeysJson: JSON.stringify({ relay: "provider-key" }),
+    model: "relay/primary",
+  })
+  const bridge = startProviderBridge(providers)
+
+  try {
+    const response = await realFetch(`${bridge.baseUrl}/providers/relay/v1/responses`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${bridge.token}`, "content-type": "application/json" },
+      body: JSON.stringify({ model: "primary", input: "done", stream: true }),
+    })
+    const raw = await Promise.race([
+      response.text(),
+      Bun.sleep(100).then(() => { throw new Error("bridge waited for upstream cancellation") }),
+    ])
+    expect(raw.match(/^data: \[DONE\]$/gm)).toHaveLength(1)
+    expect(raw.endsWith("data: [DONE]\n\n")).toBe(true)
+    expect(cancelStarted).toBe(true)
   } finally {
     globalThis.fetch = realFetch
     await bridge.close()

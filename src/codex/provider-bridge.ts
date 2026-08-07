@@ -742,8 +742,15 @@ function openAiResponsesStream(upstream: Response, model: string): Response {
             if (typeof response.id === "string") responseId = response.id
             response.model = model
           }
-          const payloadType = typeof value.type === "string" ? value.type : undefined
-          const eventName = event ?? payloadType
+          let payloadType = typeof value.type === "string" ? value.type : undefined
+          if (event && payloadType && event !== payloadType) {
+            throw new Error(`upstream Responses event type mismatch: ${event} != ${payloadType}`)
+          }
+          const eventName = payloadType ?? event
+          if (!payloadType && eventName) {
+            value.type = eventName
+            payloadType = eventName
+          }
           enqueue(encoder.encode(`${eventName ? `event: ${eventName}\n` : ""}data: ${JSON.stringify(value)}\n\n`))
           if (payloadType && ["response.completed", "response.failed", "response.incomplete", "response.cancelled"].includes(payloadType)) {
             terminal = true
@@ -757,9 +764,9 @@ function openAiResponsesStream(upstream: Response, model: string): Response {
         if (closed) return
         if (error !== stopReading) fail(error)
         else if (!terminal) fail(new Error("upstream Responses stream ended before a terminal response event"))
-        await upstreamReader.cancel().catch(() => undefined)
         emitDone()
         close()
+        void upstreamReader.cancel().catch(() => undefined)
       }
     },
     cancel() {
