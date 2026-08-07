@@ -30,6 +30,73 @@ function required(name: string): string {
 
 type RuntimeEnv = Record<string, string | undefined>
 
+export function redactRuntimeDiagnostic(message: string, secrets: readonly string[]): string {
+  let redacted = message.replace(
+    /((?:["']?(?:authorization|proxy-authorization|x-api-key|api-key|x-goog-api-key|[a-z0-9_-]*(?:token|secret|private[-_]?key|api[-_]?key)[a-z0-9_-]*)["']?)\s*[:=]\s*)("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|(?:Bearer|Basic)\s+[^\s,;}\]]+|[^\s,;}\]]+)/gi,
+    (_match, prefix: string, value: string) => {
+      const quote = value[0] === '"' || value[0] === "'" ? value[0] : ""
+      return `${prefix}${quote}[REDACTED]${quote}`
+    },
+  )
+  for (const secret of secrets) {
+    if (secret.length < 4) continue
+    const escaped = JSON.stringify(secret).slice(1, -1)
+    for (const variant of new Set([secret, escaped])) {
+      redacted = redacted.split(variant).join("[REDACTED]")
+    }
+  }
+  return redacted
+}
+
+export interface RuntimeDiagnosticBuffer {
+  push(message: string): void
+  drain(prefix: string): string
+}
+
+export function createRuntimeDiagnosticBuffer(
+  secrets: () => readonly string[],
+  limits: { maxBytes?: number; maxLines?: number; maxLineChars?: number } = {},
+): RuntimeDiagnosticBuffer {
+  const maxBytes = limits.maxBytes ?? 64 * 1024
+  const maxLines = limits.maxLines ?? 200
+  const maxLineChars = limits.maxLineChars ?? 4_096
+  if (maxBytes < 1 || maxLines < 1 || maxLineChars < 1) throw new Error("runtime diagnostic limits must be positive")
+
+  const lines: Array<{ message: string; bytes: number }> = []
+  let bytes = 0
+  let dropped = 0
+
+  return {
+    push(message) {
+      const safe = redactRuntimeDiagnostic(message, secrets())
+      const bounded = safe.length > maxLineChars
+        ? `${safe.slice(0, maxLineChars)} [line truncated]`
+        : safe
+      const entry = { message: bounded, bytes: Buffer.byteLength(bounded) }
+      while (lines.length && (lines.length >= maxLines || bytes + entry.bytes > maxBytes)) {
+        bytes -= lines.shift()!.bytes
+        dropped++
+      }
+      if (entry.bytes > maxBytes) {
+        dropped++
+        return
+      }
+      lines.push(entry)
+      bytes += entry.bytes
+    },
+    drain(prefix) {
+      const output = [
+        ...(dropped ? [`${prefix}[${dropped} earlier diagnostic line(s) omitted]\n`] : []),
+        ...lines.map((entry) => `${prefix}${entry.message}\n`),
+      ].join("")
+      lines.length = 0
+      bytes = 0
+      dropped = 0
+      return output
+    },
+  }
+}
+
 export const RUNTIME_ENV_KEYS = [
   "BOT_RUN_ID",
   "CCHP_BOT_PROVIDER_KEYS",
@@ -242,6 +309,19 @@ export async function main(): Promise<number> {
   let primaryError: unknown
   let cleanupErrors: RuntimeCleanupError[] = []
   let lease: RunLease | undefined
+  const diagnosticSecrets = new Set<string>([
+    process.env.GH_TOKEN,
+    process.env.CCHP_GH_TOKEN_FILE,
+    process.env.CCHP_APP_CLIENT_ID,
+    process.env.CCHP_APP_PRIVATE_KEY,
+    process.env.SEE_API_KEY,
+    process.env.HEROUI_AUTH_TOKEN,
+  ].filter((value): value is string => Boolean(value)))
+  const appServerDiagnostics = createRuntimeDiagnosticBuffer(() => [...diagnosticSecrets])
+  const flushAppServerDiagnostics = () => {
+    const output = appServerDiagnostics.drain("[codex-app-server] ")
+    if (output) process.stderr.write(output)
+  }
   const bridgeEnv = "CCHP_CODEX_BRIDGE_TOKEN"
   try {
     const workdir = required("BOT_WORKDIR")
@@ -259,6 +339,10 @@ export async function main(): Promise<number> {
       model: contract.model,
       smallModel: contract.smallModel,
     })
+    for (const provider of providerSet.providers) {
+      if (provider.apiKey) diagnosticSecrets.add(provider.apiKey)
+      for (const value of Object.values(provider.headers)) diagnosticSecrets.add(value)
+    }
     // Provider credentials remain in this process only for the bridge. The Codex
     // child and every MCP child are started after these variables are removed.
     delete process.env.CCHP_BOT_PROVIDER_KEYS
@@ -266,6 +350,7 @@ export async function main(): Promise<number> {
     bridge = startProviderBridge(providerSet, {
       onUsage: async (usage) => { await supervisor?.recordProviderUsage(usage) },
     })
+    diagnosticSecrets.add(bridge.token)
     process.env[bridgeEnv] = bridge.token
     const decision = decideCollaborationMode({ env: process.env })
     writeCapabilityDecision(join(workdir, "ctx", "codex", "capability.json"), decision)
@@ -283,7 +368,11 @@ export async function main(): Promise<number> {
     delete process.env.CCHP_APP_PRIVATE_KEY
     delete process.env.CCHP_GH_TOKEN_FILE
     hideProcEnviron((message) => process.stderr.write(`[github-token] ${message}\n`))
-    const tokenSource: TokenSource = () => tokenRotation!.token()
+    const tokenSource: TokenSource = () => {
+      const token = tokenRotation!.token()
+      diagnosticSecrets.add(token)
+      return token
+    }
     const githubClient = makeOctokit(tokenSource)
     const herouiAuthToken = process.env.HEROUI_AUTH_TOKEN
     const finalizerMarker = process.env.BOT_REVIEW_FINALIZED_MARKER || join(workdir, "ctx", "review-finalized.json")
@@ -309,6 +398,7 @@ export async function main(): Promise<number> {
     configureGitRemote(repoDir, gitProxy.repoUrl)
     process.env.CCHP_GITHUB_BROKER_SOCKET = broker.socketPath
     process.env.CCHP_GITHUB_BROKER_TOKEN = broker.token
+    diagnosticSecrets.add(broker.token)
     process.env.CCHP_GITHUB_BROKER_FINALIZER = finalizerMarker
     const publishProgress = createProgressPublisher(process.env, githubClient)
     delete process.env.GH_TOKEN
@@ -366,6 +456,9 @@ export async function main(): Promise<number> {
       processRecordPath: process.env.CCHP_CODEX_PID_FILE,
       writerFence: lease!.fence,
       resume: recovery.resume,
+      onAppServerStderr: (line) => {
+        appServerDiagnostics.push(line)
+      },
       finalizer: process.env.BOT_TASK === "pr_opened" ? (context) => {
         const provenance = new ProvenanceLedger(join(workdir, "ctx", "codex", "provenance.jsonl"), context.runId)
         const evidenceProvenanceSha256 = selectFinalizerProvenance(
@@ -393,9 +486,13 @@ export async function main(): Promise<number> {
       } : undefined,
     })
     const result = await supervisor.run()
+    flushAppServerDiagnostics()
+    process.stderr.write(`[run-codex] supervisor result: ${redactRuntimeDiagnostic(JSON.stringify(result), [...diagnosticSecrets])}\n`)
     primaryExitCode = exitCodeFor(result.state, result.exitCode)
   } catch (error) {
     primaryError = error
+    flushAppServerDiagnostics()
+    process.stderr.write(`[run-codex] supervisor error: ${redactRuntimeDiagnostic(error instanceof Error ? error.stack ?? error.message : String(error), [...diagnosticSecrets])}\n`)
   } finally {
     cleanupErrors = await cleanupRuntimeResources([
       ...(gitProxy ? [{ name: "git proxy", close: () => gitProxy!.close() }] : []),

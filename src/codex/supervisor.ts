@@ -58,6 +58,7 @@ export interface SupervisorOptions {
   processRecordPath?: string
   writerFence?: Pick<RunFence, "writerId" | "generation">
   explicitChildren?: ExplicitChildLifecycle
+  onAppServerStderr?: (line: string) => void
 }
 
 export interface SupervisorFinalizerContext {
@@ -1736,6 +1737,7 @@ export function createSupervisor(options: Omit<SupervisorOptions, "appServer"> &
     cwd: options.repoDir,
     env: { ...buildCodexEnvironment(process.env), CODEX_HOME: options.codexHome },
     onNotification: (notification) => supervisor.handleNotification(notification),
+    onStderr: options.onAppServerStderr,
     onExit: (event) => supervisor.handleAppServerExit(event),
     processRecordPath: options.processRecordPath,
     runId: options.runId,

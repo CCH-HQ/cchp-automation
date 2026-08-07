@@ -8,7 +8,9 @@ import {
   cleanupRuntimeResources,
   composeRuntimePrompt,
   configureGitRemote,
+  createRuntimeDiagnosticBuffer,
   createProgressPublisher,
+  redactRuntimeDiagnostic,
   resolveRuntimeBrokerBindings,
   resolveRuntimePermission,
   resolveRuntimeRecovery,
@@ -17,6 +19,47 @@ import {
   snapshotRuntimeEnv,
 } from "./runtime"
 import type { GitHubClient } from "../github/client"
+
+test("redacts runtime diagnostics before they reach workflow logs", () => {
+  const privateKey = "-----BEGIN PRIVATE KEY-----\nprivate-material\n-----END PRIVATE KEY-----"
+  const diagnostic = [
+    "authorization=Bearer provider-secret x-api-key: custom-secret token=github-secret safe=context",
+    '{"authorization":"Bearer rotated-token","CCHP_GITHUB_BROKER_TOKEN":"broker-secret"}',
+    "proxy-authorization: Basic dXNlcjpwYXNz",
+    JSON.stringify({ private_key: privateKey }),
+  ].join("\n")
+  const redacted = redactRuntimeDiagnostic(diagnostic, [
+    "provider-secret",
+    "custom-secret",
+    "github-secret",
+    "broker-secret",
+    privateKey,
+  ])
+  expect(redacted).toContain("authorization=[REDACTED] x-api-key: [REDACTED] token=[REDACTED] safe=context")
+  expect(redacted).toContain('{"authorization":"[REDACTED]","CCHP_GITHUB_BROKER_TOKEN":"[REDACTED]"}')
+  expect(redacted).toContain("proxy-authorization: [REDACTED]")
+  expect(redacted).not.toContain("secret")
+  expect(redacted).not.toContain("dXNlcjpwYXNz")
+  expect(redacted).not.toContain("private-material")
+})
+
+test("bounds app-server diagnostics while retaining the most recent lines", () => {
+  const buffer = createRuntimeDiagnosticBuffer(() => ["bridge-secret"], {
+    maxBytes: 256,
+    maxLines: 2,
+    maxLineChars: 32,
+  })
+  buffer.push("old line")
+  buffer.push("authorization: bridge-secret")
+  buffer.push("latest line that is intentionally longer than the configured line budget")
+  const output = buffer.drain("[app] ")
+  expect(output).toContain("[app] [1 earlier diagnostic line(s) omitted]")
+  expect(output).toContain("authorization: [REDACTED]")
+  expect(output).toContain("latest line")
+  expect(output).toContain("[line truncated]")
+  expect(output).not.toContain("bridge-secret")
+  expect(buffer.drain("[app] ")).toBe("")
+})
 
 test("maps the frozen route environment to the Codex thread permission profile", () => {
   expect(resolveRuntimePermission({
