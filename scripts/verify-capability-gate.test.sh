@@ -2,6 +2,7 @@
 set -euo pipefail
 
 root="$(cd -- "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
+real_bun="$(command -v bun)"
 fixture="$(mktemp -d "${TMPDIR:-/tmp}/cchp-capability-gate.XXXXXX")"
 trap 'rm -rf -- "$fixture"' EXIT
 mkdir -p "$fixture/bin" "$fixture/repo/scripts"
@@ -10,6 +11,9 @@ cp "$root/scripts/verify-capability-gate.sh" "$fixture/repo/scripts/"
 cat >"$fixture/bin/bun" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
+if [[ "${1:-}" != */scripts/codex-capability-smoke.ts ]]; then
+  exec "${REAL_BUN:?}" "$@"
+fi
 mode="${CCHP_SMOKE_MODE:?}"
 artifact="${CCHP_CAPABILITY_ARTIFACT_DIR:?}/capability-${mode}.json"
 mkdir -p "$(dirname "$artifact")"
@@ -32,6 +36,7 @@ run_case() {
   local directory="$fixture/repo/artifacts/$name"
   set +e
   PATH="$fixture/bin:/usr/bin:/bin" \
+    REAL_BUN="$real_bun" \
     TEST_OMIT_FIELD="$omitted" \
     TEST_NETWORK_REASON="$network_reason" \
     CCHP_ARTIFACT_RUN_ID="$name" \
