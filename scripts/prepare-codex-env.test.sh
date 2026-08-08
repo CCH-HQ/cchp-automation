@@ -133,9 +133,7 @@ for env_file in "$test_root/work/skills-install-home/bunx-env.names" "$test_root
     exit 1
   }
 done
-[[ -f "$test_root/work/ctx/see/api-key" ]]
-[[ "$(stat -c '%a' "$test_root/work/ctx/see/api-key")" == "600" ]]
-[[ "$(<"$test_root/work/ctx/see/api-key")" == "see-sentinel" ]]
+[[ ! -e "$test_root/work/ctx/see/api-key" ]]
 [[ ! -e "$test_root/see-env.log" ]]
 
 second_work="$test_root/read-only-work"

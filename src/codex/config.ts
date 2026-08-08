@@ -299,6 +299,7 @@ export function prepareCodexHome(input: PrepareCodexHomeInput): PreparedCodexHom
     `model_catalog_json = ${toml(modelCatalogPath)}`,
     `model_reasoning_effort = "xhigh"`,
     `approval_policy = "never"`,
+    `allow_login_shell = false`,
     `sandbox_mode = ${toml(input.sandboxMode)}`,
     ...(input.providerSet.main.context
       ? [`model_context_window = ${input.providerSet.main.context}`]
@@ -307,14 +308,33 @@ export function prepareCodexHome(input: PrepareCodexHomeInput): PreparedCodexHom
       ? [`model_auto_compact_token_limit = ${Math.round(input.providerSet.main.context * input.providerSet.main.compactThreshold)}`]
       : []),
     "",
+    "[shell_environment_policy]",
+    'inherit = "all"',
+    "ignore_default_excludes = false",
+    "",
+    "[shell_environment_policy.filters]",
+    '"CCHP_CODEX_BRIDGE_TOKEN" = "exclude"',
+    '"CCHP_GITHUB_BROKER_SOCKET" = "exclude"',
+    '"CCHP_GITHUB_BROKER_TOKEN" = "exclude"',
+    '"CCHP_GITHUB_BROKER_FINALIZER" = "exclude"',
+    '"SEE_API_KEY" = "exclude"',
+    '"HEROUI_AUTH_TOKEN" = "exclude"',
+    "",
     "[analytics]",
     "enabled = false",
     "",
     "[features]",
-    // GitHub/self-hosted runner containers frequently deny the user namespaces
-    // required by Codex 0.146 bubblewrap. Legacy Landlock remains safe for the
-    // read-only profile, but workspace-write needs direct runtime enforcement
-    // for protected metadata names such as .git and .agents.
+    // Codex 0.146 shell snapshots are created from the app-server bootstrap
+    // environment before shell_environment_policy is applied. They can
+    // therefore persist run-scoped bridge/broker capabilities and restore
+    // them into later login-shell commands. Keep command execution on the
+    // policy-filtered non-login path and use the in-process code-mode runtime
+    // so no auxiliary host process inherits the bootstrap capabilities.
+    "shell_snapshot = false",
+    "code_mode_host = false",
+    // Codex 0.146 legacy Landlock cannot subtract protected metadata paths from
+    // a writable repository root. Workspace-write must therefore keep direct
+    // bubblewrap enforcement; read-only mode can safely use the legacy backend.
     ...(input.sandboxMode === "read-only" ? ["use_legacy_landlock = true"] : []),
     ...(allowShell ? [] : ["shell_tool = false", "unified_exec = false"]),
     `multi_agent = ${collaborationMode === "native-v2" ? "true" : "false"}`,
@@ -398,8 +418,7 @@ export function prepareCodexHome(input: PrepareCodexHomeInput): PreparedCodexHom
       `command = ${toml(bunMcpCommand(input))}`,
       `args = [${toml(input.seeServer)}]`,
       `cwd = ${toml(input.engineDir)}`,
-      `env = { SEE_API_KEY_FILE = ${toml(join(input.botWorkdir, "ctx", "see", "api-key"))}, SEE_CLI_BIN = ${toml(input.seeCliBin)} }`,
-      `env_vars = [${["PATH", "HOME", "LANG", "TMPDIR", "BOT_WORKDIR", "REPO_DIR"].map(toml).join(", ")}]`,
+      `env_vars = [${["PATH", "HOME", "LANG", "TMPDIR", "BOT_WORKDIR", "REPO_DIR", "CCHP_GITHUB_BROKER_SOCKET", "CCHP_GITHUB_BROKER_TOKEN"].map(toml).join(", ")}]`,
       'enabled_tools = ["upload_file"]',
       "required = false",
       "supports_parallel_tool_calls = false",

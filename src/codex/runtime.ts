@@ -6,6 +6,7 @@ import { splitRepo } from "../context"
 import { makeOctokit, type GitHubClient, type TokenSource } from "../github/client"
 import { hideProcEnviron, startTokenRotation } from "../github/token-rotation"
 import { startGitHubBroker } from "../mcp/github-broker"
+import { createSeeServer } from "../mcp/see-server"
 import { reviewPublicationBundle } from "../mcp/server"
 import { publishFinalizedReview } from "../publish/finalized-review"
 import { progressMarkerKey, renderTerminalProgress, upsertSticky } from "../publish/sticky"
@@ -32,6 +33,12 @@ function required(name: string): string {
 }
 
 type RuntimeEnv = Record<string, string | undefined>
+
+interface ProgressTarget {
+  repo: string
+  issueNumber: number
+  marker: string
+}
 
 export function redactRuntimeDiagnostic(message: string, secrets: readonly string[]): string {
   let redacted = message.replace(
@@ -228,25 +235,34 @@ export function createProgressPublisher(
   env: RuntimeEnv,
   octokit: GitHubClient,
 ): ((body: string) => Promise<void>) | undefined {
+  const target = resolveProgressTarget(env)
+  if (!target) return undefined
+  // Progress is the sole supervisor-owned pre-finalization GitHub mutation. It
+  // uses an already constructed Octokit client and never exposes its token to
+  // Codex or MCP children.
+  return async (body) => {
+    await upsertSticky(octokit, target.repo, target.issueNumber, target.marker, body)
+  }
+}
+
+function resolveProgressTarget(env: RuntimeEnv): ProgressTarget | undefined {
   const repo = env.BOT_REPO
   if (repo && env.GH_REPO && env.GH_REPO !== repo) {
     throw new Error(`progress repository mismatch: BOT_REPO=${repo}, GH_REPO=${env.GH_REPO}`)
   }
-  const target = env.BOT_PROGRESS_TARGET
-  if (!repo || !target || !/^[1-9][0-9]*$/.test(target)) return undefined
-  const issueNumber = Number(target)
-  const trustedTarget = env.BOT_PR_NUMBER ?? env.BOT_ISSUE_NUMBER
+  const trustedTargets = [env.BOT_PR_NUMBER, env.BOT_ISSUE_NUMBER].filter((value): value is string => Boolean(value))
+  if (new Set(trustedTargets).size > 1) throw new Error(`progress target identity mismatch: ${trustedTargets.join(" vs ")}`)
   if (env.BOT_TASK === "pr_opened" && !env.BOT_PR_NUMBER) {
     throw new Error("pr_opened progress requires BOT_PR_NUMBER")
   }
+  const target = env.BOT_PROGRESS_TARGET ?? trustedTargets[0]
+  if (!repo || !target || !/^[1-9][0-9]*$/.test(target)) return undefined
+  const issueNumber = Number(target)
+  const trustedTarget = trustedTargets[0]
   if (trustedTarget && target !== trustedTarget) {
     throw new Error(`progress target mismatch: expected ${trustedTarget}, got ${target}`)
   }
-  const marker = progressMarkerKey(env.BOT_TASK ?? "task")
-  // Progress is the sole supervisor-owned pre-finalization GitHub mutation. It
-  // uses an already constructed Octokit client and never exposes its token to
-  // Codex or MCP children.
-  return async (body) => { await upsertSticky(octokit, repo, issueNumber, marker, body) }
+  return { repo, issueNumber, marker: progressMarkerKey(env.BOT_TASK ?? "task") }
 }
 
 export function createTerminalProgressPublisher(
@@ -254,27 +270,27 @@ export function createTerminalProgressPublisher(
   octokit: GitHubClient,
   redact: (value: string) => string = (value) => value,
 ): ((result: Pick<SupervisorResult, "state" | "terminalReason" | "usage">) => Promise<boolean>) | undefined {
-  const publish = createProgressPublisher(env, octokit)
-  if (!publish) return undefined
+  const target = resolveProgressTarget(env)
+  if (!target) return undefined
   const task = env.BOT_TASK ?? "task"
   const runId = env.GITHUB_RUN_ID ?? env.BOT_RUN_ID ?? "unknown"
   const prNumber = optionalPositiveInt(env, "BOT_PR_NUMBER")
-  const repo = env.BOT_REPO
+  const guard = async (): Promise<boolean> => {
+    if (!prNumber) return true
+    const { owner, name } = splitRepo(target.repo)
+    const { data } = await octokit.rest.pulls.get({ owner, repo: name, pull_number: prNumber })
+    if (data.state !== "open" || data.merged || data.merged_at) return false
+    return !env.BOT_HEAD_SHA || data.head.sha === env.BOT_HEAD_SHA
+  }
   return async (result) => {
-    if (prNumber && repo) {
-      const { owner, name } = splitRepo(repo)
-      const { data } = await octokit.rest.pulls.get({ owner, repo: name, pull_number: prNumber })
-      if (data.state !== "open" || data.merged || data.merged_at) return false
-      if (env.BOT_HEAD_SHA && data.head.sha !== env.BOT_HEAD_SHA) return false
-    }
-    await publish(renderTerminalProgress(task, {
+    const published = await upsertSticky(octokit, target.repo, target.issueNumber, target.marker, renderTerminalProgress(task, {
       state: result.state,
       runId,
       terminalReason: result.terminalReason ? redact(result.terminalReason) : undefined,
       consumedTokens: result.usage.consumed,
       tokenLimit: result.usage.limit,
-    }))
-    return true
+    }), guard)
+    return Boolean(published)
   }
 }
 
@@ -360,6 +376,14 @@ export async function main(): Promise<number> {
     const workdir = required("BOT_WORKDIR")
     const engineDir = required("ENGINE_DIR")
     const repoDir = required("REPO_DIR")
+    const seeApiKey = process.env.SEE_API_KEY?.trim() || (process.env.CCHP_SEE_API_KEY_STDIN === "1"
+      ? readFileSync(0, "utf8").trim()
+      : undefined)
+    if (process.env.CCHP_SEE_API_KEY_STDIN === "1" && !seeApiKey) throw new Error("SEE API key stdin channel is empty")
+    if (seeApiKey) diagnosticSecrets.add(seeApiKey)
+    delete process.env.SEE_API_KEY
+    delete process.env.CCHP_SEE_API_KEY_STDIN
+    const seeCliBin = join(process.env.HOME ?? "", ".local", "lib", "see-cli", "see")
     lease = acquireRunLease(workdir, process.env.BOT_RUN_ID)
     const contract = parseCallerContract(process.env)
     const permission = resolveRuntimePermission(process.env)
@@ -416,6 +440,15 @@ export async function main(): Promise<number> {
     const herouiAuthToken = process.env.HEROUI_AUTH_TOKEN
     const finalizerMarker = process.env.BOT_REVIEW_FINALIZED_MARKER || join(workdir, "ctx", "review-finalized.json")
     const brokerBindings = resolveRuntimeBrokerBindings(process.env)
+    const seeUpload = process.env.BOT_HAVE_SEE === "1" && seeApiKey && existsSync(seeCliBin)
+      ? createSeeServer({
+          repoDir,
+          botWorkdir: workdir,
+          apiKey: seeApiKey,
+          seeBin: seeCliBin,
+          forbiddenValues: () => [...diagnosticSecrets],
+        }).uploadFile
+      : undefined
     broker = await startGitHubBroker({
       socketPath: join(workdir, "ctx", "codex", "github-broker.sock"),
       repo,
@@ -428,6 +461,8 @@ export async function main(): Promise<number> {
       repoDir,
       allowRepositoryMutation: permission.allowRepositoryMutation,
       herouiAuthToken,
+      seeUpload,
+      forbiddenValues: () => [...diagnosticSecrets],
     })
     gitProxy = await startGitHttpProxy({
       repo,
@@ -472,8 +507,8 @@ export async function main(): Promise<number> {
       collaborationMode: decision.collaborationMode,
       fffCommand: process.env.BOT_HAVE_FFF === "1" ? "fff-mcp" : undefined,
       serenaCommand: process.env.BOT_HAVE_SERENA === "1" ? "serena" : undefined,
-      seeServer: process.env.BOT_HAVE_SEE === "1" ? join(engineDir, "src", "mcp", "see-server.ts") : undefined,
-      seeCliBin: process.env.BOT_HAVE_SEE === "1" ? join(process.env.HOME ?? "", ".local", "lib", "see-cli", "see") : undefined,
+      seeServer: seeUpload ? join(engineDir, "src", "mcp", "see-server.ts") : undefined,
+      seeCliBin: seeUpload ? seeCliBin : undefined,
       baseInstructions: system,
     })
     process.env.CODEX_HOME = prepared.codexHome
@@ -502,6 +537,7 @@ export async function main(): Promise<number> {
       processRecordPath: process.env.CCHP_CODEX_PID_FILE,
       writerFence: lease!.fence,
       resume: recovery.resume,
+      redactDiagnostic: (value) => redactRuntimeDiagnostic(value, [...diagnosticSecrets]),
       onAppServerStderr: (line) => {
         appServerDiagnostics.push(line)
       },
@@ -534,6 +570,7 @@ export async function main(): Promise<number> {
           idempotencyKey: context.idempotencyKey,
           statePath: join(workdir, "ctx", "codex", "review-publication.json"),
           env: process.env,
+          forbiddenValues: () => [...diagnosticSecrets],
         })
         return {
           ...marker,

@@ -104,19 +104,11 @@ install_see_cli() {
     tar -xzf "${tmp}/${asset}" -C "${tmp}" || { warn "see-cli extraction failed"; return 0; }
     install -m 0755 "${tmp}/see" "${HOME}/.local/lib/see-cli/see" || { warn "see-cli install failed"; return 0; }
   fi
-  printf '%s\n' '#!/bin/sh' 'set -eu' 'key_file="${SEE_API_KEY_FILE:-${BOT_WORKDIR:?}/ctx/see/api-key}"' 'bin="${SEE_CLI_BIN:-$HOME/.local/lib/see-cli/see}"' 'if [ -z "${SEE_API_KEY:-}" ] && [ -r "$key_file" ]; then SEE_API_KEY="$(cat "$key_file")"; export SEE_API_KEY; fi' 'exec "$bin" "$@"' > "${HOME}/.local/bin/see-cli"
+  printf '%s\n' '#!/bin/sh' 'set -eu' 'bin="${SEE_CLI_BIN:-$HOME/.local/lib/see-cli/see}"' 'exec "$bin" "$@"' > "${HOME}/.local/bin/see-cli"
   chmod 0755 "${HOME}/.local/bin/see-cli"
 }
 
-see_key_file="${BOT_WORKDIR}/ctx/see/api-key"
 if [[ "${BOT_SKIP_SEE:-0}" != "1" ]]; then
-  if [[ -n "${SEE_API_KEY:-}" ]]; then
-    mkdir -p "$(dirname "$see_key_file")"
-    umask 077
-    printf '%s' "${SEE_API_KEY}" > "$see_key_file"
-    chmod 600 "$see_key_file"
-    unset SEE_API_KEY
-  fi
   if ! command -v see-cli >/dev/null 2>&1; then install_see_cli || true; fi
   command -v see-cli >/dev/null 2>&1 || warn "see-cli is not installed; image upload remains unavailable"
 fi

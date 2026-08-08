@@ -293,6 +293,43 @@ test("terminal progress skips a closed PR without creating or updating comments"
   expect(writes).toBe(0)
 })
 
+test("terminal progress rechecks the PR head after locating the sticky and before mutation", async () => {
+  let writes = 0
+  let commentsRead = false
+  const octokit = {
+    rest: {
+      pulls: {
+        get: async () => ({
+          data: { state: "open", merged: false, merged_at: null, head: { sha: commentsRead ? "new-head" : "old-head" } },
+        }),
+      },
+      issues: {
+        listComments: Object.assign(() => {}, { tag: "comments" }),
+        createComment: async () => { writes++; return { data: {} } },
+        updateComment: async () => { writes++; return { data: {} } },
+      },
+    },
+    paginate: async () => {
+      commentsRead = true
+      return [{ id: 9, body: "working\n<!-- cchp-bot:progress:pr_opened -->" }]
+    },
+  } as unknown as GitHubClient
+  const publish = createTerminalProgressPublisher({
+    BOT_REPO: "CCH-HQ/fixture",
+    BOT_TASK: "pr_opened",
+    BOT_PR_NUMBER: "42",
+    BOT_HEAD_SHA: "old-head",
+  }, octokit)
+  expect(await publish!({
+    state: "FAILED",
+    usage: {
+      acceptedRaw: false, consumed: 0, limit: 0, fraction: 0, state: "normal",
+      blockingAnomalies: 0, responses: 0, turns: 0, admissionDenials: 0,
+    },
+  })).toBe(false)
+  expect(writes).toBe(0)
+})
+
 test("injects the complete review protocol only for pr_opened", () => {
   expect(composeRuntimePrompt({
     task: "pr_opened",

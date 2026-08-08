@@ -27,12 +27,13 @@ app_client_id="${CCHP_APP_CLIENT_ID:-}"
 app_private_key="${CCHP_APP_PRIVATE_KEY:-}"
 github_token="${GH_TOKEN:-}"
 heroui_token="${HEROUI_AUTH_TOKEN:-}"
+see_api_key="${SEE_API_KEY:-}"
 export BOT_REPO="${BOT_REPO:-${GH_REPO:-}}"
-unset CCHP_APP_CLIENT_ID CCHP_APP_PRIVATE_KEY GH_TOKEN CCHP_GH_TOKEN_FILE HEROUI_AUTH_TOKEN
+unset CCHP_APP_CLIENT_ID CCHP_APP_PRIVATE_KEY GH_TOKEN CCHP_GH_TOKEN_FILE HEROUI_AUTH_TOKEN SEE_API_KEY
 
 export BOT_HAVE_FFF="$(command -v fff-mcp >/dev/null 2>&1 && echo 1 || echo 0)"
 export BOT_HAVE_SERENA="$(command -v serena >/dev/null 2>&1 && echo 1 || echo 0)"
-export BOT_HAVE_SEE="$([[ -x "${HOME}/.local/lib/see-cli/see" && -f "${BOT_WORKDIR}/ctx/see/api-key" ]] && echo 1 || echo 0)"
+export BOT_HAVE_SEE="$([[ -x "${HOME}/.local/lib/see-cli/see" && -n "$see_api_key" ]] && echo 1 || echo 0)"
 export BOT_SYSTEM_PROMPT="${BOT_SYSTEM_PROMPT:-${ENGINE_DIR}/codex/system-prompt.md}"
 
 is_resumable_manifest() {
@@ -79,16 +80,25 @@ stop_stale_codex() {
 max_restarts="${CCHP_RUNTIME_RESTARTS:-1}"
 [[ "$max_restarts" =~ ^[01]$ ]] || { warn "CCHP_RUNTIME_RESTARTS must be 0 or 1"; exit 2; }
 attempt=0
-while :; do
-  log "starting Codex supervisor task=${BOT_TASK:-unknown} model=${CCHP_BOT_MODEL:-<unset>} run=${BOT_RUN_ID} attempt=$((attempt + 1))"
-  rc=0
+run_runtime() {
+  local see_stdin="$1"
   env \
     CCHP_APP_CLIENT_ID="${app_client_id}" \
     CCHP_APP_PRIVATE_KEY="${app_private_key}" \
     GH_TOKEN="${github_token}" \
     HEROUI_AUTH_TOKEN="${heroui_token}" \
+    CCHP_SEE_API_KEY_STDIN="$see_stdin" \
     timeout --signal=TERM --kill-after=30s "${BOT_CODEX_TIMEOUT:-${CCHP_CODEX_TIMEOUT:-42690}}" \
-      bun "${ENGINE_DIR}/src/codex/runtime.ts" || rc=$?
+      bun "${ENGINE_DIR}/src/codex/runtime.ts"
+}
+while :; do
+  log "starting Codex supervisor task=${BOT_TASK:-unknown} model=${CCHP_BOT_MODEL:-<unset>} run=${BOT_RUN_ID} attempt=$((attempt + 1))"
+  rc=0
+  if [[ -n "$see_api_key" ]]; then
+    printf '%s' "$see_api_key" | run_runtime 1 || rc=$?
+  else
+    run_runtime 0 </dev/null || rc=$?
+  fi
   if [[ "$rc" -eq 0 ]]; then exit 0; fi
   if [[ "$rc" -eq 124 || "$rc" -eq 137 ]]; then
     warn "Codex supervisor exceeded its deadline and was killed"
