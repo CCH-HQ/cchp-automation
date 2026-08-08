@@ -159,7 +159,7 @@ export function createAgentsServer(env: Record<string, string | undefined> = pro
   const spawnProperties: Record<string, object> = {
     task_name: { type: "string" },
     message: { type: "string" },
-    agent_type: { type: "string" },
+    agent_type: { type: "string", enum: ["explorer", "planner", "implementer", "reviewer", "default", "worker"] },
     fork_turns: { type: ["string", "null"] },
   }
   if (task === "pr_opened") spawnProperties.pass_kind = { type: "string", enum: [...REVIEW_PASS_KINDS] }

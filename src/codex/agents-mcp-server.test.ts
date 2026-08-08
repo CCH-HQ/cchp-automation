@@ -222,7 +222,7 @@ test("requires pass_kind only for pr_opened review delegation", async () => {
     expect(ordinaryProperties).toEqual({
       task_name: { type: "string" },
       message: { type: "string" },
-      agent_type: { type: "string" },
+      agent_type: { type: "string", enum: ["explorer", "planner", "implementer", "reviewer", "default", "worker"] },
       fork_turns: { type: ["string", "null"] },
     })
   } finally {
