@@ -3,6 +3,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, wr
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import { ExplicitChildAdapter } from "./child-adapter"
+import type { ExecRunResult } from "./exec-adapter"
 import { ReviewAdmissionLedger } from "./review-admission"
 
 const fakeCodex = resolve(import.meta.dir, "../../scripts/fixtures/fake-codex-exec.ts")
@@ -217,6 +218,65 @@ test("followup resumes the same session and sendMessage queues the next turn", a
     expect(invocations[1]!.argv).toEqual(["exec", "--json", "--strict-config", "--profile", "reviewer", "resume", "thread-fixture", "-"])
     expect(invocations[2]!.argv).toEqual(["exec", "--json", "--strict-config", "--profile", "reviewer", "resume", "thread-fixture", "-"])
     expect(invocations.map((invocation) => invocation.prompt.trim())).toEqual(["first", "queued", "followup"])
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test("all waiters share one completion until queued prompts reach terminal", async () => {
+  const root = mkdtempSync(join(tmpdir(), "cchp-child-stable-completion-"))
+  const complete: Array<(result: ExecRunResult) => void> = []
+  let attempts = 0
+  try {
+    const adapter = new ExplicitChildAdapter({
+      runId: "run-stable-completion",
+      exec: { codexBin: fakeCodex, cwd: root, env: { PATH: process.env.PATH ?? "" } },
+      resultRoot: join(root, "results"),
+      timeoutMs: 1_000,
+      startExec: () => {
+        attempts++
+        return {
+          pid: process.pid,
+          started: Promise.resolve({ sessionId: "thread-stable" }),
+          completed: new Promise<ExecRunResult>((resolve) => complete.push(resolve)),
+          interrupt: async () => undefined,
+          detachForRestart: async () => undefined,
+        }
+      },
+    })
+
+    await adapter.spawn("root", { id: "child-stable", role: "explorer", prompt: "first" })
+    await adapter.sendMessage("child-stable", "queued")
+    let firstSettled = false
+    const firstWaiter = adapter.waitAgent("child-stable").finally(() => { firstSettled = true })
+    complete[0]!({
+      exitCode: 0,
+      signal: null,
+      sessionId: "thread-stable",
+      terminal: "completed",
+      events: [],
+      lastMessage: "completed:first",
+      stderr: "",
+    })
+    while (attempts < 2) await Bun.sleep(1)
+
+    let secondSettled = false
+    const secondWaiter = adapter.waitAgent("child-stable").finally(() => { secondSettled = true })
+    await Bun.sleep(5)
+    expect(firstSettled).toBe(false)
+    expect(secondSettled).toBe(false)
+
+    complete[1]!({
+      exitCode: 0,
+      signal: null,
+      sessionId: "thread-stable",
+      terminal: "completed",
+      events: [],
+      lastMessage: "completed:queued",
+      stderr: "",
+    })
+    expect(await firstWaiter).toMatchObject({ state: "completed", output: "completed:queued" })
+    expect(await secondWaiter).toMatchObject({ state: "completed", output: "completed:queued" })
   } finally {
     rmSync(root, { recursive: true, force: true })
   }

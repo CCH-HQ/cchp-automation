@@ -681,6 +681,7 @@ test("reports stable provider response usage without exposing the upstream crede
 test("denies a provider request before upstream dispatch when runtime admission rejects it", async () => {
   let upstreamRequests = 0
   const admissions: Array<Record<string, unknown>> = []
+  const finished: Array<{ id: string; outcome: string; reason?: string }> = []
   const upstream = Bun.serve({
     hostname: "127.0.0.1",
     port: 0,
@@ -703,8 +704,9 @@ test("denies a provider request before upstream dispatch when runtime admission 
   const bridge = startProviderBridge(providers, {
     onBeforeRequest(request) {
       admissions.push(request as unknown as Record<string, unknown>)
-      return { allowed: false, reason: "projected token budget would exceed the threshold" }
+      return { allowed: false, reason: "projected token budget would exceed the threshold", reservationId: "reservation-denied" }
     },
+    onRequestFinished: (id, outcome, reason) => { finished.push({ id, outcome, ...(reason ? { reason } : {}) }) },
   })
   try {
     const response = await fetch(`${bridge.baseUrl}/providers/relay/v1/responses`, {
@@ -731,6 +733,7 @@ test("denies a provider request before upstream dispatch when runtime admission 
       contextWindow: 372000,
     }])
     expect(upstreamRequests).toBe(0)
+    expect(finished).toEqual([{ id: "reservation-denied", outcome: "released", reason: "admission_denied" }])
   } finally {
     await bridge.close()
     upstream.stop(true)

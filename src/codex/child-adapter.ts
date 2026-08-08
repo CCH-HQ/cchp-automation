@@ -433,12 +433,11 @@ export class ExplicitChildAdapter implements ReviewChildExecutor {
     await this.ready
     if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1) throw new Error("wait timeout must be a positive integer")
     const record = this.require(childId)
-    const deadline = Date.now() + timeoutMs
-    while (record.completion && (!terminalState(record.handle.state) || record.active)) {
-      const remaining = Math.max(1, deadline - Date.now())
+    const completion = record.completion
+    if (completion && (!terminalState(record.handle.state) || record.active)) {
       await Promise.race([
-        record.completion,
-        new Promise<never>((_, reject) => setTimeout(() => reject(new Error(`child ${childId} wait exceeded ${timeoutMs}ms`)), remaining)),
+        completion,
+        new Promise<never>((_, reject) => setTimeout(() => reject(new Error(`child ${childId} wait exceeded ${timeoutMs}ms`)), timeoutMs)),
       ])
     }
     return clone(record.handle)
@@ -675,60 +674,83 @@ export class ExplicitChildAdapter implements ReviewChildExecutor {
   }
 
   private async launch(record: ChildRecord, prompt: string, resume: boolean, queued = false): Promise<void> {
-    const remainingMs = Date.parse(record.handle.deadlineAt) - Date.now()
-    if (!Number.isFinite(remainingMs) || remainingMs <= 0) {
-      record.handle.state = "timed_out"
-      record.handle.error = "absolute review admission deadline exceeded before launch"
-      this.finishGraph(record)
-      this.persist(record)
-      throw new Error(record.handle.error)
-    }
-    record.handle.state = "running"
-    record.handle.error = undefined
-    record.handle.output = undefined
-    record.activePrompt = prompt
-    record.activeStartedAt = new Date().toISOString()
-    record.resumeState = resume ? "resuming" : "initial"
-    if (queued) {
-      if (record.queue[0] !== prompt) throw new Error(`child ${record.handle.childId} queued prompt drift`)
-      record.queue.shift()
-    }
-    this.persistRunning(record)
-    let exec: CodexExecHandle
-    try {
-      exec = this.start({
-        ...this.options.exec,
-        model: this.modelForRole(record.handle.role),
-        profile: this.profileForRole(record.handle.role),
-        prompt,
-        env: { ...this.options.exec.env, CCHP_EXPLICIT_AGENT_DEPTH: "1" },
-        ...(resume ? { resumeSessionId: record.handle.sessionId } : {}),
-        timeoutMs: Math.max(1, remainingMs),
-      })
-    } catch (error) {
-      const message = errorMessage(error)
-      record.handle.state = "failed"
-      record.handle.error = message
-      record.attempts.push({
-        attempt: record.attempts.length + 1,
-        sessionId: record.handle.sessionId ?? "unknown",
-        state: "failed",
-        terminal: "failed",
-        startedAt: record.activeStartedAt,
-        completedAt: new Date().toISOString(),
-        error: message,
-      })
-      record.activePrompt = undefined
-      record.activeStartedAt = undefined
-      this.finishGraph(record)
-      this.persist(record)
-      throw error
-    }
-    record.active = exec
-    record.processIdentity = processIdentity(exec.pid)
-    this.persistRunning(record)
-    const startedAt = record.activeStartedAt
-    const completion = (async (): Promise<ChildHandle> => {
+    let firstStarted: CodexExecHandle["started"] | undefined
+    const completion = this.runLifecycle(record, prompt, resume, queued, (started) => {
+      firstStarted ??= started
+    })
+    record.completion = completion
+    if (firstStarted) await firstStarted
+    else await completion
+  }
+
+  /** Owns one complete child generation, including every prompt queued while
+   * the active attempt is running. The public completion promise is assigned
+   * once per generation and is never replaced during an attempt handoff. */
+  private async runLifecycle(
+    record: ChildRecord,
+    initialPrompt: string,
+    initialResume: boolean,
+    initialQueued: boolean,
+    onFirstStarted: (started: CodexExecHandle["started"]) => void,
+  ): Promise<ChildHandle> {
+    let prompt = initialPrompt
+    let resume = initialResume
+    let queued = initialQueued
+    while (true) {
+      const remainingMs = Date.parse(record.handle.deadlineAt) - Date.now()
+      if (!Number.isFinite(remainingMs) || remainingMs <= 0) {
+        record.handle.state = "timed_out"
+        record.handle.error = "absolute review admission deadline exceeded before launch"
+        this.finishGraph(record)
+        this.persist(record)
+        throw new Error(record.handle.error)
+      }
+      record.handle.state = "running"
+      record.handle.error = undefined
+      record.handle.output = undefined
+      record.activePrompt = prompt
+      record.activeStartedAt = new Date().toISOString()
+      record.resumeState = resume ? "resuming" : "initial"
+      if (queued) {
+        if (record.queue[0] !== prompt) throw new Error(`child ${record.handle.childId} queued prompt drift`)
+        record.queue.shift()
+      }
+      this.persistRunning(record)
+      let exec: CodexExecHandle
+      try {
+        exec = this.start({
+          ...this.options.exec,
+          model: this.modelForRole(record.handle.role),
+          profile: this.profileForRole(record.handle.role),
+          prompt,
+          env: { ...this.options.exec.env, CCHP_EXPLICIT_AGENT_DEPTH: "1" },
+          ...(resume ? { resumeSessionId: record.handle.sessionId } : {}),
+          timeoutMs: Math.max(1, remainingMs),
+        })
+      } catch (error) {
+        const message = errorMessage(error)
+        record.handle.state = "failed"
+        record.handle.error = message
+        record.attempts.push({
+          attempt: record.attempts.length + 1,
+          sessionId: record.handle.sessionId ?? "unknown",
+          state: "failed",
+          terminal: "failed",
+          startedAt: record.activeStartedAt,
+          completedAt: new Date().toISOString(),
+          error: message,
+        })
+        record.activePrompt = undefined
+        record.activeStartedAt = undefined
+        this.finishGraph(record)
+        this.persist(record)
+        throw error
+      }
+      record.active = exec
+      record.processIdentity = processIdentity(exec.pid)
+      this.persistRunning(record)
+      onFirstStarted(exec.started)
+      const startedAt = record.activeStartedAt
       let detachedForRestart = false
       try {
         const started = await exec.started
@@ -782,16 +804,15 @@ export class ExplicitChildAdapter implements ReviewChildExecutor {
       record.activePrompt = undefined
       record.activeStartedAt = undefined
       if (!record.closed && record.queue.length > 0 && ["completed", "interrupted"].includes(record.handle.state)) {
-        const next = record.queue[0]!
-        await this.launch(record, next, true, true)
-        return clone(record.handle)
+        prompt = record.queue[0]!
+        resume = true
+        queued = true
+        continue
       }
       if (!record.closed) this.finishGraph(record)
       this.persist(record)
       return clone(record.handle)
-    })()
-    record.completion = completion
-    await exec.started
+    }
   }
 
   private modelForRole(role: string): string | undefined {

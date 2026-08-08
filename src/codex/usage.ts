@@ -206,7 +206,8 @@ export class UsageLedger {
       return this.result(false)
     }
     const scopedTurn = `${scope}\0${normalized.turnId}`
-    const turnOverlap = (this.recordsByScopedTurn.get(scopedTurn) ?? []).find((record) =>
+    const priorTurnRecords = this.recordsByScopedTurn.get(scopedTurn) ?? []
+    const turnOverlap = priorTurnRecords.find((record) =>
       record.threadId !== normalized.threadId && this.isLineageOverlap(record, normalized),
     )
     if (turnOverlap) {
@@ -230,6 +231,15 @@ export class UsageLedger {
           : "response_double_billing"
       this.addAnomaly(anomalyType, normalized, `response ${input.responseId} was already billed to ${responseOwner}`)
       if (input.reservationId) this.releaseReservation(input.reservationId, "response_conflict")
+      return this.result(false)
+    }
+    if (priorTurnRecords.length > 0) {
+      this.addAnomaly(
+        "turn_multiple_terminal_responses",
+        normalized,
+        `turn ${normalized.turnId} emitted multiple terminal usage records`,
+      )
+      if (input.reservationId) this.releaseReservation(input.reservationId, "multiple_terminal_responses")
       return this.result(false)
     }
     const inputTokens = normalized.contextInputTokens ?? 0
@@ -340,16 +350,18 @@ export class UsageLedger {
     return this.anomalies.some((anomaly) => anomaly.blocking)
   }
 
-  releaseReservation(reservationId: string, reason = "request_finished"): boolean {
+  releaseReservation(reservationId: string, reason = "request_finished", persist = true): boolean {
     const reservation = this.reservations.get(reservationId)
     if (!reservation) return false
     this.reservations.delete(reservationId)
-    this.append({
-      kind: "reservation_released",
-      reservationId,
-      reason,
-      recordedAt: new Date().toISOString(),
-    })
+    if (persist) {
+      this.append({
+        kind: "reservation_released",
+        reservationId,
+        reason,
+        recordedAt: new Date().toISOString(),
+      })
+    }
     return true
   }
 
@@ -485,7 +497,8 @@ export class UsageLedger {
       }
       if (record.lineage !== undefined && !this.validLineage(record)) throw new Error(`invalid usage lineage replay for ${record.responseId}`)
       const scopedTurn = `${scope}\0${record.turnId}`
-      const turnOverlap = (this.recordsByScopedTurn.get(scopedTurn) ?? []).find((previous) =>
+      const priorTurnRecords = this.recordsByScopedTurn.get(scopedTurn) ?? []
+      const turnOverlap = priorTurnRecords.find((previous) =>
         previous.threadId !== record.threadId && this.isLineageOverlap(previous, record),
       )
       if (turnOverlap) {
@@ -511,6 +524,15 @@ export class UsageLedger {
           return
         }
         throw new Error(`conflicting response owner replay for ${record.responseId}`)
+      }
+      if (priorTurnRecords.length > 0) {
+        this.addAnomaly(
+          "turn_multiple_terminal_responses",
+          record,
+          `turn ${record.turnId} emitted multiple terminal usage records`,
+          false,
+        )
+        return
       }
       this.rawKeys.set(key, record)
       this.responseOwners.set(record.responseId, key)

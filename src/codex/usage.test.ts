@@ -4,7 +4,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { UsageLedger } from "./usage"
 
-test("keeps cumulative snapshots and bills multiple provider responses for one Codex turn exactly once", () => {
+test("keeps cumulative snapshots and rejects a second terminal provider response for one Codex turn", () => {
   const path = join(mkdtempSync(join(tmpdir(), "usage-")), "usage.jsonl")
   const ledger = new UsageLedger({ path, totalBudget: 1_000 })
   const update = {
@@ -38,13 +38,13 @@ test("keeps cumulative snapshots and bills multiple provider responses for one C
   expect(readFileSync(path, "utf8").trim().split("\n")).toHaveLength(1)
 
   expect(ledger.recordRaw({ threadId: "thread_1", turnId: "turn_1", responseId: "resp_1", totalTokens: 150 })).toMatchObject({ acceptedRaw: true, consumed: 150 })
-  expect(ledger.recordRaw({ threadId: "thread_1", turnId: "turn_1", responseId: "resp_2", totalTokens: 150 })).toMatchObject({ acceptedRaw: true, consumed: 300, blockingAnomalies: 0 })
-  expect(ledger.recordRaw({ threadId: "thread_1", turnId: "turn_1", responseId: "resp_2", totalTokens: 150 })).toMatchObject({ acceptedRaw: false, consumed: 300, blockingAnomalies: 0 })
-  expect(ledger.rawCompletions).toHaveLength(2)
-  expect(ledger.anomalies).toHaveLength(0)
+  expect(ledger.recordRaw({ threadId: "thread_1", turnId: "turn_1", responseId: "resp_2", totalTokens: 150 })).toMatchObject({ acceptedRaw: false, consumed: 150, blockingAnomalies: 1 })
+  expect(ledger.recordRaw({ threadId: "thread_1", turnId: "turn_1", responseId: "resp_2", totalTokens: 150 })).toMatchObject({ acceptedRaw: false, consumed: 150, blockingAnomalies: 1 })
+  expect(ledger.rawCompletions).toHaveLength(1)
+  expect(ledger.anomalies.map((anomaly) => anomaly.type)).toEqual(["turn_multiple_terminal_responses"])
 })
 
-test("replay restores multiple provider responses for one turn without rebilling", () => {
+test("replay rejects a second provider response for one turn without rebilling", () => {
   const path = join(mkdtempSync(join(tmpdir(), "usage-turn-replay-")), "usage.jsonl")
   const recordedAt = new Date().toISOString()
   writeFileSync(path, [
@@ -54,50 +54,50 @@ test("replay restores multiple provider responses for one turn without rebilling
   ].join("\n"))
 
   const restored = new UsageLedger({ path, totalBudget: 1_000 })
-  expect(restored.budget).toMatchObject({ consumed: 109, blockingAnomalies: 0 })
-  expect(restored.rawCompletions.map((record) => record.responseId)).toEqual(["first", "second"])
-  expect(restored.anomalies).toHaveLength(0)
+  expect(restored.budget).toMatchObject({ consumed: 10, blockingAnomalies: 1 })
+  expect(restored.rawCompletions.map((record) => record.responseId)).toEqual(["first"])
+  expect(restored.anomalies.map((anomaly) => anomaly.type)).toEqual(["turn_multiple_terminal_responses"])
 })
 
 test("denies a projected response before the run can overshoot the admission threshold", () => {
   const ledger = new UsageLedger({ totalBudget: 1_000, admissionFraction: 0.85 })
-  ledger.recordRaw({ threadId: "root", turnId: "turn", responseId: "first", contextInputTokens: 350, totalTokens: 400, billingScopeId: "run" })
-  const admitted = ledger.admitNextResponse({ billingScopeId: "run", threadId: "root", turnId: "turn" })
+  ledger.recordRaw({ threadId: "root", turnId: "turn-1", responseId: "first", provider: "p", model: "m", contextInputTokens: 350, totalTokens: 400, billingScopeId: "run" })
+  const admitted = ledger.admitNextResponse({ billingScopeId: "run", threadId: "root", turnId: "turn-2", provider: "p", model: "m" })
   expect(admitted).toMatchObject({
     allowed: true,
     estimatedNextTokens: 400,
-    responsesInTurn: 1,
+    responsesInTurn: 0,
     responsesInFlight: 1,
     reservedTokens: 400,
   })
   ledger.recordRaw({
-    threadId: "root", turnId: "turn", responseId: "second", contextInputTokens: 350,
+    threadId: "root", turnId: "turn-2", responseId: "second", provider: "p", model: "m", contextInputTokens: 350,
     totalTokens: 400, billingScopeId: "run", reservationId: admitted.reservationId,
   })
-  expect(ledger.admitNextResponse({ billingScopeId: "run", threadId: "root", turnId: "turn" })).toMatchObject({
+  expect(ledger.admitNextResponse({ billingScopeId: "run", threadId: "root", turnId: "turn-3", provider: "p", model: "m" })).toMatchObject({
     allowed: false,
     reason: "projected_budget",
     consumed: 800,
     threshold: 850,
     estimatedNextTokens: 400,
-    responsesInTurn: 2,
+    responsesInTurn: 0,
     responsesInFlight: 0,
     reservedTokens: 0,
   })
-  expect(ledger.budget).toMatchObject({ responses: 2, turns: 1, admissionDenials: 1 })
+  expect(ledger.budget).toMatchObject({ responses: 2, turns: 2, admissionDenials: 1 })
 })
 
 test("reserves projected tokens and response slots across concurrent provider requests", () => {
   const ledger = new UsageLedger({ totalBudget: 1_000, admissionFraction: 0.85, maxResponsesPerTurn: 2 })
   ledger.recordRaw({ threadId: "other", turnId: "other-turn", responseId: "bulk", provider: "p", model: "large", totalTokens: 760, billingScopeId: "run" })
-  ledger.recordRaw({ threadId: "root", turnId: "turn", responseId: "baseline", provider: "p", model: "m", totalTokens: 40, billingScopeId: "run" })
+  ledger.recordRaw({ threadId: "root", turnId: "baseline-turn", responseId: "baseline", provider: "p", model: "m", totalTokens: 40, billingScopeId: "run" })
 
   const first = ledger.admitNextResponse({ billingScopeId: "run", threadId: "root", turnId: "turn", provider: "p", model: "m", contextWindow: 372_000 })
   expect(first).toMatchObject({ allowed: true, estimatedNextTokens: 40, responsesInFlight: 1, reservedTokens: 40 })
   expect(ledger.admitNextResponse({ billingScopeId: "run", threadId: "root", turnId: "turn", provider: "p", model: "m", contextWindow: 372_000 })).toMatchObject({
     allowed: false,
-    reason: "response_limit",
-    responsesInTurn: 1,
+    reason: "projected_budget",
+    responsesInTurn: 0,
     responsesInFlight: 1,
     reservedTokens: 40,
   })
@@ -148,15 +148,12 @@ test("uses the requested model context for cold starts and model switches", () =
   })).toMatchObject({ allowed: false, reason: "projected_budget", estimatedNextTokens: 800 })
 })
 
-test("caps response loops per turn even when individual responses are small", () => {
+test("blocks sequential response loops per turn even when individual responses are small", () => {
   const ledger = new UsageLedger({ totalBudget: 10_000, maxResponsesPerTurn: 2 })
   ledger.recordRaw({ threadId: "root", turnId: "turn", responseId: "first", totalTokens: 10, billingScopeId: "run" })
-  ledger.recordRaw({ threadId: "root", turnId: "turn", responseId: "second", totalTokens: 10, billingScopeId: "run" })
-  expect(ledger.admitNextResponse({ billingScopeId: "run", threadId: "root", turnId: "turn" })).toMatchObject({
-    allowed: false,
-    reason: "response_limit",
-    responsesInTurn: 2,
-  })
+  expect(ledger.recordRaw({ threadId: "root", turnId: "turn", responseId: "second", totalTokens: 10, billingScopeId: "run" }))
+    .toMatchObject({ acceptedRaw: false, consumed: 10, blockingAnomalies: 1, responses: 1 })
+  expect(ledger.anomalies.at(-1)?.type).toBe("turn_multiple_terminal_responses")
 })
 
 test("keeps context and billable input semantics separate and isolates prompt jumps by thread", () => {

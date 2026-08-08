@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test"
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync } from "node:fs"
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, statSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import type { CodexAppServer } from "./app-server"
@@ -103,6 +103,17 @@ test("builds an explicit Codex environment without caller provider or App creden
   ]) expect(env).not.toHaveProperty(forbidden)
 })
 
+test("uses a run-scoped shell home instead of loading runner profiles", () => {
+  const workdir = mkdtempSync(join(tmpdir(), "cchp-codex-shell-home-"))
+  const env = buildCodexEnvironment({
+    HOME: "/home/runner",
+    BOT_WORKDIR: workdir,
+    BOT_REPO: "CCH-HQ/fixture",
+  })
+  expect(env.HOME).toBe(join(workdir, "codex-shell-home"))
+  expect(statSync(env.HOME!).mode & 0o777).toBe(0o700)
+})
+
 test("persists a successful app-server root lifecycle and runs finalizer once", async () => {
   const workdir = mkdtempSync(join(tmpdir(), "cchp-supervisor-"))
   let supervisor!: Supervisor
@@ -156,6 +167,148 @@ test("persists a successful app-server root lifecycle and runs finalizer once", 
     finalizerAttestation: { valid: true, run_id: "run-1", idempotency_key: expect.any(String) },
     finalizerIdempotencyKey: expect.stringMatching(/^[0-9a-f]{64}$/),
   })
+})
+
+test("freezes durable state after terminal settlement despite late runtime callbacks", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "cchp-supervisor-terminal-freeze-"))
+  let supervisor!: Supervisor
+  const fake = {
+    start: async () => ({ userAgent: "fake" }),
+    request: async (method: string) => {
+      if (method === "thread/start") return { thread: { id: "root" } }
+      if (method === "turn/start") {
+        queueMicrotask(() => void supervisor.handleNotification({
+          method: "turn/completed",
+          params: { threadId: "root", turn: { id: "turn", status: "completed" } },
+        }))
+        return { turn: { id: "turn" } }
+      }
+      return {}
+    },
+    stop: async () => 0,
+  } as unknown as CodexAppServer
+  supervisor = new Supervisor({
+    appServer: fake,
+    codexHome: join(workdir, "codex-home"),
+    repoDir: workdir,
+    workdir,
+    task: "manual",
+    runId: "run-terminal-freeze",
+    prompt: "status",
+    model: "gpt-5.6-sol",
+    modelProvider: "cchp",
+    totalTokenBudget: 1_000,
+    deadlines: { wholeRunMs: 10_000, heartbeatMs: 10, noProgressWarningMs: 2_000, noProgressTerminalMs: 8_000 },
+  })
+  expect(await supervisor.run()).toMatchObject({ state: "SUCCEEDED", exitCode: 0 })
+
+  const artifactPaths = [
+    "supervisor.jsonl",
+    "provenance.jsonl",
+    "usage.jsonl",
+    "run-manifest.json",
+    "terminal.json",
+    "events-unknown.jsonl",
+  ].map((name) => join(workdir, "ctx", "codex", name))
+  const before = artifactPaths.map((path) => existsSync(path) ? readFileSync(path, "utf8") : undefined)
+
+  expect(await supervisor.recordProviderUsage({
+    providerId: "provider",
+    model: "model",
+    responseId: "late-provider",
+    threadId: "root",
+    turnId: "turn",
+    inputTokens: 8,
+    cachedInputTokens: 0,
+    cacheWriteInputTokens: 0,
+    outputTokens: 3,
+    reasoningOutputTokens: 0,
+    totalTokens: 11,
+  })).toMatchObject({ acceptedRaw: false, consumed: 0 })
+  await supervisor.releaseProviderReservation("late-reservation", "late_cleanup")
+  await supervisor.handleNotification({
+    method: "rawResponse/completed",
+    params: {
+      threadId: "root",
+      turnId: "turn",
+      responseId: "late-raw",
+      usage: { input_tokens: 8, output_tokens: 3, total_tokens: 11 },
+    },
+  })
+  await supervisor.handleNotification({ method: "turn/started", params: { threadId: "root", turn: { id: "late-turn" } } })
+  await supervisor.handleAppServerExit({ expected: false, reason: "process_exit", exitCode: 23, signalCode: null })
+
+  for (const [index, path] of artifactPaths.entries()) {
+    expect(existsSync(path) ? readFileSync(path, "utf8") : undefined).toBe(before[index])
+  }
+  expect(supervisor.currentState).toBe("SUCCEEDED")
+  expect(readJsonl(join(workdir, "ctx", "codex", "supervisor.jsonl")).filter((row) => row.event === "terminal")).toHaveLength(1)
+})
+
+test("sends the direct workspace-write sandbox override", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "cchp-supervisor-permissions-"))
+  let supervisor!: Supervisor
+  const requests: Array<{ method: string; params: Record<string, unknown> }> = []
+  const fake = {
+    start: async () => ({ userAgent: "fake" }),
+    request: async (method: string, params: Record<string, unknown>) => {
+      requests.push({ method, params })
+      if (method === "thread/start") return { thread: { id: "root" } }
+      if (method === "turn/start") {
+        queueMicrotask(() => void supervisor.handleNotification({
+          method: "turn/completed",
+          params: { threadId: "root", turn: { id: "turn", status: "completed" } },
+        }))
+        return { turn: { id: "turn" } }
+      }
+      return {}
+    },
+    stop: async () => 0,
+  } as unknown as CodexAppServer
+  supervisor = new Supervisor({
+    appServer: fake,
+    codexHome: join(workdir, "codex-home"),
+    repoDir: workdir,
+    workdir,
+    task: "manual",
+    runId: "run-permissions",
+    prompt: "status",
+    model: "gpt-5.6-sol",
+    modelProvider: "cchp",
+    totalTokenBudget: 1_000,
+    sandboxMode: "workspace-write",
+  })
+
+  expect(await supervisor.run()).toMatchObject({ state: "SUCCEEDED" })
+  expect(requests.find((request) => request.method === "thread/start")?.params).toMatchObject({
+    sandbox: "workspace-write",
+  })
+  expect(requests.find((request) => request.method === "thread/start")?.params).not.toHaveProperty("permissions")
+})
+
+test("redacts terminal reasons before durable persistence", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "cchp-supervisor-redaction-"))
+  const supervisor = new Supervisor({
+    appServer: {
+      start: async () => { throw new Error("authorization=Bearer runtime-secret") },
+      stop: async () => 0,
+    } as unknown as CodexAppServer,
+    codexHome: join(workdir, "codex-home"),
+    repoDir: workdir,
+    workdir,
+    task: "manual",
+    runId: "run-redaction",
+    prompt: "status",
+    model: "gpt-5.6-sol",
+    modelProvider: "cchp",
+    totalTokenBudget: 1_000,
+    redactDiagnostic: (value) => value.replace("runtime-secret", "[REDACTED]"),
+  })
+
+  expect(await supervisor.run()).toMatchObject({ state: "FAILED", terminalReason: "authorization=Bearer [REDACTED]" })
+  const terminal = readFileSync(join(workdir, "ctx", "codex", "terminal.json"), "utf8")
+  expect(terminal).toContain("[REDACTED]")
+  expect(terminal).not.toContain("runtime-secret")
 })
 
 test("treats cancelled and object-form failed root completions as terminal failures", async () => {
@@ -1279,7 +1432,7 @@ test("attributes native raw response usage to the owning root and child turns wi
   expect(readJsonl(join(workdir, "ctx", "codex", "usage.jsonl")).filter((row) => row.kind === "raw_completion_usage")).toHaveLength(2)
 })
 
-test("bills every distinct provider response in one native Codex tool-loop turn", async () => {
+test("fails closed instead of double billing distinct terminal responses for one Codex turn", async () => {
   const workdir = mkdtempSync(join(tmpdir(), "cchp-supervisor-native-tool-loop-"))
   const fake = { stop: async () => 0 } as unknown as CodexAppServer
   const options = {
@@ -1291,28 +1444,9 @@ test("bills every distinct provider response in one native Codex tool-loop turn"
     resume: { state: "ROOT_RUNNING" as const, rootThreadId: "root", rootTurnId: "turn", restartAttempts: 0 },
   }
   const supervisor = new Supervisor(options)
-  for (let index = 1; index <= 14; index++) {
-    expect(await supervisor.recordProviderUsage({
-      providerId: "provider",
-      model: "model",
-      responseId: `response-${index}`,
-      threadId: "root",
-      turnId: "turn",
-      inputTokens: index,
-      cachedInputTokens: 0,
-      cacheWriteInputTokens: 0,
-      outputTokens: 1,
-      reasoningOutputTokens: 0,
-      totalTokens: index + 1,
-    })).toMatchObject({ acceptedRaw: true, blockingAnomalies: 0 })
-  }
-  expect(supervisor.currentUsage).toMatchObject({ consumed: 119, blockingAnomalies: 0 })
-  expect(readJsonl(join(workdir, "ctx", "codex", "usage.jsonl")).filter((row) => row.kind === "raw_completion_usage")).toHaveLength(14)
-
-  expect(await supervisor.recordProviderUsage({
+  const usage = {
     providerId: "provider",
     model: "model",
-    responseId: "response-14",
     threadId: "root",
     turnId: "turn",
     inputTokens: 14,
@@ -1321,10 +1455,15 @@ test("bills every distinct provider response in one native Codex tool-loop turn"
     outputTokens: 1,
     reasoningOutputTokens: 0,
     totalTokens: 15,
-  })).toMatchObject({ acceptedRaw: false, consumed: 119, blockingAnomalies: 0 })
+  }
+  expect(await supervisor.recordProviderUsage({ ...usage, responseId: "response-1" }))
+    .toMatchObject({ acceptedRaw: true, consumed: 15, blockingAnomalies: 0 })
+  expect(await supervisor.recordProviderUsage({ ...usage, responseId: "response-2" }))
+    .toMatchObject({ acceptedRaw: false, consumed: 15, blockingAnomalies: 1 })
+  expect(readJsonl(join(workdir, "ctx", "codex", "usage.jsonl")).filter((row) => row.kind === "raw_completion_usage")).toHaveLength(1)
 
   const restored = new Supervisor(options)
-  expect(restored.currentUsage).toMatchObject({ consumed: 119, blockingAnomalies: 0 })
+  expect(restored.currentUsage).toMatchObject({ consumed: 15, responses: 1, turns: 1, blockingAnomalies: 1 })
 })
 
 test("waits for the native child graph before billing early provider and raw observations", async () => {
@@ -1860,6 +1999,33 @@ test("fails closed when pending provider terminal usage changes before attributi
   })
 })
 
+test("releases a duplicate pending provider observation's extra reservation", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "cchp-supervisor-pending-duplicate-"))
+  const fake = { stop: async () => 0 } as unknown as CodexAppServer
+  const supervisor = new Supervisor({
+    appServer: fake,
+    codexHome: join(workdir, "codex-home"), repoDir: workdir, workdir,
+    task: "manual", runId: "run-pending-duplicate", prompt: "status", model: "gpt-5.6-sol", modelProvider: "cchp",
+    totalTokenBudget: 1_000,
+    executionMode: "native_v2",
+  })
+  const firstAdmission = await supervisor.authorizeProviderRequest({ providerId: "provider", model: "model", contextWindow: 10 })
+  const secondAdmission = await supervisor.authorizeProviderRequest({ providerId: "provider", model: "model", contextWindow: 10 })
+  expect(firstAdmission.reservationId).toBeDefined()
+  expect(secondAdmission.reservationId).toBeDefined()
+  const observed = {
+    providerId: "provider", model: "model", responseId: "pending-response",
+    inputTokens: 8, cachedInputTokens: 0, cacheWriteInputTokens: 0,
+    outputTokens: 3, reasoningOutputTokens: 0, totalTokens: 11,
+  }
+  await supervisor.recordProviderUsage({ ...observed, reservationId: firstAdmission.reservationId })
+  await supervisor.recordProviderUsage({ ...observed, reservationId: secondAdmission.reservationId })
+
+  const rows = readJsonl(join(workdir, "ctx", "codex", "usage.jsonl"))
+  expect(rows.filter((row) => row.kind === "reservation_released" && row.reservationId === secondAdmission.reservationId)).toHaveLength(1)
+  expect(rows.filter((row) => row.kind === "reservation_released" && row.reservationId === firstAdmission.reservationId)).toHaveLength(0)
+})
+
 test("fails closed when raw and provider terminal usage disagree in either arrival order", async () => {
   for (const providerFirst of [true, false]) {
     const workdir = mkdtempSync(join(tmpdir(), `cchp-supervisor-source-conflict-${providerFirst}-`))
@@ -1969,20 +2135,20 @@ test("denies the next provider request before a projected token-budget overshoot
     executionMode: "explicit_child",
     resume: { state: "ROOT_RUNNING", rootThreadId: "root", rootTurnId: "turn", restartAttempts: 0 },
   })
-  for (const responseId of ["first", "second"]) {
+  for (const [index, responseId] of ["first", "second"].entries()) {
     await supervisor.recordProviderUsage({
       providerId: "provider", model: "model", responseId,
-      threadId: "root", turnId: "turn", inputTokens: 350,
+      threadId: "root", turnId: `turn-${index + 1}`, inputTokens: 350,
       cachedInputTokens: 0, cacheWriteInputTokens: 0,
       outputTokens: 50, reasoningOutputTokens: 0, totalTokens: 400,
     })
   }
 
   expect(await supervisor.authorizeProviderRequest({
-    providerId: "provider", model: "model", threadId: "root", turnId: "turn", contextWindow: 372_000,
+    providerId: "provider", model: "model", threadId: "root", turnId: "turn-3", contextWindow: 372_000,
   })).toMatchObject({ allowed: false, reason: expect.stringContaining("projected_budget") })
   expect(supervisor.currentState).toBe("TOKEN_BUDGET_EXCEEDED")
-  expect(supervisor.currentUsage).toMatchObject({ consumed: 800, responses: 2, turns: 1, admissionDenials: 1 })
+  expect(supervisor.currentUsage).toMatchObject({ consumed: 800, responses: 2, turns: 2, admissionDenials: 1 })
   expect(stops).toBe(1)
   expect(readJsonl(join(workdir, "ctx", "codex", "supervisor.jsonl")).some((row) =>
     row.event === "provider_request_admission" && row.allowed === false && row.reason === "projected_budget",

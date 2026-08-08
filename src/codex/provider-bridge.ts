@@ -1472,6 +1472,13 @@ async function handleProviderRequest(
         ...(configured?.context ? { contextWindow: configured.context } : {}),
       })
       if (!admission.allowed) {
+        if (admission.reservationId && onRequestFinished) {
+          try {
+            await onRequestFinished(admission.reservationId, "released", "admission_denied")
+          } catch {
+            // Admission is already denied; cleanup failure must not expose a secret or alter the stable 429 response.
+          }
+        }
         return scrubResponse(Response.json({
           error: {
             type: "token_budget_admission_denied",

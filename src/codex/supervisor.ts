@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto"
-import { appendFileSync, lstatSync, mkdirSync, readFileSync } from "node:fs"
+import { appendFileSync, chmodSync, lstatSync, mkdirSync, readFileSync } from "node:fs"
 import { join } from "node:path"
 import { CodexAppServer, type CodexAppServerExit, type JsonRpcNotification, type JsonRpcServerRequest } from "./app-server"
 import type { RunFence } from "./run-lock"
@@ -61,6 +61,7 @@ export interface SupervisorOptions {
   writerFence?: Pick<RunFence, "writerId" | "generation">
   explicitChildren?: ExplicitChildLifecycle
   onAppServerStderr?: (line: string) => void
+  redactDiagnostic?: (value: string) => string
 }
 
 export interface SupervisorFinalizerContext {
@@ -126,6 +127,14 @@ export function buildCodexEnvironment(env: Record<string, string | undefined>): 
   for (const name of CODEX_ENV_ALLOWLIST) {
     const value = env[name]
     if (typeof value === "string") result[name] = value
+  }
+  if (result.BOT_WORKDIR) {
+    const shellHome = join(result.BOT_WORKDIR, "codex-shell-home")
+    mkdirSync(shellHome, { recursive: true, mode: 0o700 })
+    const stat = lstatSync(shellHome)
+    if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error("Codex shell home must be a real directory")
+    chmodSync(shellHome, 0o700)
+    result.HOME = shellHome
   }
   return result
 }
@@ -565,8 +574,9 @@ export class Supervisor {
   }
 
   public async handleAppServerExit(event: CodexAppServerExit): Promise<void> {
+    if (this.settled) return
     this.append({ event: "app_server_exit", ...event, error: event.error?.message })
-    if (event.expected || this.settled) return
+    if (event.expected) return
     if (this.terminalIntent) {
       this.append({ event: "app_server_exit_ignored_after_terminal_intent", reason: event.reason, exitCode: event.exitCode })
       return
@@ -850,6 +860,10 @@ export class Supervisor {
   }
 
   public async releaseProviderReservation(reservationId: string, reason = "provider_request_finished"): Promise<void> {
+    if (this.settled) {
+      this.usage.releaseReservation(reservationId, reason, false)
+      return
+    }
     if (!this.usage.releaseReservation(reservationId, reason)) return
     this.append({
       event: "provider_request_reservation_released",
@@ -860,6 +874,10 @@ export class Supervisor {
   }
 
   public async recordProviderUsage(usage: ProviderBridgeUsage): Promise<UsageResult> {
+    if (this.settled) {
+      this.usage.releaseReservation(usage.reservationId ?? "", "late_provider_usage", false)
+      return this.usage.budget
+    }
     if (this.options.executionMode === "native_v2") {
       this.providerResponseUsage.set(usage.responseId, usage)
       const rawOwner = this.rawResponseOwners.get(usage.responseId)
@@ -1002,6 +1020,9 @@ export class Supervisor {
       return result
     }
     if (!existing) this.pendingProviderUsage.set(usage.responseId, usage)
+    else if (usage.reservationId && usage.reservationId !== existing.reservationId) {
+      await this.releaseProviderReservation(usage.reservationId, "duplicate_provider_usage")
+    }
     this.append({
       event: existing ? "provider_usage_duplicate_observed" : "provider_usage_observed",
       responseId: usage.responseId,
@@ -1049,6 +1070,10 @@ export class Supervisor {
     input: Parameters<UsageLedger["recordRaw"]>[0],
     event: "provider_usage" | "raw_response_usage",
   ): Promise<UsageResult> {
+    if (this.settled) {
+      this.usage.releaseReservation(input.reservationId ?? "", "late_raw_usage", false)
+      return this.usage.budget
+    }
     const result = this.usage.recordRaw(input)
     this.append({
       event,
@@ -1071,6 +1096,7 @@ export class Supervisor {
   }
 
   private async handleEvent(event: NormalizedEvent): Promise<void> {
+    if (this.settled) return
     this.append({ event: event.kind, source: event.source, threadId: event.threadId, turnId: event.turnId, semantic: event.semantic, params: event.params })
     if (event.kind === "turn_started" && event.threadId === this.rootThreadId && event.turnId && !this.rootTurnId) {
       this.rootTurnId = event.turnId
@@ -1731,8 +1757,9 @@ export class Supervisor {
   }
 
   private beginTerminal(reason: string, state: SupervisorState, exitCode: number): SupervisorResult {
-    this.terminalReason = reason
-    this.transition(state, reason)
+    const safeReason = this.options.redactDiagnostic?.(reason) ?? reason
+    this.terminalReason = safeReason
+    this.transition(state, safeReason)
     const result = this.result(state, exitCode)
     this.terminalIntent = result
     return result
