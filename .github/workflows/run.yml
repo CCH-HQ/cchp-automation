@@ -153,6 +153,7 @@ jobs:
           permission-organization-projects: write
 
       - name: Install Codex CLI
+        id: install_codex
         if: steps.route.outputs.act == 'true'
         env:
           GH_TOKEN: ${{ steps.base.outputs.token }}
@@ -161,6 +162,7 @@ jobs:
           bash "${{ env.ENGINE_DIR }}/scripts/install-codex.sh"
 
       - name: Prepare isolated Codex environment
+        id: prepare_codex
         if: steps.route.outputs.act == 'true'
         env:
           BOT_TOKEN: ${{ steps.write.outputs.token || steps.base.outputs.token }}
@@ -168,12 +170,14 @@ jobs:
         run: bash ${{ env.ENGINE_DIR }}/scripts/prepare-codex-env.sh
 
       - name: External static analysis (trusted pre-review scan)
+        id: external_scan
         if: steps.route.outputs.act == 'true'
         env:
           GH_TOKEN: ${{ steps.base.outputs.token }}
         run: bash ${{ env.ENGINE_DIR }}/scripts/external-scan.sh
 
       - name: Verify Codex capability gate
+        id: capability_gate
         if: steps.route.outputs.act == 'true'
         env:
           CCHP_ARTIFACT_RUN_ID: ${{ github.run_id }}-${{ github.run_attempt }}
@@ -183,6 +187,7 @@ jobs:
       # Run the agent. Model/provider VARIABLES are read straight from the caller's
       # `vars` context (unchanged); provider keys + SEE come from the passed secrets.
       - name: Run Codex supervisor
+        id: codex_supervisor
         if: steps.route.outputs.act == 'true'
         env:
           GH_TOKEN: ${{ steps.write.outputs.token || steps.base.outputs.token }}
@@ -217,6 +222,36 @@ jobs:
           # fix tasks — same job-level exposure the consumer workflow had.
           HEROUI_AUTH_TOKEN: ${{ secrets.heroui-token }}
         run: bash ${{ env.ENGINE_DIR }}/scripts/run-codex.sh
+
+      # Runtime publication covers normal supervisor terminals. This independent
+      # finalizer also runs when setup, preparation, static analysis, the
+      # capability gate, or the runtime process itself fails before it can
+      # replace a prior Live progress sticky.
+      - name: Mint App token (progress finalizer)
+        id: finalizer_token
+        if: always() && steps.route.outputs.act == 'true'
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3
+        with:
+          client-id: ${{ secrets.app-client-id }}
+          private-key: ${{ secrets.app-private-key }}
+          permission-contents: read
+          permission-metadata: read
+          permission-issues: write
+          permission-pull-requests: write
+
+      - name: Finalize progress comment
+        id: finalize_progress
+        if: always() && steps.route.outputs.act == 'true'
+        env:
+          GH_TOKEN: ${{ steps.finalizer_token.outputs.token || steps.base.outputs.token }}
+          CCHP_WRITE_OUTCOME: ${{ steps.write.outcome }}
+          CCHP_NEEDS_WRITE: ${{ steps.route.outputs.needs_write }}
+          CCHP_INSTALL_OUTCOME: ${{ steps.install_codex.outcome }}
+          CCHP_PREPARE_OUTCOME: ${{ steps.prepare_codex.outcome }}
+          CCHP_SCAN_OUTCOME: ${{ steps.external_scan.outcome }}
+          CCHP_CAPABILITY_OUTCOME: ${{ steps.capability_gate.outcome }}
+          CCHP_SUPERVISOR_OUTCOME: ${{ steps.codex_supervisor.outcome }}
+        run: bun ${{ env.ENGINE_DIR }}/src/codex/finalize-workflow-progress.ts
 
       - name: Cleanup isolated environment
         if: always()
