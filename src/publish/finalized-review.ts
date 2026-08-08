@@ -8,6 +8,7 @@ import { materializeInlinePublication } from "../mcp/server"
 import type { FinalizedMarker } from "../review/finalize"
 import { hidden, MARKER, type Verdict } from "../types"
 import { durableWriteFile } from "../codex/durable-file"
+import { assertNoForbiddenMaterial } from "../security/secret-material"
 import { LOGO_HEADING, postReviewBatch, reviewHistory, sanitizeText } from "./inline"
 import { autoApproveDisabled, submitReview } from "./review"
 import { progressMarkerKey } from "./sticky"
@@ -37,6 +38,7 @@ export interface PublishFinalizedReviewInput {
   idempotencyKey: string
   statePath: string
   env?: Record<string, string | undefined>
+  forbiddenValues?: () => readonly string[]
 }
 
 const PHASES: PublicationPhase[] = ["prepared", "inline_published", "formal_review_published", "complete"]
@@ -138,6 +140,7 @@ async function publishSummary(
   headSha: string,
   report: string,
   idempotencyKey: string,
+  forbiddenValues: () => readonly string[],
 ): Promise<void> {
   const { owner, name } = splitRepo(repository)
   let comments = await octokit.paginate(octokit.rest.issues.listComments, {
@@ -164,6 +167,7 @@ async function publishSummary(
     ].filter(Boolean).join("\n")
     const prefix = `### ${LOGO_HEADING} Code Review Result${chunks.length > 1 ? ` (${index + 1}/${chunks.length})` : ""}\n\n`
     const body = boundedContent(prefix, chunks[index]!, `\n\n${suffix}`)
+    assertNoForbiddenMaterial(body, forbiddenValues(), "finalized review publication contains credential material")
     const existing = index === 0
       ? primary
       : comments.find((comment) => (comment.body ?? "").includes(hidden(partMarker)))
@@ -216,6 +220,7 @@ export async function publishFinalizedReview(input: PublishFinalizedReviewInput)
         ...comment,
         body: boundedContent("", comment.body, "\n\n_Full details are retained in the finalized review report._", INLINE_BODY_BYTES),
       }))
+      assertNoForbiddenMaterial(comments, input.forbiddenValues?.() ?? [], "finalized review publication contains credential material")
       const outcome = await postReviewBatch(input.octokit, input.repository, {
         prNumber: input.prNumber,
         headSha: input.bundle.headSha,
@@ -244,6 +249,7 @@ export async function publishFinalizedReview(input: PublishFinalizedReviewInput)
         `\n\n_The complete report is published in the review summary comments._\n\n${hidden(publicationMarker)}`,
         REVIEW_BODY_BYTES,
       )
+      assertNoForbiddenMaterial(reviewBody, input.forbiddenValues?.() ?? [], "finalized review publication contains credential material")
       const outcome = await submitReview(input.octokit, input.repository, input.prNumber, {
         event: input.bundle.formalVerdict,
         body: reviewBody,
@@ -269,6 +275,7 @@ export async function publishFinalizedReview(input: PublishFinalizedReviewInput)
       input.bundle.headSha,
       input.bundle.report,
       input.idempotencyKey,
+      input.forbiddenValues ?? (() => []),
     )
     state = { ...state, phase: "complete" }
     saveState(input.statePath, state)

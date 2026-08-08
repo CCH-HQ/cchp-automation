@@ -118,13 +118,29 @@ export interface StickyResult {
  *  creates a new one. `markerKey` is the bare key (e.g. `MARKER.progress(task)`
  *  or `MARKER.sticky("cifix")`); `hidden()` wraps it into `<!-- key -->` so the
  *  next Run finds it. Single-`\n` separator, matching the progress plugin. */
+export function upsertSticky(
+  octokit: GitHubClient,
+  repo: string,
+  issueNumber: number,
+  markerKey: string,
+  body: string,
+): Promise<StickyResult>
+export function upsertSticky(
+  octokit: GitHubClient,
+  repo: string,
+  issueNumber: number,
+  markerKey: string,
+  body: string,
+  beforeMutation: () => Promise<boolean>,
+): Promise<StickyResult | undefined>
 export async function upsertSticky(
   octokit: GitHubClient,
   repo: string,
   issueNumber: number,
   markerKey: string,
   body: string,
-): Promise<StickyResult> {
+  beforeMutation?: () => Promise<boolean>,
+): Promise<StickyResult | undefined> {
   const { owner, name } = splitRepo(repo)
   const full = `${body}\n${hidden(markerKey)}`
   const comments = await octokit.paginate(octokit.rest.issues.listComments, {
@@ -134,6 +150,7 @@ export async function upsertSticky(
     per_page: 100,
   })
   const existing = findByMarker(comments, markerKey)
+  if (beforeMutation && !await beforeMutation()) return undefined
   if (existing) {
     const { data } = await octokit.rest.issues.updateComment({
       owner,

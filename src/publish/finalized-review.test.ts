@@ -180,6 +180,31 @@ test("fails closed before publication when the live PR head changed", async () =
   expect(calls.updateComment).toHaveLength(0)
 })
 
+test("rejects credential material before any finalized review publication", async () => {
+  const { octokit, calls } = fake()
+  const bundle: ReviewPublicationBundle = {
+    report: "report containing embedded-secret",
+    patch,
+    headSha: "head-sha",
+    formalVerdict: "COMMENT",
+    findingCount: 0,
+    publishableInline: {},
+  }
+  await expect(publishFinalizedReview({
+    octokit,
+    repository: "CCH-HQ/fixture",
+    prNumber: 42,
+    marker,
+    bundle,
+    idempotencyKey: "key-secret",
+    statePath: join(mkdtempSync(join(tmpdir(), "cchp-finalized-review-")), "state.json"),
+    forbiddenValues: () => ["embedded-secret"],
+  })).rejects.toThrow("credential material")
+  expect(calls.createReview).toHaveLength(0)
+  expect(calls.createComment).toHaveLength(0)
+  expect(calls.updateComment).toHaveLength(0)
+})
+
 test("records the effective COMMENT verdict when auto-approve is disabled", async () => {
   const { octokit, calls } = fake()
   const bundle: ReviewPublicationBundle = {

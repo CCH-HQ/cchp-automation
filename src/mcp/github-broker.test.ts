@@ -194,6 +194,8 @@ async function withBroker(
     repoDir?: string
     allowRepositoryMutation?: boolean
     herouiAuthToken?: string
+    seeUpload?: (path: string, name?: string, isPrivate?: boolean) => Promise<unknown>
+    forbiddenValues?: () => readonly string[]
     runCommand?: RunCommand
   } = {},
 ): Promise<void> {
@@ -218,6 +220,8 @@ async function withBroker(
     repoDir: options.repoDir,
     allowRepositoryMutation: options.allowRepositoryMutation,
     herouiAuthToken: options.herouiAuthToken,
+    seeUpload: options.seeUpload,
+    forbiddenValues: options.forbiddenValues,
     runCommand: options.runCommand,
   })
   try {
@@ -321,6 +325,47 @@ test("typed host Git and dependency operations use fixed commands, cwd and secre
   expect(calls[1]?.env).not.toHaveProperty("CCHP_APP_PRIVATE_KEY")
   expect(calls[2]?.env).toMatchObject({ HEROUI_AUTH_TOKEN: "heroui-secret" })
   expect(calls[2]?.env).not.toHaveProperty("GH_TOKEN")
+})
+
+test("routes SEE uploads through the bounded supervisor-owned capability", async () => {
+  const root = mkdtempSync(join(tmpdir(), "cchp-broker-see-"))
+  const calls: Array<{ path: string; name?: string; isPrivate?: boolean }> = []
+  await withBroker(async (client) => {
+    const seeUpload = (client as unknown as {
+      cchp: { seeUpload(args: { path: string; name?: string; is_private?: boolean }): Promise<unknown> }
+    }).cchp.seeUpload
+    await expect(seeUpload({ path: `${root}/figure.png`, name: "proof.png", is_private: true })).resolves.toEqual({
+      url: "https://s.ee/f/proof",
+      filename: "proof.png",
+    })
+    await expect(seeUpload({ path: "" })).rejects.toThrow("non-empty")
+    await expect(seeUpload({ path: `${root}/figure.png`, unexpected: true } as never)).rejects.toThrow("unexpected fields")
+    await expect(seeUpload({ path: `${root}/bridge-secret-sentinel` })).rejects.toThrow("credential material")
+  }, {
+    task: "manual",
+    noDefaultTarget: true,
+    repoDir: root,
+    seeUpload: async (path, name, isPrivate) => {
+      calls.push({ path, name, isPrivate })
+      return { url: "https://s.ee/f/proof", filename: name }
+    },
+    forbiddenValues: () => ["bridge-secret-sentinel"],
+  })
+  expect(calls).toEqual([{ path: `${root}/figure.png`, name: "proof.png", isPrivate: true }])
+})
+
+test("rejects raw multiline credentials before broker mutations", async () => {
+  const secret = "-----BEGIN PRIVATE KEY-----\nline\\\"value\n-----END PRIVATE KEY-----"
+  await withBroker(async (client) => {
+    const cchp = (client as unknown as { cchp: { seeUpload(args: Record<string, unknown>): Promise<unknown> } }).cchp
+    await expect(cchp.seeUpload({ path: "fixture.txt", name: secret })).rejects.toThrow("credential material")
+  }, {
+    task: "manual",
+    noDefaultTarget: true,
+    repoDir: "/tmp/cchp-broker-secret-fixture",
+    seeUpload: async () => ({ url: "https://s.ee/f/should-not-run" }),
+    forbiddenValues: () => [secret],
+  })
 })
 
 test("typed Git mutation and dependency installation fail closed for read-only runs", async () => {

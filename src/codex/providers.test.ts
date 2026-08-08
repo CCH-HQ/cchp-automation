@@ -90,6 +90,10 @@ test("rejects credentials too short to scrub safely", () => {
     providerJson: JSON.stringify({ relay: { ...provider.relay, headers: { Authorization: "Bearer abc" } } }),
     model: "relay/gpt-5.6-sol",
   })).toThrow("credential must be at least 4 characters")
+  expect(() => parseProviders({
+    providerJson: JSON.stringify({ relay: { ...provider.relay, headers: { "x-custom-secret": "abc" } } }),
+    model: "relay/gpt-5.6-sol",
+  })).toThrow("credential must be at least 4 characters")
 })
 
 test("requires a context window for compact threshold and preserves the configured value", () => {

@@ -17,23 +17,28 @@ import { basename, isAbsolute, join, relative, resolve } from "node:path"
 import { Server } from "@modelcontextprotocol/sdk/server/index.js"
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { CallToolRequestSchema, ListToolsRequestSchema, type CallToolResult, type Tool } from "@modelcontextprotocol/sdk/types.js"
+import { brokerRequest } from "./github-broker"
+import { assertNoForbiddenMaterial } from "../security/secret-material"
 
 export const SEE_MAX_UPLOAD_BYTES = 10 * 1024 * 1024
 
-interface SeeUploadResult {
+export interface SeeUploadResult {
   url: string
   page?: string
   filename?: string
   size?: number
 }
 
-interface SeeServerOptions {
+export interface SeeServerOptions {
   repoDir: string
   botWorkdir: string
-  keyFile: string
-  seeBin: string
+  keyFile?: string
+  apiKey?: string
+  seeBin?: string
+  broker?: { socketPath: string; token: string }
   maxBytes?: number
   env?: Record<string, string | undefined>
+  forbiddenValues?: () => readonly string[]
   run?: (argv: string[], env: Record<string, string>) => Promise<{ exitCode: number; stdout: string; stderr: string }>
 }
 
@@ -53,10 +58,16 @@ interface PreparedUpload {
   cleanup(): void
 }
 
-function readKey(path: string): { key: string; dev: bigint; ino: bigint } {
+function readKey(options: SeeServerOptions): { key: string; dev?: bigint; ino?: bigint } {
+  if (options.apiKey != null) {
+    const key = options.apiKey.trim()
+    if (!key) throw new Error("SEE API key is empty")
+    return { key }
+  }
+  if (!options.keyFile) throw new Error("SEE API key source is unavailable")
   let fd: number
   try {
-    fd = openSync(resolve(path), constants.O_RDONLY | constants.O_NOFOLLOW)
+    fd = openSync(resolve(options.keyFile), constants.O_RDONLY | constants.O_NOFOLLOW)
   } catch {
     throw new Error("SEE API key must be a regular non-symlink file")
   }
@@ -74,12 +85,12 @@ function readKey(path: string): { key: string; dev: bigint; ino: bigint } {
 
 function prepareUpload(path: string, options: SeeServerOptions): PreparedUpload {
   const requested = resolve(path)
-  const keyPath = resolve(options.keyFile)
-  if (requested === keyPath) throw new Error("SEE API key file cannot be uploaded")
+  const keyPath = options.keyFile ? resolve(options.keyFile) : undefined
+  if (keyPath && requested === keyPath) throw new Error("SEE API key file cannot be uploaded")
   const link = lstatSync(requested)
   if (link.isSymbolicLink() || !link.isFile()) throw new Error("SEE upload path must be a regular non-symlink file")
   const real = realpathSync(requested)
-  if (real === realpathSync(keyPath)) throw new Error("SEE API key file cannot be uploaded")
+  if (keyPath && real === realpathSync(keyPath)) throw new Error("SEE API key file cannot be uploaded")
   const repoRoot = realpathSync(options.repoDir)
   const ctxRoot = realpathSync(resolve(options.botWorkdir, "ctx"))
   if (!inside(real, repoRoot) && !inside(real, ctxRoot)) throw new Error("SEE upload path is outside the repository and run context")
@@ -101,13 +112,16 @@ function prepareUpload(path: string, options: SeeServerOptions): PreparedUpload 
       throw new Error("SEE upload path is outside the repository and run context")
     }
 
-    const key = readKey(keyPath)
-    if (source.dev === key.dev && source.ino === key.ino) throw new Error("SEE API key file cannot be uploaded")
+    const key = readKey(options)
+    if (key.dev != null && key.ino != null && source.dev === key.dev && source.ino === key.ino) {
+      throw new Error("SEE API key file cannot be uploaded")
+    }
     if (source.nlink !== 1n) throw new Error("SEE upload path must not be a hard-linked file")
     const maxBytes = options.maxBytes ?? SEE_MAX_UPLOAD_BYTES
     if (source.size > BigInt(maxBytes)) throw new Error(`SEE upload exceeds ${maxBytes} bytes`)
     const bytes = readFileSync(fd)
     if (bytes.byteLength > maxBytes) throw new Error(`SEE upload exceeds ${maxBytes} bytes`)
+    assertNoForbiddenMaterial(bytes, options.forbiddenValues?.() ?? [], "SEE upload contains credential material")
 
     const stagingRoot = resolve(options.botWorkdir, "ctx", "see", "staging")
     mkdirSync(stagingRoot, { recursive: true, mode: 0o700 })
@@ -141,13 +155,33 @@ async function runSee(argv: string[], env: Record<string, string>): Promise<{ ex
   return { exitCode, stdout: bounded(stdout), stderr: bounded(stderr) }
 }
 
-function parseResult(stdout: string, path: string): SeeUploadResult {
-  let value: unknown
-  try {
-    value = JSON.parse(stdout)
-  } catch {
-    throw new Error("SEE CLI returned malformed JSON")
-  }
+const SEE_ENV_ALLOWLIST = ["PATH", "LANG", "LC_ALL", "LC_CTYPE", "NO_COLOR", "SSL_CERT_FILE", "SSL_CERT_DIR"]
+
+function seeEnvironment(options: SeeServerOptions): Record<string, string> {
+  const source = options.env ?? process.env
+  const blocked = new Set([
+    "GH_TOKEN", "CCHP_GH_TOKEN_FILE", "CCHP_BOT_PROVIDER_KEYS", "CCHP_BOT_PROVIDERS",
+    "CCHP_APP_CLIENT_ID", "CCHP_APP_PRIVATE_KEY", "SEE_API_KEY", "HEROUI_AUTH_TOKEN",
+    "CCHP_CODEX_BRIDGE_TOKEN", "CCHP_GITHUB_BROKER_SOCKET", "CCHP_GITHUB_BROKER_TOKEN",
+    "CCHP_GITHUB_BROKER_FINALIZER",
+  ])
+  const env = Object.fromEntries(SEE_ENV_ALLOWLIST
+    .filter((name) => !blocked.has(name))
+    .flatMap((name) => typeof source[name] === "string" ? [[name, source[name]!]] : []))
+  const home = resolve(options.botWorkdir, "ctx", "see", "home")
+  const tmp = resolve(options.botWorkdir, "ctx", "see", "tmp")
+  mkdirSync(home, { recursive: true, mode: 0o700 })
+  mkdirSync(tmp, { recursive: true, mode: 0o700 })
+  chmodSync(home, 0o700)
+  chmodSync(tmp, 0o700)
+  env.HOME = home
+  env.TMPDIR = tmp
+  env.TMP = tmp
+  env.TEMP = tmp
+  return env
+}
+
+function validateResult(value: unknown, path: string): SeeUploadResult {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("SEE CLI returned an invalid JSON object")
   const record = value as Record<string, unknown>
   if (typeof record.url !== "string" || !/^https:\/\//.test(record.url)) throw new Error("SEE CLI response has no HTTPS URL")
@@ -158,6 +192,16 @@ function parseResult(stdout: string, path: string): SeeUploadResult {
     filename: typeof record.filename === "string" && record.filename ? record.filename : basename(path),
     ...(typeof record.size === "number" && Number.isSafeInteger(record.size) && record.size >= 0 ? { size: record.size } : {}),
   }
+}
+
+function parseResult(stdout: string, path: string): SeeUploadResult {
+  let value: unknown
+  try {
+    value = JSON.parse(stdout)
+  } catch {
+    throw new Error("SEE CLI returned malformed JSON")
+  }
+  return validateResult(value, path)
 }
 
 export function createSeeServer(options: SeeServerOptions): { server: Server; tools: Tool[]; uploadFile(path: string, name?: string, isPrivate?: boolean): Promise<SeeUploadResult> } {
@@ -177,12 +221,21 @@ export function createSeeServer(options: SeeServerOptions): { server: Server; to
   const uploadFile = async (path: string, name?: string, isPrivate = false): Promise<SeeUploadResult> => {
     if (!path.trim()) throw new Error("path must be a non-empty string")
     if (name != null && (!name.trim() || name.includes("/") || name.includes("\\"))) throw new Error("name must be a plain filename")
+    if (options.broker) {
+      const result = await brokerRequest(options.broker.socketPath, options.broker.token, "cchp.seeUpload", {
+        path,
+        ...(name ? { name } : {}),
+        is_private: isPrivate,
+      })
+      return validateResult(result, path)
+    }
+    if (!options.seeBin) throw new Error("SEE CLI is unavailable")
     const prepared = prepareUpload(path, options)
     try {
       const argv = [options.seeBin, "file", "upload", "--json", "--file", prepared.snapshotPath]
       if (name) argv.push("--name", name)
       if (isPrivate) argv.push("--private")
-      const env = Object.fromEntries(Object.entries(options.env ?? process.env).filter((entry): entry is [string, string] => typeof entry[1] === "string"))
+      const env = seeEnvironment(options)
       env.SEE_API_KEY = prepared.key
       const result = await (options.run ?? runSee)(argv, env)
       if (result.exitCode !== 0) {
@@ -216,8 +269,12 @@ async function main(): Promise<void> {
   const created = createSeeServer({
     repoDir,
     botWorkdir,
-    keyFile: process.env.SEE_API_KEY_FILE ?? resolve(botWorkdir, "ctx", "see", "api-key"),
-    seeBin: process.env.SEE_CLI_BIN ?? resolve(process.env.HOME ?? "", ".local", "lib", "see-cli", "see"),
+    ...(process.env.CCHP_GITHUB_BROKER_SOCKET && process.env.CCHP_GITHUB_BROKER_TOKEN
+      ? { broker: { socketPath: process.env.CCHP_GITHUB_BROKER_SOCKET, token: process.env.CCHP_GITHUB_BROKER_TOKEN } }
+      : {
+          keyFile: process.env.SEE_API_KEY_FILE ?? resolve(botWorkdir, "ctx", "see", "api-key"),
+          seeBin: process.env.SEE_CLI_BIN ?? resolve(process.env.HOME ?? "", ".local", "lib", "see-cli", "see"),
+        }),
   })
   await created.server.connect(new StdioServerTransport())
 }

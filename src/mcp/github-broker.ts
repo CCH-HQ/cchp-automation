@@ -6,6 +6,7 @@ import { unlink } from "node:fs/promises"
 import { dirname } from "node:path"
 import { mkdirSync } from "node:fs"
 import { openRegularFileSnapshot, type FileSnapshot } from "../codex/file-snapshot"
+import { assertNoForbiddenMaterial } from "../security/secret-material"
 import type { GitHubClient, TokenSource } from "../github/client"
 import { CHECK_RUN_NAME } from "../publish/checkrun"
 import { ARTIFACT_SCHEMA_VERSION, TASKS, type Task } from "../types"
@@ -50,6 +51,8 @@ export interface GitHubBrokerOptions {
   repoDir?: string
   allowRepositoryMutation?: boolean
   herouiAuthToken?: string
+  seeUpload?: (path: string, name?: string, isPrivate?: boolean) => Promise<unknown>
+  forbiddenValues?: () => readonly string[]
   runCommand?: (command: string, args: string[], options: { cwd: string; env: Record<string, string>; timeoutMs: number }) => Promise<{ stdout: string; stderr: string }>
 }
 
@@ -684,7 +687,11 @@ function authorizeGraphql(options: GitHubBrokerOptions, state: BrokerAuthorizati
 
 function authorize(options: GitHubBrokerOptions, state: BrokerAuthorizationState, operation: string, args: Json): void {
   if (operation.startsWith("cchp.")) {
-    assertOnlyKeys(args, operation === "cchp.installWebDependencies" ? ["mode"] : [])
+    assertOnlyKeys(args,
+      operation === "cchp.installWebDependencies" ? ["mode"]
+        : operation === "cchp.seeUpload" ? ["path", "name", "is_private"]
+          : [],
+    )
     if (!options.repoDir) throw new Error("broker runtime operation has no trusted repository directory")
     if (operation === "cchp.gitFetch") return
     if (operation === "cchp.gitPush") {
@@ -694,6 +701,13 @@ function authorize(options: GitHubBrokerOptions, state: BrokerAuthorizationState
     if (operation === "cchp.installWebDependencies") {
       if (!options.allowRepositoryMutation) throw new Error("broker dependency installation is not allowed for this run")
       if (!new Set(["frozen", "update"]).has(String(args.mode))) throw new Error("dependency install mode must be frozen or update")
+      return
+    }
+    if (operation === "cchp.seeUpload") {
+      if (!options.seeUpload) throw new Error("SEE upload is unavailable for this run")
+      if (typeof args.path !== "string" || !args.path.trim()) throw new Error("SEE upload path must be a non-empty string")
+      if (args.name != null && (typeof args.name !== "string" || !args.name.trim())) throw new Error("SEE upload name must be a non-empty string")
+      if (args.is_private != null && typeof args.is_private !== "boolean") throw new Error("SEE upload privacy flag must be boolean")
       return
     }
     throw new Error(`unknown broker runtime operation: ${operation}`)
@@ -751,6 +765,13 @@ async function executeRuntimeOperation(options: GitHubBrokerOptions, operation: 
   }
   if (operation === "cchp.gitPush") {
     return run("git", ["push", "origin", "HEAD"], { cwd: repoDir, env: baseEnv, timeoutMs: 300_000 })
+  }
+  if (operation === "cchp.seeUpload") {
+    return options.seeUpload!(
+      String(args.path),
+      typeof args.name === "string" ? args.name : undefined,
+      args.is_private === true,
+    )
   }
   const webDir = `${repoDir}/web`
   if (!existsSync(`${webDir}/package.json`)) throw new Error("trusted repository has no web/package.json")
@@ -1122,14 +1143,16 @@ async function handleRequest(socket: Socket, options: GitHubBrokerOptions, state
   const id = request.id
   try {
     if (typeof request.token !== "string" || !sameToken(request.token, token)) throw new Error("invalid GitHub broker token")
-    const result = await execute(options, state, String(request.operation ?? ""), (request.args as Json) ?? {})
+    const args = (request.args as Json) ?? {}
+    assertNoForbiddenMaterial(args, [token, ...(options.forbiddenValues?.() ?? [])], "broker request contains credential material")
+    const result = await execute(options, state, String(request.operation ?? ""), args)
     socket.write(`${JSON.stringify({ id, ok: true, result })}\n`)
   } catch (error) {
     socket.write(`${JSON.stringify({ id, ok: false, error: error instanceof Error ? error.message : String(error) })}\n`)
   }
 }
 
-function brokerRequest(socketPath: string, token: string, operation: string, args: Json): Promise<unknown> {
+export function brokerRequest(socketPath: string, token: string, operation: string, args: Json): Promise<unknown> {
   return new Promise((resolve, reject) => {
     const id = randomBytes(8).toString("hex")
     const socket = connect(socketPath)

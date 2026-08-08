@@ -97,10 +97,13 @@ function parseHeaders(value: unknown, label: string): Record<string, string> {
   const headers: Record<string, string> = {}
   for (const [name, raw] of Object.entries(source)) {
     const header = nonEmpty(raw, `${label}.${name}`)
-    if (/^(authorization|proxy-authorization|x-api-key|api-key|x-goog-api-key)$/i.test(name)) {
-      const credential = header.includes(" ") ? header.slice(header.indexOf(" ") + 1).trim() : header
-      if (credential.length < 4) throw new Error(`${label}.${name} credential must be at least 4 characters`)
-    }
+    const credential = /^(authorization|proxy-authorization|x-api-key|api-key|x-goog-api-key)$/i.test(name) && header.includes(" ")
+      ? header.slice(header.indexOf(" ") + 1).trim()
+      : header
+    // bridge 将 caller 提供的所有 provider header 都视为 secret material.
+    // parser 与 response scrubber 必须使用同一最小长度, 避免合法配置中的
+    // 短 custom credential 绕过 literal redaction.
+    if (credential.length < 4) throw new Error(`${label}.${name} credential must be at least 4 characters`)
     headers[name] = header
   }
   return headers
