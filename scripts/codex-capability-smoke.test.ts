@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test"
-import { capabilityEngineRoot, collaborationLifecycleObserved, customToolCall, extractToolRefs, isChildProviderRequest, isCollaborationToolName, metadataProbeProtected, parentObservedChildOutput, parentObservedNativeChildOutput, toolCall, waitAgentArguments, workspaceEnforcement } from "./codex-capability-smoke"
+import { capabilityEngineRoot, collaborationLifecycleObserved, customToolCall, extractToolRefs, isChildProviderRequest, isCollaborationToolName, metadataProbeProtected, parentObservedChildOutput, parentObservedNativeChildOutput, toolCall, waitAgentArguments, waitForProgressingCompletion, workspaceEnforcement } from "./codex-capability-smoke"
 
 test("resolves the engine root from the smoke script instead of the caller working directory", () => {
   expect(capabilityEngineRoot("/opt/cchp-engine/scripts")).toBe("/opt/cchp-engine")
@@ -8,6 +8,33 @@ test("resolves the engine root from the smoke script instead of the caller worki
 test("maps wait_agent arguments to the selected collaboration ABI", () => {
   expect(waitAgentArguments("native-v2", "/root/child", 2_000)).toEqual({ timeout_ms: 2_000 })
   expect(waitAgentArguments("explicit-exec", "child", 2_000)).toEqual({ target: "child", timeout_ms: 2_000 })
+})
+
+test("bounds capability turns by inactivity while allowing an active multi-step turn to exceed the old wall-clock limit", async () => {
+  let progressAt = Date.now()
+  let resolveCompletion!: () => void
+  const completion = new Promise<void>((resolve) => { resolveCompletion = resolve })
+  const waiting = waitForProgressingCompletion(
+    completion,
+    () => progressAt,
+    () => "stage=interrupt",
+    { inactivityMs: 30, absoluteMs: 200, pollMs: 5 },
+  )
+  await Bun.sleep(20)
+  progressAt = Date.now()
+  await Bun.sleep(20)
+  progressAt = Date.now()
+  resolveCompletion()
+  await expect(waiting).resolves.toBeUndefined()
+})
+
+test("fails closed after a capability turn stops making provider progress", async () => {
+  await expect(waitForProgressingCompletion(
+    new Promise<void>(() => {}),
+    () => Date.now() - 100,
+    () => "stage=wait-interrupt",
+    { inactivityMs: 10, absoluteMs: 100, pollMs: 2 },
+  )).rejects.toThrow(/idleMs=.*stage=wait-interrupt/)
 })
 
 test("extracts collaboration tools from classic Responses and Responses Lite requests", () => {

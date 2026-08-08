@@ -15,15 +15,21 @@ const path = require("node:path")
 const [directory, runId] = process.argv.slice(2)
 for (const [name, mode] of [["capability-explicit-exec.json", "explicit-exec"], ["capability-native-v2.json", "native-v2"]]) {
   const value = JSON.parse(fs.readFileSync(path.join(directory, name), "utf8"))
-  if (value.schema_version !== 1 || value.status !== "passed" || value.run_id !== runId || value.collaborationMode !== mode) throw new Error(`capability mode ${mode} is not a passed current-run artifact`)
+  if (value.schema_version !== 2 || value.status !== "passed" || value.run_id !== runId || value.collaborationMode !== mode) throw new Error(`capability mode ${mode} is not a passed current-run artifact`)
   const workspace = value.workspace_write
+  const network = workspace?.external_network
   if (!workspace || workspace.status !== "passed" || workspace.thread_completed !== true ||
       workspace.apply_patch !== "passed" || workspace.ordinary_repo_write !== "passed" ||
+      workspace.app_server_long_lived_secrets_absent !== "passed" || workspace.shell_capabilities_excluded !== "passed" ||
+      workspace.shell_snapshot_directory_absent !== "passed" ||
+      !network || network.result !== "policy-blocked" ||
+      !["proxy-structured-denial", "os-connect-denied"].includes(network.reason) ||
+      network.probe_target !== "https://example.com" || network.configured_enforcement !== "direct" ||
       workspace.git_metadata_protected !== "passed" || workspace.agents_metadata_protected !== "passed" ||
-      workspace.enforcement !== "direct") throw new Error(`capability mode ${mode} is missing workspace-write evidence`)
+      workspace.configured_enforcement !== "direct") throw new Error(`capability mode ${mode} is missing workspace-write evidence`)
 }
 fs.writeFileSync(path.join(directory, "summary.json"), JSON.stringify({
-  schema_version: 1,
+  schema_version: 2,
   run_id: runId,
   stage: "completed",
   status: "passed",
