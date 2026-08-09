@@ -12,7 +12,7 @@ test("pre-cutover CI validates the cleanup phase and its current-run evidence", 
 
 test("portable Codex contract CI does not depend on an unavailable ARC runner", () => {
   const contract = ciWorkflow.slice(ciWorkflow.indexOf("  codex-contract:"), ciWorkflow.indexOf("  pre-cutover-acceptance:"))
-  expect(contract).toContain("runs-on: ubuntu-latest")
+  expect(contract).toContain("runs-on: ubuntu-22.04")
   expect(workflow.slice(0, workflow.indexOf("jobs:")).length).toBeGreaterThan(0)
   expect(workflow).toContain("runs-on: [self-hosted, linux, x64]")
 })

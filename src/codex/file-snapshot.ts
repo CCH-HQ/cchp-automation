@@ -11,6 +11,7 @@ export interface FileSnapshot {
 
 export interface FileSnapshotOptions {
   afterOpen?: (path: string, descriptor: number) => void
+  allowPathReplacement?: boolean
 }
 
 function openBoundFile(path: string): { descriptor: number; parents: number[] } {
@@ -54,8 +55,11 @@ export function openRegularFileSnapshot(path: string, options: FileSnapshotOptio
       const currentPath = lstatSync(path)
       pathnameStillBound = currentPath.dev === before.dev && currentPath.ino === before.ino
     } catch {
-      // A path replacement or removal is safe here: the descriptor remains the
-      // immutable snapshot that was opened and hashed above.
+      // Treat an unreadable path as replaced unless the caller explicitly opts
+      // into consuming the already-open descriptor as an immutable snapshot.
+    }
+    if (!pathnameStillBound && !options.allowPathReplacement) {
+      throw new Error(`file changed while snapshotting: ${path}`)
     }
     if (
       before.dev !== after.dev ||

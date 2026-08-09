@@ -11,6 +11,7 @@ test("reads and hashes one immutable fd even when its pathname is replaced", () 
   const original = Buffer.from('{"valid":true}\n')
   writeFileSync(path, original)
   const snapshot = openRegularFileSnapshot(path, {
+    allowPathReplacement: true,
     afterOpen: () => {
       renameSync(path, join(root, "evidence.original.json"))
       writeFileSync(path, '{"valid":false}\n')
