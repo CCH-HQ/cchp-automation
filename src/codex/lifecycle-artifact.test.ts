@@ -364,6 +364,60 @@ describe("actions lifecycle artifact", () => {
     expect(JSON.parse(readFileSync(path, "utf8")).root).toMatchObject({ state: "FAILED", exit_code: 42 })
   })
 
+  test("projects the last nonterminal checkpoint after a native runtime crash", () => {
+    const root = workdir()
+    const codex = join(root, "ctx", "codex")
+    writeFileSync(join(codex, "run-manifest.json"), JSON.stringify({
+      schemaVersion: 1,
+      runId: "run-crash",
+      task: "engage",
+      state: "ROOT_RUNNING",
+      execution_mode: "native_v2",
+      codexVersion: "codex-cli 0.146.0",
+      rootThreadId: "root",
+      rootTurnId: "turn",
+      usage: {
+        acceptedRaw: false,
+        consumed: 392_592,
+        limit: 2_000_000,
+        fraction: 0.196296,
+        state: "normal",
+        blockingAnomalies: 0,
+        responses: 8,
+        turns: 1,
+        admissionDenials: 0,
+        reservedTokens: 24_000,
+        responsesInFlight: 1,
+      },
+    }))
+    const snapshot = writeWorkflowRuntimeSnapshot({
+      BOT_WORKDIR: root,
+      BOT_TASK: "engage",
+      BOT_RUN_ID: "run-crash",
+      GITHUB_RUN_ID: "31331605047",
+      CCHP_RUNTIME_SNAPSHOT_PATH: join(root, "trusted", "runtime-snapshot.json"),
+    })
+    const path = writeLifecycleArtifact({
+      BOT_WORKDIR: root,
+      BOT_TASK: "engage",
+      BOT_RUN_ID: "run-crash",
+      GITHUB_RUN_ID: "31331605047",
+      CCHP_RUNTIME_SNAPSHOT_PATH: snapshot.path,
+      CCHP_RUNTIME_SNAPSHOT_SHA256: snapshot.sha256,
+      CCHP_LIFECYCLE_ARTIFACT_DIR: join(root, "artifacts"),
+      CCHP_INSTALL_OUTCOME: "success",
+      CCHP_PREPARE_OUTCOME: "success",
+      CCHP_SCAN_OUTCOME: "success",
+      CCHP_CAPABILITY_OUTCOME: "success",
+      CCHP_SUPERVISOR_OUTCOME: "failure",
+    })
+    expect(JSON.parse(readFileSync(path, "utf8"))).toMatchObject({
+      root: { state: "FAILED", thread_present: true, turn_present: true, reason_code: "supervisor_failed" },
+      usage: { consumed: 392_592, reserved: 24_000, in_flight: 1, limit: 2_000_000, responses: 8, turns: 1 },
+      runtime: { codex_version: "codex-cli 0.146.0", execution_mode: "native_v2" },
+    })
+  })
+
   test("rejects published finalization bound to skipped or unfinished progress semantics", () => {
     const root = workdir()
     const codex = join(root, "ctx", "codex")

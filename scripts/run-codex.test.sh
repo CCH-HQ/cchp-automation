@@ -137,6 +137,66 @@ SH
   }
 }
 
+run_terminal_checkpoint_case() {
+  local source="$1" test_root
+  test_root="$(mktemp -d)"
+  trap 'rm -rf -- "$test_root"' RETURN
+  mkdir -p "${test_root}/bin" "${test_root}/repo" "${test_root}/work"
+  : > "${test_root}/prompt.md"
+  cat > "${test_root}/bin/bun" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ "${1:-}" != *src/codex/runtime.ts ]]; then exit 0; fi
+mkdir -p "${BOT_WORKDIR:?}/ctx/codex"
+count_file="${BOT_WORKDIR}/runtime.count"
+count=0
+[[ ! -f "$count_file" ]] || count="$(<"$count_file")"
+printf '%s\n' "$((count + 1))" > "$count_file"
+if [[ "${FIXTURE_CHECKPOINT_SOURCE:?}" == "terminal" ]]; then
+  printf '%s\n' '{"state":"SUCCEEDED","exitCode":0,"usage":{"consumed":123,"limit":1000}}' \
+    > "${BOT_WORKDIR}/ctx/codex/terminal.json"
+else
+  jq -n --arg run_id "${BOT_RUN_ID:?}" '{
+    schemaVersion: 1,
+    runId: $run_id,
+    task: "manual",
+    state: "SUCCEEDED",
+    rootThreadId: "root",
+    rootTurnId: "turn",
+    execution_mode: "native_v2",
+    codexVersion: "codex-cli 0.146.0",
+    usage: {consumed: 123, limit: 1000}
+  }' > "${BOT_WORKDIR}/ctx/codex/run-manifest.json"
+fi
+exit 132
+SH
+  chmod +x "${test_root}/bin/bun"
+
+  PATH="${test_root}/bin:/usr/bin:/bin" \
+  HOME="${test_root}/home" \
+  BOT_WORKDIR="${test_root}/work" \
+  ENGINE_DIR="$ROOT" \
+  REPO_DIR="${test_root}/repo" \
+  BOT_PROMPT_FILE="${test_root}/prompt.md" \
+  BOT_REPO="CCH-HQ/fixture" \
+  BOT_TASK="manual" \
+  FIXTURE_CHECKPOINT_SOURCE="$source" \
+  GITHUB_ACTIONS=false \
+  GH_TOKEN="fixture-token" \
+  GITHUB_RUN_ID="456" \
+  GITHUB_RUN_ATTEMPT="1" \
+  bash "$ROOT/scripts/run-codex.sh" 2>"${test_root}/stderr"
+
+  [[ "$(<"${test_root}/work/runtime.count")" == "1" ]] || {
+    printf 'terminal checkpoint source %s unexpectedly restarted the runtime\n' "$source" >&2
+    return 1
+  }
+  grep -q 'preserving checkpoint outcome' "${test_root}/stderr" || {
+    printf 'terminal checkpoint source %s did not report recovery\n' "$source" >&2
+    return 1
+  }
+}
+
 run_production_key_gate_case() {
   local test_root
   test_root="$(mktemp -d)"
@@ -163,5 +223,7 @@ run_production_key_gate_case() {
 run_scope_case true true
 run_scope_case false false
 run_restart_case
+run_terminal_checkpoint_case terminal
+run_terminal_checkpoint_case manifest
 run_production_key_gate_case
 printf 'run-codex token scope tests passed\n'

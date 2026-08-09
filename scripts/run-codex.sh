@@ -72,13 +72,60 @@ export BOT_HAVE_SEE="$([[ -n "$SEE_CLI_SHA256" && -x "$SEE_CLI_BIN" && -n "$see_
 export BOT_SYSTEM_PROMPT="${BOT_SYSTEM_PROMPT:-${ENGINE_DIR}/codex/system-prompt.md}"
 
 is_resumable_manifest() {
-  [[ -f "$run_manifest" && ! -e "$terminal_manifest" ]] || return 1
+  [[ -f "$run_manifest" && ! -L "$run_manifest" && ! -e "$terminal_manifest" ]] || return 1
   jq -e --arg run_id "$BOT_RUN_ID" '
     .schemaVersion == 1 and
     .runId == $run_id and
     (.state == "ROOT_RUNNING" or .state == "ROOT_DRAINING" or .state == "FINALIZING") and
     (.rootThreadId | type == "string" and length > 0)
   ' "$run_manifest" >/dev/null
+}
+
+terminal_checkpoint_state() {
+  if [[ -e "$terminal_manifest" ]]; then
+    [[ -f "$terminal_manifest" && ! -L "$terminal_manifest" ]] || return 1
+    jq -er '
+      select(
+        (.state == "SUCCEEDED" or .state == "FAILED" or .state == "TIMED_OUT" or
+         .state == "CANCELLED" or .state == "LOST" or .state == "TOKEN_BUDGET_EXCEEDED" or
+         .state == "NO_PROGRESS_TIMEOUT") and
+        (.usage | type == "object") and
+        (.usage.consumed | type == "number" and . >= 0) and
+        (.usage.limit | type == "number" and . >= 0)
+      ) | .state
+    ' "$terminal_manifest"
+    return
+  fi
+  [[ -f "$run_manifest" && ! -L "$run_manifest" ]] || return 1
+  jq -er --arg run_id "$BOT_RUN_ID" --arg task "${BOT_TASK:-}" '
+    select(
+      .schemaVersion == 1 and .runId == $run_id and .task == $task and
+      (.state == "SUCCEEDED" or .state == "FAILED" or .state == "TIMED_OUT" or
+       .state == "CANCELLED" or .state == "LOST" or .state == "TOKEN_BUDGET_EXCEEDED" or
+       .state == "NO_PROGRESS_TIMEOUT") and
+      (.rootThreadId | type == "string" and length > 0) and
+      (.execution_mode == "native_v2" or .execution_mode == "explicit_child") and
+      (.codexVersion | type == "string" and length > 0) and
+      (.usage | type == "object") and
+      (.usage.consumed | type == "number" and . >= 0) and
+      (.usage.limit | type == "number" and . >= 0)
+    ) | .state
+  ' "$run_manifest"
+}
+
+terminal_exit_code() {
+  case "$1" in
+    SUCCEEDED) printf '0\n' ;;
+    TIMED_OUT|NO_PROGRESS_TIMEOUT) printf '124\n' ;;
+    CANCELLED) printf '130\n' ;;
+    TOKEN_BUDGET_EXCEEDED) printf '125\n' ;;
+    *) printf '1\n' ;;
+  esac
+}
+
+manifest_state() {
+  [[ -f "$run_manifest" && ! -L "$run_manifest" ]] || { printf 'absent\n'; return; }
+  jq -r '.state // "invalid"' "$run_manifest" 2>/dev/null || printf 'invalid\n'
 }
 
 stop_stale_codex() {
@@ -122,7 +169,25 @@ while :; do
     warn "Codex supervisor exceeded its deadline and was killed"
     exit "$rc"
   fi
-  if (( attempt >= max_restarts )) || ! is_resumable_manifest; then exit "$rc"; fi
+  checkpoint_state="$(terminal_checkpoint_state 2>/dev/null || true)"
+  if [[ -n "$checkpoint_state" ]]; then
+    checkpoint_rc="$(terminal_exit_code "$checkpoint_state")"
+    warn "Codex runtime exited ${rc} after durable terminal checkpoint state=${checkpoint_state}; preserving checkpoint outcome"
+    exit "$checkpoint_rc"
+  fi
+  if (( attempt >= max_restarts )); then
+    warn "Codex runtime exited ${rc}; restart budget exhausted"
+    exit "$rc"
+  fi
+  resumable=false
+  for _ in 1 2 3; do
+    if is_resumable_manifest; then resumable=true; break; fi
+    sleep 0.2
+  done
+  if [[ "$resumable" != "true" ]]; then
+    warn "Codex runtime exited ${rc}; durable state is not safely resumable (manifest_state=$(manifest_state))"
+    exit "$rc"
+  fi
   attempt=$((attempt + 1))
   warn "Codex runtime exited ${rc} with a resumable manifest; restarting once"
   stop_stale_codex
