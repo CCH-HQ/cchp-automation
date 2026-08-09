@@ -90,6 +90,26 @@ function positiveInteger(value: unknown): number | undefined {
   return typeof value === "number" && Number.isSafeInteger(value) && value > 0 ? value : undefined
 }
 
+async function readRequestJson(request: Request, signal?: AbortSignal): Promise<unknown> {
+  const json = request.json()
+  void json.catch(() => undefined)
+  if (!signal) return json
+  let onAbort!: () => void
+  const aborted = new Promise<never>((_, reject) => {
+    onAbort = () => reject(signal.reason ?? new Error("provider request aborted"))
+    if (signal.aborted) onAbort()
+    else signal.addEventListener("abort", onAbort, { once: true })
+  })
+  try {
+    return await Promise.race([json, aborted])
+  } finally {
+    signal.removeEventListener("abort", onAbort)
+    if (signal.aborted) {
+      try { await request.body?.cancel(signal.reason) } catch {}
+    }
+  }
+}
+
 /** Reserve against the request sent upstream, not the model's full capacity. */
 export function estimateProviderRequestTokens(body: JsonRecord, contextWindow?: number): number {
   const output = positiveInteger(body.max_output_tokens) ?? positiveInteger(body.max_tokens) ?? 0
@@ -577,7 +597,6 @@ function providerSecrets(provider: ParsedProvider): Buffer[] {
     return [value, escaped, encodeURIComponent(value), Buffer.from(value).toString("base64"), unicodeEscaped]
   })
   return [...new Set(encoded)]
-    .filter((value) => value.length >= 4)
     .map((value) => Buffer.from(value))
     .sort((left, right) => right.length - left.length)
 }
@@ -1567,9 +1586,18 @@ export function observeResponseUsage(
     return response
   }
   const copy = response.clone()
+  let cancelled = false
+  let finished = false
+  let releaseCancellation!: () => void
+  const cancellation = new Promise<void>((resolve) => { releaseCancellation = resolve })
   const task = (async () => {
+    const json = copy.json()
+    void json.catch(() => undefined)
     try {
-      const usage = observedUsage(await copy.json(), provider, model, attribution, reservation)
+      const payload = await Promise.race([json, cancellation.then(() => undefined)])
+      if (cancelled) return
+      finished = true
+      const usage = observedUsage(payload, provider, model, attribution, reservation)
       if (usage) {
         await onUsage(usage)
         if (reservation && onRequestFinished) await onRequestFinished(reservation, "usage", "usage_observed")
@@ -1577,10 +1605,20 @@ export function observeResponseUsage(
         await release("response_completed_without_usage")
       }
     } catch (error) {
+      if (cancelled) return
       await release("response_usage_observer_error")
       throw error
     }
   })()
+  const unregister = registerActiveStream?.(attribution?.threadId, async (reason) => {
+    if (cancelled || finished) return
+    cancelled = true
+    cancelUpstream?.(reason)
+    releaseCancellation()
+    try { await copy.body?.cancel(reason) } catch {}
+    await release(reason)
+  })
+  if (unregister) void task.finally(unregister).catch(() => undefined)
   if (track) track(task)
   else void task.catch(() => undefined)
   return response
@@ -1596,6 +1634,7 @@ async function handleProviderRequest(
   onRequestFinished?: ProviderBridgeOptions["onRequestFinished"],
   trackUsage?: (task: Promise<void>) => void,
   registerActiveStream?: (threadId: string | undefined, cancel: (reason: string) => Promise<void>) => () => void,
+  upstreamAbort?: AbortController,
 ): Promise<Response> {
   let body: Record<string, unknown>
   let callerModelKey = ""
@@ -1604,7 +1643,7 @@ async function handleProviderRequest(
   let attribution: { threadId?: string; turnId?: string } | undefined
   let reservation: UsageReservationRef | undefined
   try {
-    const raw = await request.json()
+    const raw = await readRequestJson(request, upstreamAbort?.signal)
     if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error("body must be an object")
     callerModelKey = text((raw as Record<string, unknown>).model, "model")
     const metadata = (raw as Record<string, unknown>).client_metadata
@@ -1665,13 +1704,13 @@ async function handleProviderRequest(
 
   const target = `${effectiveProvider.baseUrl}/${upstreamPath(effectiveProvider)}`
   let upstream: Response
-  const upstreamAbort = new AbortController()
+  const requestAbort = upstreamAbort ?? new AbortController()
   try {
     upstream = await fetch(target, {
       method: "POST",
       headers: upstreamHeaders(effectiveProvider, request),
       body: JSON.stringify(body),
-      signal: AbortSignal.any([request.signal, upstreamAbort.signal]),
+      signal: AbortSignal.any([request.signal, requestAbort.signal]),
       redirect: "error",
     })
   } catch (error) {
@@ -1692,7 +1731,7 @@ async function handleProviderRequest(
       onRequestFinished,
       trackUsage,
       registerActiveStream,
-      (reason) => upstreamAbort.abort(reason),
+      (reason) => requestAbort.abort(reason),
     )
   } catch (error) {
     if (reservation && onRequestFinished) await onRequestFinished(reservation, "released", "response_translation_error")
@@ -1713,6 +1752,7 @@ export function startProviderBridge(
   const usageTasks = new Set<Promise<void>>()
   const requestTasks = new Set<Promise<Response>>()
   const usageErrors: unknown[] = []
+  const activeRequests = new Set<{ cancel: (reason: string) => void }>()
   const activeStreams = new Set<{ threadId?: string; cancel: (reason: string) => Promise<void> }>()
   let sealed = false
   const trackUsage = (task: Promise<void>) => {
@@ -1728,6 +1768,11 @@ export function startProviderBridge(
     activeStreams.add(active)
     return () => { activeStreams.delete(active) }
   }
+  const registerActiveRequest = (cancel: (reason: string) => void) => {
+    const active = { cancel }
+    activeRequests.add(active)
+    return () => { activeRequests.delete(active) }
+  }
   const cancelThread = async (threadId: string, reason = "thread_terminal") => {
     if (!threadId) throw new Error("provider stream cancellation requires a thread id")
     const matches = [...activeStreams].filter((active) => active.threadId === threadId)
@@ -1737,6 +1782,9 @@ export function startProviderBridge(
   }
   const sealAndDrain = async () => {
     sealed = true
+    const requests = [...activeRequests]
+    for (const request of requests) activeRequests.delete(request)
+    for (const request of requests) request.cancel("bridge_sealed")
     while (requestTasks.size) await Promise.allSettled([...requestTasks])
     while (activeStreams.size) {
       const active = [...activeStreams]
@@ -1772,6 +1820,8 @@ export function startProviderBridge(
           { status: 409 },
         )
       }
+      const upstreamAbort = new AbortController()
+      const unregisterActiveRequest = registerActiveRequest((reason) => upstreamAbort.abort(reason))
       const task = handleProviderRequest(
         request,
         provider,
@@ -1782,11 +1832,13 @@ export function startProviderBridge(
         options.onRequestFinished,
         trackUsage,
         registerActiveStream,
+        upstreamAbort,
       )
       requestTasks.add(task)
       try {
         return await task
       } finally {
+        unregisterActiveRequest()
         requestTasks.delete(task)
       }
     },

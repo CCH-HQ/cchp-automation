@@ -86,6 +86,11 @@ export interface SupervisorResult {
   rootThreadId?: string
   rootTurnId?: string
   terminalReason?: string
+  finalMessage?: string
+  runtime?: {
+    codexVersion: string
+    executionMode: "native_v2" | "explicit_child"
+  }
   usage: UsageResult
 }
 
@@ -380,6 +385,7 @@ export class Supervisor {
   private readonly wholeRunDeadlineAt: number
   private lastSemanticProgressAt: string
   private terminalReason?: string
+  private rootFinalMessage?: string
   private lastEventAt = Date.now()
   private runTimer?: ReturnType<typeof setTimeout>
   private noProgressTimer?: ReturnType<typeof setInterval>
@@ -1479,6 +1485,16 @@ export class Supervisor {
       this.writeRunManifest()
     }
     else this.deadline.transportEvent(event.source)
+    if (
+      event.kind === "item" && event.threadId === this.rootThreadId &&
+      event.item?.type === "agentMessage"
+    ) {
+      const message = text(event.item.text)
+      if (message) {
+        this.rootFinalMessage = (this.options.redactDiagnostic?.(message) ?? message).slice(0, 16_000)
+        this.writeRunManifest()
+      }
+    }
     if (event.kind === "usage") {
       const usage = extractUsage(event.params)
       if (usage) {
@@ -1725,6 +1741,15 @@ export class Supervisor {
           const terminal = terminalFromThreadRead(snapshot, threadId === this.rootThreadId ? this.rootTurnId : undefined)
           this.append({ event: "thread_reconciled", threadId, terminal: terminal ?? null })
           if (threadId === this.rootThreadId) rootTerminal = terminal
+          if (threadId === this.rootThreadId) {
+            const completed = completedTurnFromThreadRead(snapshot)
+            const items = Array.isArray(completed?.items) ? completed.items as unknown[] : []
+            const message = items.map(record).reverse().find((item) =>
+              item.type === "agentMessage" && Boolean(text(item.text)),
+            )
+            const output = text(message?.text)
+            if (output) this.rootFinalMessage = (this.options.redactDiagnostic?.(output) ?? output).slice(0, 16_000)
+          }
           else if (terminal && this.graph.edge(threadId)?.state === "open") {
             if (this.options.task === "pr_opened" && this.reviewAdmissions.taskForChild(threadId)) {
               try {
@@ -2206,7 +2231,19 @@ export class Supervisor {
   }
 
   private result(state: SupervisorState, exitCode: number): SupervisorResult {
-    return { state, exitCode, rootThreadId: this.rootThreadId, rootTurnId: this.rootTurnId, terminalReason: this.terminalReason, usage: this.usage.budget }
+    return {
+      state,
+      exitCode,
+      rootThreadId: this.rootThreadId,
+      rootTurnId: this.rootTurnId,
+      terminalReason: this.terminalReason,
+      ...(this.rootFinalMessage ? { finalMessage: this.rootFinalMessage } : {}),
+      runtime: {
+        codexVersion: this.options.codexVersion ?? "unknown",
+        executionMode: this.options.executionMode ?? "explicit_child",
+      },
+      usage: this.usage.budget,
+    }
   }
 
   private settle(result: SupervisorResult): void {
@@ -2344,6 +2381,7 @@ export class Supervisor {
       lastRestartAt: this.lastRestartAt,
       lastResumeError: this.lastResumeError,
       terminalReason: this.terminalReason,
+      rootFinalMessage: this.rootFinalMessage,
       usage: this.usage.budget,
       provenance: { entries: this.provenance.length, headSha256: this.provenance.head },
       finalizerAttestation: this.finalizerAttestation,

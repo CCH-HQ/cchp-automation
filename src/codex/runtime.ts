@@ -327,7 +327,10 @@ export function createTerminalProgressPublisher(
   octokit: GitHubClient,
   redact: (value: string) => string = (value) => value,
   fence?: ProgressPublicationFence,
-): ((result: Pick<SupervisorResult, "state" | "terminalReason" | "usage">) => Promise<boolean>) | undefined {
+  metadata?: Pick<SupervisorResult, "runtime"> & {
+    cleanupOutcome?: string
+  },
+): ((result: Pick<SupervisorResult, "state" | "terminalReason" | "usage" | "finalMessage" | "runtime">) => Promise<boolean>) | undefined {
   const target = resolveProgressTarget(env)
   if (!target) return undefined
   const task = env.BOT_TASK ?? "task"
@@ -347,6 +350,12 @@ export function createTerminalProgressPublisher(
       terminalReason: result.terminalReason ? redact(result.terminalReason) : undefined,
       consumedTokens: result.usage.consumed,
       tokenLimit: result.usage.limit,
+      reservedTokens: result.usage.reservedTokens,
+      responsesInFlight: result.usage.responsesInFlight,
+      codexVersion: metadata?.runtime?.codexVersion ?? result.runtime?.codexVersion,
+      executionMode: metadata?.runtime?.executionMode ?? result.runtime?.executionMode,
+      cleanupOutcome: metadata?.cleanupOutcome,
+      finalMessage: typeof result.finalMessage === "string" ? redact(result.finalMessage) : undefined,
     })
     const publishBody = async (): Promise<StickyResult | undefined> => upsertSticky(
       octokit,
@@ -576,6 +585,7 @@ export async function main(): Promise<number> {
       githubClient,
       (value) => redactRuntimeDiagnostic(value, [...diagnosticSecrets]),
       progressPublicationFence,
+      { runtime: { codexVersion: decision.codexVersion, executionMode: decision.executionMode } },
     )
     delete process.env.GH_TOKEN
     delete process.env.CCHP_GH_TOKEN_FILE

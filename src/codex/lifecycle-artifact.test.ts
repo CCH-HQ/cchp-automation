@@ -34,6 +34,8 @@ describe("actions lifecycle artifact", () => {
       rootThreadId: "root-thread-sensitive",
       rootTurnId: "root-turn-sensitive",
       terminalReason: `Authorization: Bearer ${secret}`,
+      finalMessage: "Inspection complete.",
+      runtime: { codexVersion: "0.146.0", executionMode: "native_v2" },
       usage: {
         acceptedRaw: true,
         consumed: 1234,
@@ -44,6 +46,8 @@ describe("actions lifecycle artifact", () => {
         responses: 7,
         turns: 3,
         admissionDenials: 1,
+        reservedTokens: 0,
+        responsesInFlight: 0,
       },
     })}\n`)
     writeFileSync(join(codex, "todo.json"), `${JSON.stringify({
@@ -123,7 +127,8 @@ describe("actions lifecycle artifact", () => {
         by_transport: { native_v2: 1, explicit_child: 1 },
         by_terminal_state: { completed: 1, failed: 1, timed_out: 0, interrupted: 0, lost: 0 },
       },
-      usage: { consumed: 1234, limit: 5000, responses: 7, turns: 3, blocking_anomalies: 0, admission_denials: 1 },
+      usage: { consumed: 1234, reserved: 0, in_flight: 0, limit: 5000, responses: 7, turns: 3, blocking_anomalies: 0, admission_denials: 1 },
+      runtime: { codex_version: "0.146.0", execution_mode: "native_v2" },
       workflow: { finalization_record: "published" },
     })
     const serialized = JSON.stringify(report)

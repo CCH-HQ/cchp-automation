@@ -27,6 +27,8 @@ export interface SafeTerminalRecord {
   state: SupervisorState
   exitCode: number
   terminalReason?: string
+  finalMessage?: string
+  runtime?: { codexVersion: string; executionMode: "native_v2" | "explicit_child" }
   rootThreadPresent: boolean
   rootTurnPresent: boolean
   usage: {
@@ -39,6 +41,8 @@ export interface SafeTerminalRecord {
     responses: number
     turns: number
     admissionDenials: number
+    reservedTokens?: number
+    responsesInFlight?: number
   }
 }
 
@@ -92,6 +96,8 @@ export interface WorkflowRuntimeSnapshot {
     engineRunId: string
     task: string
     progressMarker: string
+    codexVersion?: string
+    executionMode?: "native_v2" | "explicit_child"
   }
   terminal: {
     ledger: "absent" | "invalid" | "valid"
@@ -139,6 +145,24 @@ function engineRunId(workdir: string, task: string, env: Env): string {
   return value.runId
 }
 
+function runtimeIdentity(workdir: string): Pick<WorkflowRuntimeSnapshot["identity"], "codexVersion" | "executionMode"> {
+  const path = join(workdir, "ctx", "codex", "run-manifest.json")
+  if (!existsSync(path)) return {}
+  try {
+    const value = JSON.parse(openRegularFileSnapshot(path).bytes.toString("utf8")) as Record<string, unknown>
+    const codexVersion = typeof value.codexVersion === "string" && value.codexVersion ? value.codexVersion : undefined
+    const executionMode = value.execution_mode === "native_v2" || value.execution_mode === "explicit_child"
+      ? value.execution_mode
+      : undefined
+    return {
+      ...(codexVersion ? { codexVersion } : {}),
+      ...(executionMode ? { executionMode } : {}),
+    }
+  } catch {
+    return {}
+  }
+}
+
 function safeTerminal(value: unknown, env: Env): SafeTerminalRecord | undefined {
   if (!value || typeof value !== "object" || Array.isArray(value)) return undefined
   const record = value as Record<string, unknown>
@@ -156,10 +180,23 @@ function safeTerminal(value: unknown, env: Env): SafeTerminalRecord | undefined 
   const terminalReason = rawReason
     ? redactRuntimeDiagnostic(rawReason, diagnosticSecrets(env)).slice(0, 4_096)
     : undefined
+  const rawMessage = typeof record.finalMessage === "string" ? record.finalMessage : undefined
+  const finalMessage = rawMessage
+    ? redactRuntimeDiagnostic(rawMessage, diagnosticSecrets(env)).slice(0, 16_000)
+    : undefined
+  const runtime = record.runtime && typeof record.runtime === "object" && !Array.isArray(record.runtime)
+    ? record.runtime as Record<string, unknown>
+    : undefined
+  const codexVersion = typeof runtime?.codexVersion === "string" && runtime.codexVersion ? runtime.codexVersion : undefined
+  const executionMode = runtime?.executionMode === "native_v2" || runtime?.executionMode === "explicit_child"
+    ? runtime.executionMode
+    : undefined
   return {
     state: record.state as SupervisorState,
     exitCode: Number.isSafeInteger(record.exitCode) ? Number(record.exitCode) : 0,
     ...(terminalReason ? { terminalReason } : {}),
+    ...(finalMessage ? { finalMessage } : {}),
+    ...(codexVersion && executionMode ? { runtime: { codexVersion, executionMode } } : {}),
     rootThreadPresent: record.rootThreadPresent === true || (typeof record.rootThreadId === "string" && Boolean(record.rootThreadId)),
     rootTurnPresent: record.rootTurnPresent === true || (typeof record.rootTurnId === "string" && Boolean(record.rootTurnId)),
     usage: {
@@ -172,6 +209,12 @@ function safeTerminal(value: unknown, env: Env): SafeTerminalRecord | undefined 
       responses: safeInteger(usage.responses),
       turns: safeInteger(usage.turns),
       admissionDenials: safeInteger(usage.admissionDenials),
+      ...(Number.isSafeInteger(usage.reservedTokens) && Number(usage.reservedTokens) >= 0
+        ? { reservedTokens: Number(usage.reservedTokens) }
+        : {}),
+      ...(Number.isSafeInteger(usage.responsesInFlight) && Number(usage.responsesInFlight) >= 0
+        ? { responsesInFlight: Number(usage.responsesInFlight) }
+        : {}),
     },
   }
 }
@@ -365,6 +408,14 @@ export function parseWorkflowRuntimeSnapshot(value: unknown, env: Env = {}): Wor
   for (const key of ["githubRunId", "githubRunAttempt", "engineRunId", "task", "progressMarker"] as const) {
     if (typeof snapshot.identity[key] !== "string" || !snapshot.identity[key]) throw new Error(`runtime snapshot identity ${key} is invalid`)
   }
+  if (snapshot.identity.codexVersion !== undefined &&
+      (typeof snapshot.identity.codexVersion !== "string" || !snapshot.identity.codexVersion)) {
+    throw new Error("runtime snapshot Codex version is invalid")
+  }
+  if (snapshot.identity.executionMode !== undefined &&
+      snapshot.identity.executionMode !== "native_v2" && snapshot.identity.executionMode !== "explicit_child") {
+    throw new Error("runtime snapshot execution mode is invalid")
+  }
   const expected = {
     githubRunId: env.GITHUB_RUN_ID,
     githubRunAttempt: env.GITHUB_RUN_ATTEMPT,
@@ -489,6 +540,7 @@ export function writeWorkflowRuntimeSnapshot(env: Env = process.env): { path: st
       engineRunId: engineRunId(workdir, task, env),
       task,
       progressMarker: marker,
+      ...runtimeIdentity(workdir),
     },
     terminal: captureTerminal(workdir, env),
     progress: captureProgress(workdir, marker),

@@ -161,6 +161,8 @@ function usageProjection(terminal: Record<string, unknown> | undefined, fallback
     : fallback.state
   return {
     consumed: metric("consumed", fallback.consumed),
+    reserved: metric("reservedTokens", fallback.reservedTokens ?? 0),
+    in_flight: metric("responsesInFlight", fallback.responsesInFlight ?? 0),
     limit: metric("limit", fallback.limit),
     state,
     responses: metric("responses", fallback.responses),
@@ -277,6 +279,11 @@ export function writeLifecycleArtifact(env: Env = process.env): string {
     },
     children: runtimeSnapshot?.children ?? childProjection(workdir!),
     usage: usageProjection(terminalRecord, result.usage),
+    runtime: {
+      codex_version: runtimeSnapshot?.identity.codexVersion ?? (terminalRecord?.runtime as { codexVersion?: string } | undefined)?.codexVersion ?? null,
+      execution_mode: runtimeSnapshot?.identity.executionMode ?? (terminalRecord?.runtime as { executionMode?: string } | undefined)?.executionMode ?? null,
+      cleanup: outcomes.lifecycle?.environment_cleanup ?? null,
+    },
     workflow: { ...workflowProjection(outcomes, env), finalization_record: finalizationPublication },
     runtime_snapshot: runtimeSnapshotPath
       ? { source: "trusted_staging", sha256: runtimeSnapshotSha256 }

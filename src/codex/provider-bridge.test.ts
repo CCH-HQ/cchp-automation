@@ -368,6 +368,58 @@ test("non-JSON usage observation releases without reading the response body", as
   await response.body!.cancel()
 })
 
+test("cancelling a JSON usage observer settles the cloned reader and releases once", async () => {
+  const finished: Array<{ outcome: string; reason?: string }> = []
+  const tasks: Promise<void>[] = []
+  let cancelObserver!: (reason: string) => Promise<void>
+  const providers = parseProviders({
+    providerJson: JSON.stringify({
+      relay: {
+        format: "openai-responses",
+        base_url: "https://provider.invalid/v1",
+        models: { primary: { upstream_id: "gpt-5.6-sol", context: 1000 } },
+      },
+    }),
+    model: "relay/primary",
+  })
+  const reservation: UsageReservationRef = {
+    reservationId: "reservation-json-cancel",
+    writerId: "writer",
+    writerGeneration: 1,
+    requestId: "request-json-cancel",
+  }
+  let response!: Response
+  response = new Response(new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(new TextEncoder().encode('{"type":"response.completed","response":{"id":"resp_json_cancel"'))
+    },
+  }), { headers: { "content-type": "application/json" } })
+  observeResponseUsage(
+    response,
+    providers.providers[0]!,
+    "primary",
+    undefined,
+    reservation,
+    async () => undefined,
+    (_reservation, outcome, reason) => {
+      finished.push({ outcome, ...(reason ? { reason } : {}) })
+    },
+    (task) => { tasks.push(task) },
+    (_threadId, cancel) => {
+      cancelObserver = cancel
+      return () => undefined
+    },
+    () => { void response.body?.cancel("bridge_sealed") },
+  )
+  await Promise.race([
+    cancelObserver("bridge_sealed"),
+    Bun.sleep(500).then(() => { throw new Error("JSON usage observer cancellation did not settle") }),
+  ])
+  await Promise.all(tasks)
+  await response.body?.cancel("test cleanup")
+  expect(finished).toEqual([{ outcome: "released", reason: "bridge_sealed" }])
+})
+
 test("each provider transformation stream propagates downstream backpressure to its upstream", async () => {
   for (const format of ["openai-responses", "openai-compatible", "anthropic"] as const) {
     let upstreamPulls = 0
@@ -1455,9 +1507,9 @@ test("seals new provider admission before draining already admitted requests", a
     expect(rejected.status).toBe(409)
     expect(await rejected.json()).toMatchObject({ error: { type: "provider_admission_closed" } })
     expect(upstreamRequests).toBe(1)
-    expect(drained).toBe(false)
+    expect(drained).toBe(true)
     release()
-    expect((await admitted).status).toBe(200)
+    expect((await admitted).status).toBe(502)
     await sealing
     expect(drained).toBe(true)
   } finally {

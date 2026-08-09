@@ -80,6 +80,22 @@ export interface TerminalProgress {
   terminalReason?: string
   consumedTokens?: number
   tokenLimit?: number
+  reservedTokens?: number
+  responsesInFlight?: number
+  codexVersion?: string
+  executionMode?: "native_v2" | "explicit_child"
+  cleanupOutcome?: string
+  finalMessage?: string
+}
+
+function sanitizeTerminalMessage(value: unknown): string {
+  let text = String(value ?? "")
+  let previous: string
+  do {
+    previous = text
+    text = text.replace(/<!--[\s\S]*?-->/g, "")
+  } while (text !== previous)
+  return text.trim().slice(0, 16_000)
 }
 
 export function renderTerminalProgress(task: string, terminal: TerminalProgress): string {
@@ -87,13 +103,23 @@ export function renderTerminalProgress(task: string, terminal: TerminalProgress)
   const usage = terminal.consumedTokens == null
     ? undefined
     : `${terminal.consumedTokens.toLocaleString("en-US")}${terminal.tokenLimit == null ? "" : ` / ${terminal.tokenLimit.toLocaleString("en-US")}`} tokens`
+  const finalMessage = sanitizeTerminalMessage(terminal.finalMessage)
+  const mode = terminal.executionMode === "native_v2"
+    ? "native-v2"
+    : terminal.executionMode === "explicit_child" ? "explicit-exec" : undefined
   return [
     `### ${LOGO_HEADING} Run complete — \`${sanitizeTaskName(task)}\``,
     "",
     `**State:** \`${sanitizeTodo(terminal.state) || "UNKNOWN"}\``,
     `**Run:** \`${sanitizeTodo(terminal.runId) || "unknown"}\``,
     ...(usage ? [`**Usage:** ${usage}`] : []),
+    ...(terminal.reservedTokens == null ? [] : [`**Reserved:** ${terminal.reservedTokens.toLocaleString("en-US")} tokens`]),
+    ...(terminal.responsesInFlight == null ? [] : [`**In flight:** ${terminal.responsesInFlight.toLocaleString("en-US")} responses`]),
+    ...(terminal.codexVersion ? [`**Codex:** \`${sanitizeTodo(terminal.codexVersion)}\``] : []),
+    ...(mode ? [`**Mode:** \`${mode}\``] : []),
+    ...(terminal.cleanupOutcome ? [`**Cleanup:** \`${sanitizeTodo(terminal.cleanupOutcome)}\``] : []),
     ...(reason ? ["", `**Result:** ${reason}`] : []),
+    ...(finalMessage ? ["", "**Response:**", "", finalMessage] : []),
     "",
     "---",
     `<sub>${BRAND_FOOTER_PREFIX} · Final status from the CCHP supervisor.</sub>`,

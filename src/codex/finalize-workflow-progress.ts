@@ -50,7 +50,7 @@ export interface WorkflowStepOutcomes {
   cancelled: boolean
 }
 
-export interface ResolvedWorkflowTerminal extends Pick<SupervisorResult, "state" | "terminalReason" | "usage"> {
+export interface ResolvedWorkflowTerminal extends Pick<SupervisorResult, "state" | "terminalReason" | "usage" | "finalMessage" | "runtime"> {
   reasonCode: WorkflowReasonCode
 }
 
@@ -109,7 +109,7 @@ function finiteNonNegative(value: unknown): number | undefined {
 export function parseSupervisorTerminal(
   value: unknown,
   redact: (value: string) => string = (value) => redactRuntimeDiagnostic(value, []),
-): Pick<SupervisorResult, "state" | "terminalReason" | "usage"> | undefined {
+): Pick<SupervisorResult, "state" | "terminalReason" | "usage" | "finalMessage" | "runtime"> | undefined {
   try {
     if (!value || typeof value !== "object" || Array.isArray(value)) return undefined
     const parsed = value as Record<string, unknown>
@@ -121,14 +121,32 @@ export function parseSupervisorTerminal(
     const consumed = finiteNonNegative(rawUsage.consumed)
     const limit = finiteNonNegative(rawUsage.limit)
     if (consumed == null || limit == null) return undefined
+    const reservedTokens = finiteNonNegative(rawUsage.reservedTokens)
+    const responsesInFlight = finiteNonNegative(rawUsage.responsesInFlight)
+    const runtime = parsed.runtime && typeof parsed.runtime === "object" && !Array.isArray(parsed.runtime)
+      ? parsed.runtime as Record<string, unknown>
+      : undefined
+    const executionMode = runtime?.executionMode === "native_v2" || runtime?.executionMode === "explicit_child"
+      ? runtime.executionMode
+      : undefined
+    const codexVersion = typeof runtime?.codexVersion === "string" && runtime.codexVersion
+      ? runtime.codexVersion
+      : undefined
+    const finalMessage = typeof parsed.finalMessage === "string" && parsed.finalMessage
+      ? redact(parsed.finalMessage).slice(0, 16_000)
+      : undefined
     return {
       state,
       ...(typeof parsed.terminalReason === "string" ? { terminalReason: redact(parsed.terminalReason) } : {}),
+      ...(finalMessage ? { finalMessage } : {}),
+      ...(codexVersion && executionMode ? { runtime: { codexVersion, executionMode } } : {}),
       usage: {
         ...ZERO_USAGE,
         consumed,
         limit,
         fraction: limit > 0 ? consumed / limit : 0,
+        ...(reservedTokens == null ? {} : { reservedTokens }),
+        ...(responsesInFlight == null ? {} : { responsesInFlight }),
       },
     }
   } catch {
@@ -458,7 +476,16 @@ export async function finalizeWorkflowProgress(
         throw new Error("successful finalized review is missing prepared or published review evidence")
       }
     } else {
-      const publish = createTerminalProgressPublisher(publicationEnv, github, redact)
+        const publish = createTerminalProgressPublisher(
+          publicationEnv,
+          github,
+          redact,
+          undefined,
+          {
+            runtime: result.runtime,
+            cleanupOutcome: env.CCHP_ENVIRONMENT_CLEANUP_OUTCOME,
+          },
+        )
       if (!publish) {
         process.stderr.write("[workflow-finalizer] no trusted progress target; nothing to finalize\n")
       } else {

@@ -132,10 +132,16 @@ test("persists a successful app-server root lifecycle and runs finalizer once", 
         return { thread: { id: "root" } }
       }
       if (method === "turn/start") {
-        queueMicrotask(() => void supervisor.handleNotification({
-          method: "turn/completed",
-          params: { threadId: "root", turn: { id: "turn", status: "completed" } },
-        }))
+        queueMicrotask(async () => {
+          await supervisor.handleNotification({
+            method: "item/completed",
+            params: { threadId: "root", item: { id: "message", type: "agentMessage", text: "Inspection complete." } },
+          })
+          await supervisor.handleNotification({
+            method: "turn/completed",
+            params: { threadId: "root", turn: { id: "turn", status: "completed" } },
+          })
+        })
         return { turn: { id: "turn" } }
       }
       return {}
@@ -161,7 +167,15 @@ test("persists a successful app-server root lifecycle and runs finalizer once", 
     deadlines: { wholeRunMs: 10_000, heartbeatMs: 10, noProgressWarningMs: 2_000, noProgressTerminalMs: 8_000 },
   })
   const result = await supervisor.run()
-  expect(result).toMatchObject({ state: "SUCCEEDED", exitCode: 0, rootThreadId: "root", rootTurnId: "turn" })
+  expect(result).toMatchObject({
+    state: "SUCCEEDED",
+    exitCode: 0,
+    rootThreadId: "root",
+    rootTurnId: "turn",
+    finalMessage: "Inspection complete.",
+    runtime: { codexVersion: "unknown", executionMode: "native_v2" },
+    usage: { reservedTokens: 0, responsesInFlight: 0 },
+  })
   expect(threadStartParams).toMatchObject({ experimentalRawEvents: true })
   expect(finalized).toBe(1)
   expect(supervisor.currentState).toBe("SUCCEEDED")
@@ -539,7 +553,6 @@ test("preserves a whole-run timeout that begins while the external finalizer is 
   let enteredFinalizer!: () => void
   const finalizerGate = new Promise<void>((resolve) => { releaseFinalizer = resolve })
   const finalizerEntered = new Promise<void>((resolve) => { enteredFinalizer = resolve })
-  const never = new Promise<never>(() => undefined)
   const fake = {
     start: async () => ({ userAgent: "fake" }),
     request: async (method: string) => {
@@ -551,7 +564,7 @@ test("preserves a whole-run timeout that begins while the external finalizer is 
         }))
         return { turn: { id: "turn" } }
       }
-      if (method === "turn/interrupt") return never
+      if (method === "turn/interrupt") return {}
       return {}
     },
     stop: async () => 0,
@@ -579,7 +592,7 @@ test("preserves a whole-run timeout that begins while the external finalizer is 
 
   const running = supervisor.run()
   await finalizerEntered
-  await eventually(() => supervisor.currentState === "TIMED_OUT", 500)
+  await eventually(() => supervisor.currentState === "TIMED_OUT")
   releaseFinalizer()
   expect(await running).toMatchObject({ state: "TIMED_OUT", exitCode: 124, terminalReason: "whole run deadline exceeded" })
   expect(supervisor.currentState).toBe("TIMED_OUT")
@@ -1068,6 +1081,7 @@ test("runs one durable same-thread continuation before failing a full review wit
   const workdir = mkdtempSync(join(tmpdir(), "cchp-supervisor-full-review-required-"))
   let supervisor!: Supervisor
   const turnStarts: Array<Record<string, unknown>> = []
+  let continuationCompleted = false
   const fake = {
     start: async () => ({ userAgent: "fake" }),
     request: async (method: string, params?: Record<string, unknown>) => {
@@ -1083,10 +1097,13 @@ test("runs one durable same-thread continuation before failing a full review wit
             method: "turn/completed",
             params: { threadId: "root", turn: { id: "initial-turn", status: "completed" } },
           }), 0)
-          setTimeout(() => void supervisor.handleNotification({
-            method: "turn/completed",
-            params: { threadId: "root", turn: { id: turnId, status: "completed" } },
-          }), 5)
+          setTimeout(() => {
+            continuationCompleted = true
+            void supervisor.handleNotification({
+              method: "turn/completed",
+              params: { threadId: "root", turn: { id: turnId, status: "completed" } },
+            })
+          }, 5)
         } else {
           queueMicrotask(() => void supervisor.handleNotification({
             method: "turn/completed",
@@ -1097,7 +1114,7 @@ test("runs one durable same-thread continuation before failing a full review wit
       }
       if (method === "thread/read") return { thread: { id: "root", turns: [
         { id: "initial-turn", status: "completed", items: [] },
-        ...(turnStarts.length > 1 ? [{
+        ...(continuationCompleted ? [{
           id: "continuation-turn",
           status: "completed",
           items: [{ type: "userMessage", clientId: turnStarts[1]?.clientUserMessageId }],
