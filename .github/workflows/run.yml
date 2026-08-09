@@ -60,11 +60,9 @@ jobs:
         with:
           egress-policy: audit
 
-      # Base token: read code + comment/review/edit-title/roadmap. NO contents:write
-      # → physically cannot push, merge, or create files. Used for routing + all
-      # read-only / review / outsider tasks, so an injected prompt on those runs
-      # cannot mutate the repo.
-      - name: Mint App token (base — no contents:write)
+      # Base token is strictly read-only and is used only for identity, routing,
+      # checkout, installation, and trusted pre-runtime reads.
+      - name: Mint App token (base — read-only)
         id: base
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3
         with:
@@ -72,11 +70,11 @@ jobs:
           private-key: ${{ secrets.app-private-key }}
           permission-contents: read
           permission-metadata: read
-          permission-issues: write
-          permission-pull-requests: write
-          permission-discussions: write
+          permission-issues: read
+          permission-pull-requests: read
+          permission-discussions: read
           permission-actions: read
-          permission-organization-projects: write
+          permission-organization-projects: read
 
       # The pinned engine code (this reusable workflow's own repo, at the exact
       # commit GitHub resolved for @latest or @<sha>). The github context belongs
@@ -210,6 +208,23 @@ jobs:
           BOT_DISPATCH_CAN_WRITE: ${{ github.event.inputs.can_write }}
         run: bun src/cli.ts
 
+      # Interaction token can publish comments, reviews, reactions, and roadmap
+      # updates, but cannot push repository contents or mutate workflows/checks.
+      - name: Mint App token (interaction — no contents:write)
+        id: interaction
+        if: steps.route.outputs.act == 'true'
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3
+        with:
+          client-id: ${{ secrets.app-client-id }}
+          private-key: ${{ secrets.app-private-key }}
+          permission-contents: read
+          permission-metadata: read
+          permission-issues: write
+          permission-pull-requests: write
+          permission-discussions: write
+          permission-actions: read
+          permission-organization-projects: write
+
       # Write token: base set + contents/workflows/actions/checks write, so push,
       # merge, workflow recovery, and check-run publication are possible.
       # Minted ONLY for tasks routing decided need it — narrower than the App grant.
@@ -230,6 +245,14 @@ jobs:
           permission-workflows: write
           permission-organization-projects: write
 
+      - name: Acknowledge routed event
+        if: steps.route.outputs.act == 'true'
+        working-directory: .cchp-engine
+        env:
+          GH_TOKEN: ${{ steps.write.outputs.token || steps.interaction.outputs.token }}
+          CCHP_ROUTE_ACK: "1"
+        run: bun src/cli.ts
+
       - name: Install Codex CLI
         id: install_codex
         if: steps.route.outputs.act == 'true'
@@ -243,7 +266,7 @@ jobs:
         id: prepare_codex
         if: steps.route.outputs.act == 'true'
         env:
-          BOT_TOKEN: ${{ steps.write.outputs.token || steps.base.outputs.token }}
+          BOT_TOKEN: ${{ steps.write.outputs.token || steps.interaction.outputs.token }}
           HEROUI_AUTH_TOKEN: ${{ secrets.heroui-token }}
         run: bash "$ENGINE_DIR/scripts/prepare-codex-env.sh"
 
@@ -268,11 +291,11 @@ jobs:
         id: codex_supervisor
         if: steps.route.outputs.act == 'true'
         env:
-          GH_TOKEN: ${{ steps.write.outputs.token || steps.base.outputs.token }}
+          GH_TOKEN: ${{ steps.write.outputs.token || steps.interaction.outputs.token }}
           # Installation tokens hard-expire at 1h. The trusted runtime keeps the
           # current token only in memory, refreshes it with the App credentials and
           # removes every raw credential before starting Codex/MCP children.
-          # CCHP_NEEDS_WRITE mirrors the write/base token choice above exactly.
+          # CCHP_NEEDS_WRITE mirrors the write/interaction token choice above.
           CCHP_APP_CLIENT_ID: ${{ secrets.app-client-id }}
           CCHP_APP_PRIVATE_KEY: ${{ secrets.app-private-key }}
           CCHP_NEEDS_WRITE: ${{ steps.route.outputs.needs_write }}
@@ -325,7 +348,7 @@ jobs:
         if: always() && steps.route.outputs.act == 'true' && steps.lifecycle_staging.outcome == 'success'
         continue-on-error: true
         env:
-          GH_TOKEN: ${{ steps.finalizer_token.outputs.token || steps.base.outputs.token }}
+          GH_TOKEN: ${{ steps.finalizer_token.outputs.token || steps.interaction.outputs.token }}
           CCHP_RUNTIME_SNAPSHOT_PATH: ${{ steps.lifecycle_staging.outputs.dir }}/runtime-snapshot.json
         run: bun "$ENGINE_DIR/src/codex/workflow-runtime-snapshot.ts"
 
@@ -334,7 +357,7 @@ jobs:
         if: always() && steps.route.outputs.act == 'true'
         continue-on-error: true
         env:
-          GH_TOKEN: ${{ steps.finalizer_token.outputs.token || steps.base.outputs.token }}
+          GH_TOKEN: ${{ steps.finalizer_token.outputs.token || steps.interaction.outputs.token }}
           CCHP_WRITE_OUTCOME: ${{ steps.write.outcome }}
           CCHP_NEEDS_WRITE: ${{ steps.route.outputs.needs_write }}
           CCHP_INSTALL_OUTCOME: ${{ steps.install_codex.outcome }}
@@ -402,7 +425,7 @@ jobs:
         with:
           name: cchp-actions-lifecycle-${{ github.run_id }}-${{ github.run_attempt }}-${{ steps.lifecycle_evidence.outputs.sha256 }}
           path: ${{ steps.lifecycle_evidence.outputs.path }}
-          archive: false
+          archive: true
           if-no-files-found: error
           retention-days: 30
 
@@ -413,13 +436,11 @@ jobs:
         env:
           ARTIFACT_ID: ${{ steps.upload_lifecycle_evidence.outputs.artifact-id }}
           UPLOADED_SHA256: ${{ steps.upload_lifecycle_evidence.outputs.artifact-digest }}
-          EXPECTED_SHA256: ${{ steps.lifecycle_evidence.outputs.sha256 }}
         shell: bash
         run: |
           set -euo pipefail
           [[ "$ARTIFACT_ID" =~ ^[1-9][0-9]*$ ]]
           [[ "$UPLOADED_SHA256" =~ ^[a-f0-9]{64}$ ]]
-          [[ "$UPLOADED_SHA256" == "$EXPECTED_SHA256" ]]
 
       - name: Prepare lifecycle evidence round-trip staging
         id: lifecycle_roundtrip_staging
@@ -496,7 +517,7 @@ jobs:
         if: always() && steps.route.outputs.act == 'true'
         continue-on-error: true
         env:
-          GH_TOKEN: ${{ steps.finalizer_token.outputs.token || steps.base.outputs.token }}
+          GH_TOKEN: ${{ steps.finalizer_token.outputs.token || steps.interaction.outputs.token }}
           CCHP_WRITE_OUTCOME: ${{ steps.write.outcome }}
           CCHP_NEEDS_WRITE: ${{ steps.route.outputs.needs_write }}
           CCHP_INSTALL_OUTCOME: ${{ steps.install_codex.outcome }}
@@ -587,7 +608,7 @@ jobs:
         with:
           name: cchp-actions-lifecycle-final-${{ github.run_id }}-${{ github.run_attempt }}-${{ steps.final_lifecycle_evidence.outputs.sha256 }}
           path: ${{ steps.final_lifecycle_evidence.outputs.path }}
-          archive: false
+          archive: true
           if-no-files-found: error
           retention-days: 30
 
@@ -598,13 +619,11 @@ jobs:
         env:
           ARTIFACT_ID: ${{ steps.upload_final_lifecycle_evidence.outputs.artifact-id }}
           UPLOADED_SHA256: ${{ steps.upload_final_lifecycle_evidence.outputs.artifact-digest }}
-          EXPECTED_SHA256: ${{ steps.final_lifecycle_evidence.outputs.sha256 }}
         shell: bash
         run: |
           set -euo pipefail
           [[ "$ARTIFACT_ID" =~ ^[1-9][0-9]*$ ]]
           [[ "$UPLOADED_SHA256" =~ ^[a-f0-9]{64}$ ]]
-          [[ "$UPLOADED_SHA256" == "$EXPECTED_SHA256" ]]
 
       - name: Prepare final lifecycle round-trip staging
         id: final_lifecycle_roundtrip_staging
@@ -681,7 +700,7 @@ jobs:
         if: always() && steps.route.outputs.act == 'true'
         continue-on-error: true
         env:
-          GH_TOKEN: ${{ steps.finalizer_token.outputs.token || steps.base.outputs.token }}
+          GH_TOKEN: ${{ steps.finalizer_token.outputs.token || steps.interaction.outputs.token }}
           CCHP_WRITE_OUTCOME: ${{ steps.write.outcome }}
           CCHP_NEEDS_WRITE: ${{ steps.route.outputs.needs_write }}
           CCHP_INSTALL_OUTCOME: ${{ steps.install_codex.outcome }}

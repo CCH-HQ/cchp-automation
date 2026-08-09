@@ -31,6 +31,7 @@ interface FakeClientOptions {
   prHeadSha?: string
   releaseResponseTag?: string
   roadmapForeignContent?: boolean
+  issueComments?: Array<{ id: number; node_id: string; body?: string }>
 }
 
 type RunCommand = NonNullable<Parameters<typeof startGitHubBroker>[0]["runCommand"]>
@@ -66,8 +67,15 @@ function fakeClient(options: FakeClientOptions = {}) {
           calls.push({ operation: "issues.get", args })
           return { data: { number: args.issue_number, node_id: `ISSUE_${args.issue_number}`, pull_request: undefined } }
         },
-        listComments: async (args: Record<string, unknown>) => { calls.push({ operation: "issues.listComments", args }); return [{ id: 91, node_id: "IC_91" }] },
-        getComment: async (args: Record<string, unknown>) => { calls.push({ operation: "issues.getComment", args }); return { data: { id: args.comment_id, node_id: `IC_${args.comment_id}`, user: { login: "cchp-bot[bot]" } } } },
+        listComments: async (args: Record<string, unknown>) => {
+          calls.push({ operation: "issues.listComments", args })
+          return options.issueComments ?? [{ id: 91, node_id: "IC_91" }]
+        },
+        getComment: async (args: Record<string, unknown>) => {
+          calls.push({ operation: "issues.getComment", args })
+          const comment = options.issueComments?.find((entry) => entry.id === args.comment_id)
+          return { data: comment ?? { id: args.comment_id, node_id: `IC_${args.comment_id}`, user: { login: "cchp-bot[bot]" } } }
+        },
         createComment: async (args: Record<string, unknown>) => { calls.push({ operation: "issues.createComment", args }); return { data: { id: 2 } } },
         updateComment: async (args: Record<string, unknown>) => { calls.push({ operation: "issues.updateComment", args }); return { data: { id: args.comment_id } } },
         listMilestones: async (args: Record<string, unknown>) => {
@@ -438,6 +446,30 @@ test("comment updates require a trusted or previously discovered comment id", as
     await expect(client.rest.issues.getComment({ owner: "CCH-HQ", repo: "fixture", comment_id: 77 })).resolves.toMatchObject({ data: { id: 77 } })
     await expect(client.rest.issues.updateComment({ owner: "CCH-HQ", repo: "fixture", comment_id: 77, body: "x" })).resolves.toMatchObject({ data: { id: 77 } })
   }, { task: "engage", target: 9, targetKind: "issue", trustedCommentId: 77 })
+})
+
+test("progress comments remain supervisor-owned across create, update, delete and minimize operations", async () => {
+  await withBroker(async (client, _marker, calls) => {
+    const repo = { owner: "CCH-HQ", repo: "fixture" }
+    const body = "Live progress\n<!-- cchp-bot:progress:engage -->"
+    await expect(client.rest.issues.createComment({ ...repo, issue_number: 9, body }))
+      .rejects.toThrow("supervisor-owned")
+    await client.rest.issues.listComments({ ...repo, issue_number: 9 })
+    await expect(client.rest.issues.updateComment({ ...repo, comment_id: 91, body: "replacement" }))
+      .rejects.toThrow("supervisor-owned")
+    await expect(client.rest.issues.deleteComment({ ...repo, comment_id: 91 }))
+      .rejects.toThrow("supervisor-owned")
+    await expect(client.graphql(MINIMIZE_COMMENT, { id: "IC_91", classifier: "SPAM" }))
+      .rejects.toThrow("supervisor-owned")
+    expect(calls.some((call) => [
+      "issues.createComment", "issues.updateComment", "issues.deleteComment",
+    ].includes(call.operation))).toBe(false)
+  }, {
+    task: "engage",
+    target: 9,
+    targetKind: "issue",
+    fake: { issueComments: [{ id: 91, node_id: "IC_91", body: "Live\n<!-- cchp-bot:progress:engage -->" }] },
+  })
 })
 
 test("release updates are bound only to the trusted tag lookup, never listReleases ids", async () => {

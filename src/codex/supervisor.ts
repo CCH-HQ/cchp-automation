@@ -47,6 +47,7 @@ export interface SupervisorOptions {
   contextWindow?: number
   totalTokenBudget: number
   tokenAdmissionFraction?: number
+  maxResponsesPerTurn?: number
   sealProviderAndDrain?: () => Promise<void>
   cancelProviderThread?: (threadId: string) => Promise<unknown>
   sealExplicitAdmissions?: () => void | Promise<void>
@@ -120,6 +121,7 @@ const CODEX_ENV_ALLOWLIST = [
   "GOCACHE", "CARGO_HOME", "RUSTUP_HOME", "UV_CACHE_DIR", "PIP_CACHE_DIR",
   "PLAYWRIGHT_BROWSERS_PATH",
   "BOT_REPO", "GH_REPO", "BOT_TASK", "BOT_WORKDIR", "REPO_DIR", "BOT_DEFAULT_BRANCH",
+  "BOT_LOGIN", "BOT_GIT_NAME", "BOT_SLUG",
   "BOT_TARGET_BRANCH", "BOT_PR_BASE", "BOT_PR_NUMBER", "BOT_ISSUE_NUMBER",
   "BOT_DISCUSSION_NUMBER", "BOT_HEAD_SHA", "BOT_RUN_ID", "BOT_RELEASE_TAG",
   "BOT_PLAN_COMMENT_ID", "BOT_SKIP_PR_INSPECT", "BOT_PR_IS_FORK", "BOT_CAN_WRITE",
@@ -448,6 +450,7 @@ export class Supervisor {
       path: join(codexDir, "usage.jsonl"),
       totalBudget: options.totalTokenBudget,
       admissionFraction: options.tokenAdmissionFraction,
+      maxResponsesPerTurn: options.maxResponsesPerTurn,
       assertWriterOwnership: options.assertWriterOwnership,
       writerFence: options.writerFence,
     })

@@ -639,6 +639,9 @@ export async function updateStructuredComment(
   if (existing.user?.login !== ownerLogin) {
     throw new Error(`refusing to update comment ${commentId} because it is not owned by the trusted bot`)
   }
+  if (typeof existing.body === "string" && existing.body.includes("<!-- cchp-bot:progress:")) {
+    throw new Error("progress sticky is supervisor-owned")
+  }
   const body = renderStructured(input)
   const { data } = await octokit.rest.issues.updateComment({
     owner,

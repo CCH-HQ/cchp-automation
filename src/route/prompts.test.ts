@@ -311,6 +311,9 @@ test("production system prompt binds live progress to the Codex plan tool", () =
   expect(systemPrompt).toContain("`update_plan`")
   expect(systemPrompt).not.toContain("`todowrite`")
   expect(systemPrompt).toContain("Before step 0, call `update_plan`")
+  expect(systemPrompt).toContain("`progress:<task>` sticky key is reserved for the supervisor")
+  expect(systemPrompt).toContain("Do not expose")
+  expect(systemPrompt).toContain("publish one accurate final reply")
 })
 
 test("ci_fix result sticky instructions produce a schema-valid concrete key", () => {

@@ -97,12 +97,31 @@ export const SERVER_VERSION = "1.0.0"
 // Frozen validators reused from the source MCP server / inline.ts (kept local so
 // input validation is self-contained; the publishers re-validate authoritatively).
 const STICKY_KEY_RE = /^[a-z0-9][a-z0-9:._-]{0,63}$/
+const PROGRESS_MARKER_PREFIX = "<!-- cchp-bot:progress:"
 const VERDICTS: Verdict[] = ["COMMENT", "REQUEST_CHANGES", "APPROVE"]
 // The REST reactions API's full content enum ('+1' 👍 is the "review ran clean" ack).
 const REACTION_CONTENTS = ["+1", "-1", "laugh", "confused", "heart", "hooray", "rocket", "eyes"] as const
 const CHECK_STATUSES: CheckStatus[] = ["queued", "in_progress", "completed"]
 const CHECK_CONCLUSIONS: CheckConclusion[] = ["success", "neutral", "failure", "action_required", "cancelled"]
 const MINIMIZE_CLASSIFIERS = ["SPAM", "ABUSE", "OFF_TOPIC"] as const
+
+function progressStickyKey(key: string): boolean {
+  return key.startsWith("progress:")
+}
+
+function assertNoProgressMarker(value: unknown): void {
+  if (typeof value === "string") {
+    if (value.includes(PROGRESS_MARKER_PREFIX)) throw new Error("progress sticky is supervisor-owned")
+    return
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) assertNoProgressMarker(item)
+    return
+  }
+  if (value && typeof value === "object") {
+    for (const item of Object.values(value as Record<string, unknown>)) assertNoProgressMarker(item)
+  }
+}
 const PR_OPENED_TOOL_NAMES = new Set([
   "write_review_artifact",
   "write_plan",
@@ -586,6 +605,12 @@ export function buildTools(deps: ServerDeps): ToolEntry[] {
   let prTitleNotePosted = false
   let finalizedBundle: ReviewPublicationBundle | undefined
   let finalizedBundleLoaded = false
+  const protectedProgressNodeIds = new Set<string>()
+  const assertCommentNotProgress = async (commentId: number): Promise<void> => {
+    const { owner, name } = ns()
+    const { data } = await octokit.rest.issues.getComment({ owner, repo: name, comment_id: commentId })
+    assertNoProgressMarker(data.body ?? "")
+  }
   const finalizedReview = (): ReviewPublicationBundle | undefined => {
     if (!prOpened) return undefined
     if (!finalizedBundleLoaded) {
@@ -682,6 +707,9 @@ export function buildTools(deps: ServerDeps): ToolEntry[] {
       handler: async (a) => {
         const key = reqStr(a, "sticky_key")
         if (!STICKY_KEY_RE.test(key)) throw new Error("invalid sticky_key")
+        if (progressStickyKey(key)) {
+          throw new Error("progress sticky is supervisor-owned")
+        }
         const res = await upsertSticky(
           octokit,
           repo,
@@ -719,12 +747,17 @@ export function buildTools(deps: ServerDeps): ToolEntry[] {
       handler: async (a) => {
         const issueNumber = trustedPrNumber(env, a, "issue_number")
         if (prOpened && a.sticky_key != null) throw new Error("sticky_key is supervisor-owned for pr_opened")
+        const stickyKey = prOpened ? undefined : optStr(a, "sticky_key")
+        if (stickyKey && progressStickyKey(stickyKey)) {
+          throw new Error("progress sticky is supervisor-owned")
+        }
+        assertNoProgressMarker(a)
         const finalized = finalizedReview()
         const res = await postStructuredComment(octokit, repo, issueNumber, {
           ...(finalized
             ? { title: "Code Review Result", summary: finalized.report }
             : structuredInput(a)),
-          sticky_key: prOpened ? "review-summary" : optStr(a, "sticky_key"),
+          sticky_key: prOpened ? "review-summary" : stickyKey,
         }, trustedBotLogin(env))
         return JSON.stringify(res)
       },
@@ -735,6 +768,7 @@ export function buildTools(deps: ServerDeps): ToolEntry[] {
       inputSchema: schema({ comment_id: intProp("Existing comment id to overwrite"), ...STRUCTURED_PROPS }, ["comment_id", "summary"]),
       handler: async (a) => {
         finalizedReview()
+        assertNoProgressMarker(a)
         const res = await updateStructuredComment(
           octokit,
           repo,
@@ -928,9 +962,12 @@ export function buildTools(deps: ServerDeps): ToolEntry[] {
         { comment: strProp("One-line comment body") },
         ["comment"],
       ),
-      handler: async (a) => JSON.stringify(
-        await postComment(octokit, repo, trustedPrNumber(env, a, "issue_number"), reqStr(a, "comment")),
-      ),
+      handler: async (a) => {
+        assertNoProgressMarker(a)
+        return JSON.stringify(
+          await postComment(octokit, repo, trustedPrNumber(env, a, "issue_number"), reqStr(a, "comment")),
+        )
+      },
     },
     {
       name: "comment_file",
@@ -942,15 +979,19 @@ export function buildTools(deps: ServerDeps): ToolEntry[] {
         { body: strProp("Multi-line comment body") },
         ["body"],
       ),
-      handler: async (a) => JSON.stringify(
-        await commentFile(octokit, repo, trustedPrNumber(env, a, "issue_number"), reqStr(a, "body")),
-      ),
+      handler: async (a) => {
+        assertNoProgressMarker(a)
+        return JSON.stringify(
+          await commentFile(octokit, repo, trustedPrNumber(env, a, "issue_number"), reqStr(a, "body")),
+        )
+      },
     },
     {
       name: "close",
       description: "Post a closing comment (≤512 chars, single line) then close the PR or issue.",
       inputSchema: prTargetSchema(prOpened, "number", "PR or issue number", { reason: strProp("Closing comment") }, ["reason"]),
       handler: async (a) => {
+        assertNoProgressMarker(a)
         await closePrOrIssue(
           octokit,
           repo,
@@ -1155,6 +1196,12 @@ export function buildTools(deps: ServerDeps): ToolEntry[] {
           octokit.rest.issues.get({ owner, repo: name, issue_number: issueNumber }),
           octokit.paginate(octokit.rest.issues.listComments, { owner, repo: name, issue_number: issueNumber, per_page: 100 }),
         ])
+        for (const comment of comments) {
+          if (
+            typeof comment.node_id === "string" && comment.node_id &&
+            typeof comment.body === "string" && comment.body.includes(PROGRESS_MARKER_PREFIX)
+          ) protectedProgressNodeIds.add(comment.node_id)
+        }
         return JSON.stringify({
           number: issue.number,
           node_id: issue.node_id,
@@ -1216,6 +1263,7 @@ export function buildTools(deps: ServerDeps): ToolEntry[] {
       handler: async (a) => {
         const { owner, name } = ns()
         const commentId = reqInt(a, "comment_id")
+        await assertCommentNotProgress(commentId)
         await octokit.rest.issues.deleteComment({ owner, repo: name, comment_id: commentId })
         return JSON.stringify({ deleted: true, comment_id: commentId })
       },
@@ -1240,7 +1288,9 @@ export function buildTools(deps: ServerDeps): ToolEntry[] {
         if (!MINIMIZE_CLASSIFIERS.includes(classifier as (typeof MINIMIZE_CLASSIFIERS)[number])) {
           throw new Error(`classifier must be one of ${MINIMIZE_CLASSIFIERS.join(", ")}`)
         }
-        const data = (await octokit.graphql(MINIMIZE_COMMENT, { id: reqStr(a, "subject_id"), classifier })) as {
+        const subjectId = reqStr(a, "subject_id")
+        if (protectedProgressNodeIds.has(subjectId)) throw new Error("progress sticky is supervisor-owned")
+        const data = (await octokit.graphql(MINIMIZE_COMMENT, { id: subjectId, classifier })) as {
           minimizeComment?: { minimizedComment?: { isMinimized?: boolean; minimizedReason?: string | null } }
         }
         return JSON.stringify(data.minimizeComment?.minimizedComment ?? { isMinimized: true, minimizedReason: classifier })
@@ -1416,6 +1466,7 @@ export function buildTools(deps: ServerDeps): ToolEntry[] {
       description: "Add one comment to a discussion id returned by get_discussion.",
       inputSchema: schema({ discussion_id: strProp("Discussion node id"), body: strProp("Comment markdown") }, ["discussion_id", "body"]),
       handler: async (a) => {
+        assertNoProgressMarker(a)
         const data = (await octokit.graphql(DISCUSSION_ADD_COMMENT, {
           id: reqStr(a, "discussion_id"),
           body: reqStr(a, "body"),
@@ -1428,6 +1479,7 @@ export function buildTools(deps: ServerDeps): ToolEntry[] {
       description: "Update one discussion comment id returned by get_discussion or add_discussion_comment.",
       inputSchema: schema({ comment_id: strProp("Discussion comment node id"), body: strProp("Replacement markdown") }, ["comment_id", "body"]),
       handler: async (a) => {
+        assertNoProgressMarker(a)
         const data = (await octokit.graphql(DISCUSSION_UPDATE_COMMENT, {
           id: reqStr(a, "comment_id"),
           body: reqStr(a, "body"),

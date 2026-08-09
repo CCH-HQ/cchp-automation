@@ -36,6 +36,14 @@ test("captures immutable sanitized runtime evidence before workdir cleanup", () 
       responses: 7,
       turns: 3,
       admissionDenials: 1,
+      responseLimit: 6,
+      inputTokens: 80,
+      contextInputTokens: 100,
+      cachedInputTokens: 20,
+      outputTokens: 43,
+      reasoningOutputTokens: 12,
+      maxResponseTokens: 30,
+      maxContextInputTokens: 25,
     },
   })}\n`)
   writeFileSync(join(codex, "todo.json"), `${JSON.stringify({
@@ -94,7 +102,11 @@ test("captures immutable sanitized runtime evidence before workdir cleanup", () 
       state: "SUCCEEDED",
       rootThreadPresent: true,
       rootTurnPresent: true,
-      usage: { consumed: 123, responses: 7, turns: 3, blockingAnomalies: 2, admissionDenials: 1 },
+      usage: {
+        consumed: 123, responses: 7, turns: 3, blockingAnomalies: 2, admissionDenials: 1,
+        responseLimit: 6, inputTokens: 80, contextInputTokens: 100, cachedInputTokens: 20,
+        outputTokens: 43, reasoningOutputTokens: 12, maxResponseTokens: 30, maxContextInputTokens: 25,
+      },
     },
   })
   expect(snapshot.progress).toMatchObject({ ledger: "valid", record: { commentId: 44, finalized: true } })

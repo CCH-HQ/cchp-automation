@@ -48,6 +48,14 @@ export interface SafeTerminalRecord {
     admissionDenials: number
     reservedTokens?: number
     responsesInFlight?: number
+    responseLimit?: number
+    inputTokens: number
+    contextInputTokens: number
+    cachedInputTokens: number
+    outputTokens: number
+    reasoningOutputTokens: number
+    maxResponseTokens: number
+    maxContextInputTokens: number
   }
 }
 
@@ -230,6 +238,16 @@ function safeSupervisorRecord(
       ...(Number.isSafeInteger(usage.responsesInFlight) && Number(usage.responsesInFlight) >= 0
         ? { responsesInFlight: Number(usage.responsesInFlight) }
         : {}),
+      ...(Number.isSafeInteger(usage.responseLimit) && Number(usage.responseLimit) > 0
+        ? { responseLimit: Number(usage.responseLimit) }
+        : {}),
+      inputTokens: safeInteger(usage.inputTokens),
+      contextInputTokens: safeInteger(usage.contextInputTokens),
+      cachedInputTokens: safeInteger(usage.cachedInputTokens),
+      outputTokens: safeInteger(usage.outputTokens),
+      reasoningOutputTokens: safeInteger(usage.reasoningOutputTokens),
+      maxResponseTokens: safeInteger(usage.maxResponseTokens),
+      maxContextInputTokens: safeInteger(usage.maxContextInputTokens),
     },
   }
 }

@@ -169,6 +169,14 @@ function usageProjection(terminal: Record<string, unknown> | undefined, fallback
     turns: metric("turns", fallback.turns),
     blocking_anomalies: metric("blockingAnomalies", fallback.blockingAnomalies),
     admission_denials: metric("admissionDenials", fallback.admissionDenials),
+    response_limit: metric("responseLimit", 0),
+    input_tokens: metric("inputTokens", 0),
+    context_input_tokens: metric("contextInputTokens", 0),
+    cached_input_tokens: metric("cachedInputTokens", 0),
+    output_tokens: metric("outputTokens", 0),
+    reasoning_output_tokens: metric("reasoningOutputTokens", 0),
+    max_response_tokens: metric("maxResponseTokens", 0),
+    max_context_input_tokens: metric("maxContextInputTokens", 0),
   }
 }
 

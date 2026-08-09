@@ -16,6 +16,7 @@ import {
   requiresReviewFinalization,
   resolveRuntimeBrokerBindings,
   resolveRuntimePermission,
+  resolveRuntimeUsageGuardrails,
   resolveRuntimeRecovery,
   restoreRuntimeEnv,
   settleRuntimeOutcome,
@@ -115,6 +116,29 @@ test("maps existing BOT_* target metadata to broker bindings without caller chan
     .toMatchObject({ releaseTag: "v1.2.3" })
   expect(() => resolveRuntimeBrokerBindings({ BOT_PR_NUMBER: "1", BOT_ISSUE_NUMBER: "2" }))
     .toThrow("exactly one trusted")
+})
+
+test("caps response count and tokens only for short read-only interactive tasks", () => {
+  for (const task of ["engage", "manual", "dispatch"] as const) {
+    expect(resolveRuntimeUsageGuardrails({ task, hasWriteToken: false }, 2_000_000)).toEqual({
+      totalTokenBudget: 384_000,
+      maxResponsesPerTurn: 6,
+    })
+  }
+  expect(resolveRuntimeUsageGuardrails({ task: "manual", hasWriteToken: false }, 128_000)).toEqual({
+    totalTokenBudget: 128_000,
+    maxResponsesPerTurn: 6,
+  })
+  expect(resolveRuntimeUsageGuardrails({ task: "manual", hasWriteToken: true }, 2_000_000)).toEqual({
+    totalTokenBudget: 2_000_000,
+  })
+  expect(resolveRuntimeUsageGuardrails({ task: "pr_opened", hasWriteToken: false }, 2_000_000)).toEqual({
+    totalTokenBudget: 2_000_000,
+  })
+  expect(resolveRuntimeUsageGuardrails({ task: "engage", hasWriteToken: false }, Number.NaN)).toEqual({
+    totalTokenBudget: 384_000,
+    maxResponsesPerTurn: 6,
+  })
 })
 
 test("points git origin at the run-scoped loopback proxy without embedding credentials", () => {
@@ -306,6 +330,7 @@ test("terminal progress replaces the task sticky only while the trusted PR head 
   expect(await publish!({
     state: "FAILED",
     terminalReason: "review failed authorization: Bearer ghp_runtime_secret",
+    finalMessage: "Deleted an inaccurate reply after sticky publication failed.",
     usage: {
       acceptedRaw: true, consumed: 1200, limit: 2000, fraction: 0.6, state: "normal",
       blockingAnomalies: 0, responses: 1, turns: 1, admissionDenials: 0,
@@ -316,6 +341,7 @@ test("terminal progress replaces the task sticky only while the trusted PR head 
   expect(String(calls[0]!.body)).toContain("Run complete — `pr_opened`")
   expect(String(calls[0]!.body)).toContain("<!-- cchp-bot:progress:pr_opened -->")
   expect(String(calls[0]!.body)).not.toContain("ghp_runtime_secret")
+  expect(String(calls[0]!.body)).not.toContain("Deleted an inaccurate reply")
 })
 
 test("repairs a late progress mutation so terminal progress remains the authoritative final write", async () => {
