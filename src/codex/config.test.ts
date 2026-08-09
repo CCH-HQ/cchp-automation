@@ -125,6 +125,9 @@ test("writes an isolated strict Codex config with loopback providers and no call
   expect(config).toContain('enabled_tools = ["upload_file"]')
   expect(config).toContain('"CCHP_GITHUB_BROKER_SOCKET"')
   expect(config).toContain('"CCHP_GITHUB_BROKER_TOKEN"')
+  expect(config).toContain('"BOT_LOGIN"')
+  expect(config).toContain('"BOT_GIT_NAME"')
+  expect(config).toContain('"BOT_SLUG"')
   expect(config).not.toContain("SEE_API_KEY_FILE")
   expect(config).not.toContain("SEE_API_KEY =")
   for (const role of [reviewer, explorer, planner]) {

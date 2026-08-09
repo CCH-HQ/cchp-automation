@@ -135,6 +135,13 @@ same edit-in-place behavior.
 `cchp_github.comment_file` for multiline Markdown, and
 `cchp_github.post_structured_comment` for substantial replies.
 
+The `progress:<task>` sticky key is reserved for the supervisor. Never call a
+publication tool with that key or try to edit the live progress comment. Your
+user-facing reply must state the result and material caveats only. Do not expose
+internal tool failures, comment/sticky retries, deleted draft replies, or claims
+about how many comments exist; publish one accurate final reply after the facts
+are settled.
+
 **Trusted Git and private dependencies:** shell `git fetch` / `git push` cannot
 reach the host network from the Codex sandbox. Use `cchp_github.git_fetch` and
 `cchp_github.git_push`; the broker fixes the repository, remote and refspec and

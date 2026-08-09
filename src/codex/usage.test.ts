@@ -42,6 +42,38 @@ test("keeps cumulative snapshots and bills unique provider responses in one Code
   expect(ledger.recordRaw({ threadId: "thread_1", turnId: "turn_1", responseId: "resp_2", totalTokens: 150 })).toMatchObject({ acceptedRaw: false, consumed: 300, blockingAnomalies: 0 })
   expect(ledger.rawCompletions).toHaveLength(2)
   expect(ledger.anomalies).toEqual([])
+  expect(ledger.budget).toMatchObject({
+    inputTokens: 0,
+    contextInputTokens: 0,
+    cachedInputTokens: 0,
+    outputTokens: 0,
+    reasoningOutputTokens: 0,
+    maxResponseTokens: 150,
+    maxContextInputTokens: 0,
+  })
+})
+
+test("projects bounded numeric usage aggregates without raw response content", () => {
+  const ledger = new UsageLedger({ totalBudget: 10_000 })
+  ledger.recordRaw({
+    threadId: "root", turnId: "turn", responseId: "first", totalTokens: 160,
+    inputTokens: 100, contextInputTokens: 120, cachedInputTokens: 40,
+    outputTokens: 60, reasoningOutputTokens: 20,
+  })
+  ledger.recordRaw({
+    threadId: "root", turnId: "turn", responseId: "second", totalTokens: 250,
+    inputTokens: 150, contextInputTokens: 200, cachedInputTokens: 50,
+    outputTokens: 100, reasoningOutputTokens: 30,
+  })
+  expect(ledger.budget).toMatchObject({
+    inputTokens: 250,
+    contextInputTokens: 320,
+    cachedInputTokens: 90,
+    outputTokens: 160,
+    reasoningOutputTokens: 50,
+    maxResponseTokens: 250,
+    maxContextInputTokens: 200,
+  })
 })
 
 test("replay restores multiple unique provider responses for one turn", () => {
@@ -252,6 +284,57 @@ test("allows more than sixteen Responses API calls within one Codex turn", () =>
       turns: 1,
     })
   }
+})
+
+test("denies responses after the configured per-turn limit", () => {
+  const ledger = new UsageLedger({ totalBudget: 1_000_000, maxResponsesPerTurn: 2 })
+  ledger.recordRaw({
+    threadId: "root", turnId: "turn", responseId: "first", totalTokens: 10, billingScopeId: "run",
+  })
+  const second = ledger.admitNextResponse({
+    billingScopeId: "run", threadId: "root", turnId: "turn", estimatedTokens: 10,
+  })
+  expect(second).toMatchObject({ allowed: true, responsesInTurn: 1, responsesInFlight: 1 })
+  expect(ledger.admitNextResponse({
+    billingScopeId: "run", threadId: "root", turnId: "turn", estimatedTokens: 10,
+  })).toMatchObject({
+    allowed: false,
+    reason: "response_limit",
+    responsesInTurn: 1,
+    responsesInFlight: 1,
+  })
+  expect(ledger.budget).toMatchObject({ responseLimit: 2, admissionDenials: 1 })
+  ledger.releaseReservation(second.reservation!, "test_cleanup")
+})
+
+test("recovered reservations continue occupying response slots after restart", () => {
+  const path = join(mkdtempSync(join(tmpdir(), "usage-response-limit-restart-")), "usage.jsonl")
+  const first = new UsageLedger({
+    path,
+    totalBudget: 1_000_000,
+    maxResponsesPerTurn: 2,
+    writerFence: { writerId: "writer", generation: 1 },
+  })
+  for (let index = 0; index < 2; index++) {
+    expect(first.admitNextResponse({
+      billingScopeId: "run", threadId: "root", turnId: "turn", estimatedTokens: 10,
+    }).allowed).toBe(true)
+  }
+
+  const resumed = new UsageLedger({
+    path,
+    totalBudget: 1_000_000,
+    maxResponsesPerTurn: 2,
+    writerFence: { writerId: "writer", generation: 2 },
+  })
+  expect(resumed.admitNextResponse({
+    billingScopeId: "run", threadId: "root", turnId: "turn", estimatedTokens: 10,
+  })).toMatchObject({
+    allowed: false,
+    reason: "response_limit",
+    responsesInTurn: 0,
+    responsesInFlight: 0,
+  })
 })
 
 test("uses run-wide provider history when a child thread has no local usage", () => {

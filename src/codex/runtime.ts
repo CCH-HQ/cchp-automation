@@ -223,6 +223,22 @@ export function resolveRuntimePermission(env: RuntimeEnv = process.env): TaskPer
   })
 }
 
+const SHORT_READ_ONLY_TASKS = new Set<Task>(["engage", "manual", "dispatch"])
+
+export function resolveRuntimeUsageGuardrails(
+  permission: Pick<TaskPermissionProfile, "task" | "hasWriteToken">,
+  configuredBudget: number,
+): { totalTokenBudget: number; maxResponsesPerTurn?: number } {
+  const budget = Number.isSafeInteger(configuredBudget) && configuredBudget > 0 ? configuredBudget : 2_000_000
+  if (permission.hasWriteToken || !SHORT_READ_ONLY_TASKS.has(permission.task)) {
+    return { totalTokenBudget: budget }
+  }
+  return {
+    totalTokenBudget: Math.min(budget, 384_000),
+    maxResponsesPerTurn: 6,
+  }
+}
+
 export function createProgressPublisher(
   env: RuntimeEnv,
   octokit: GitHubClient,
@@ -355,7 +371,6 @@ export function createTerminalProgressPublisher(
       codexVersion: metadata?.runtime?.codexVersion ?? result.runtime?.codexVersion,
       executionMode: metadata?.runtime?.executionMode ?? result.runtime?.executionMode,
       cleanupOutcome: metadata?.cleanupOutcome,
-      finalMessage: typeof result.finalMessage === "string" ? redact(result.finalMessage) : undefined,
     })
     const publishBody = async (): Promise<StickyResult | undefined> => upsertSticky(
       octokit,
@@ -482,6 +497,10 @@ export async function main(): Promise<number> {
     lease = acquireRunLease(workdir, process.env.BOT_RUN_ID)
     const contract = parseCallerContract(process.env)
     const permission = resolveRuntimePermission(process.env)
+    const usageGuardrails = resolveRuntimeUsageGuardrails(
+      permission,
+      Number(process.env.CCHP_TOKEN_BUDGET || 2_000_000),
+    )
     const reviewRequired = requiresReviewFinalization(process.env)
     const providerSet = parseProviders({
       providerJson: contract.providerJson,
@@ -526,7 +545,7 @@ export async function main(): Promise<number> {
       clientId: process.env.CCHP_APP_CLIENT_ID,
       privateKey: process.env.CCHP_APP_PRIVATE_KEY,
       repo,
-      scope: process.env.CCHP_NEEDS_WRITE === "true" || process.env.CCHP_NEEDS_WRITE === "1" ? "write" : "base",
+      scope: process.env.CCHP_NEEDS_WRITE === "true" || process.env.CCHP_NEEDS_WRITE === "1" ? "write" : "interaction",
       fallback: process.env.GH_TOKEN,
       refreshMs: Math.max(60, Number(process.env.CCHP_TOKEN_REFRESH_SECONDS ?? "") || 2700) * 1000,
       log: (message) => process.stderr.write(`[github-token] ${message}\n`),
@@ -630,7 +649,8 @@ export async function main(): Promise<number> {
       model: providerSet.main.modelKey,
       modelProvider: providerSet.providers.find((provider) => provider.id === providerSet.main.providerId)!.codexId,
       contextWindow: providerSet.main.context,
-      totalTokenBudget: Number(process.env.CCHP_TOKEN_BUDGET || 2_000_000),
+      totalTokenBudget: usageGuardrails.totalTokenBudget,
+      maxResponsesPerTurn: usageGuardrails.maxResponsesPerTurn,
       tokenAdmissionFraction: 0.85,
       sealProviderAndDrain: () => bridge!.sealAndDrain(),
       cancelProviderThread: (threadId) => bridge!.cancelThread(threadId),

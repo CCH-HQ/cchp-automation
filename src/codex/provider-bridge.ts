@@ -296,8 +296,9 @@ function responseTools(request: JsonRecord): BridgeTool[] {
       collectTools(item.tools, `input[${index}].tools`, undefined, result)
     }
   }
+  const available = result.filter((tool) => tool.namespace || tool.name !== "request_user_input")
   const encodedOwners = new Map<string, string>()
-  for (const tool of result) {
+  for (const tool of available) {
     const encoded = encodeToolName(tool)
     const identity = toolIdentity(tool)
     const owner = encodedOwners.get(encoded)
@@ -306,7 +307,7 @@ function responseTools(request: JsonRecord): BridgeTool[] {
     }
     encodedOwners.set(encoded, identity)
   }
-  return result
+  return available
 }
 
 function encodedFunctionCallName(item: JsonRecord, label: string): string {
@@ -356,6 +357,12 @@ function chatToolChoice(value: unknown): unknown {
   return choice.type === "function" && typeof choice.name === "string"
     ? { type: "function", function: { name: encodedFunctionCallName(choice, "tool_choice") } }
     : value
+}
+
+function unavailableDefaultToolChoice(value: unknown): boolean {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false
+  const choice = value as JsonRecord
+  return choice.type === "function" && choice.name === "request_user_input" && !choice.namespace
 }
 
 function toChatBody(
@@ -426,7 +433,9 @@ function toChatBody(
       },
     }))
   }
-  if (request.tool_choice !== undefined) body.tool_choice = chatToolChoice(request.tool_choice)
+  if (request.tool_choice !== undefined && !unavailableDefaultToolChoice(request.tool_choice)) {
+    body.tool_choice = chatToolChoice(request.tool_choice)
+  }
   if (request.parallel_tool_calls !== undefined) body.parallel_tool_calls = request.parallel_tool_calls
   const format = jsonSchemaFormat(request)
   if (format) body.response_format = { type: "json_schema", json_schema: format }
@@ -528,7 +537,9 @@ function toAnthropicBody(
       input_schema: tool.parameters,
     }))
   }
-  if (request.tool_choice !== undefined) body.tool_choice = anthropicToolChoice(request.tool_choice)
+  if (request.tool_choice !== undefined && !unavailableDefaultToolChoice(request.tool_choice)) {
+    body.tool_choice = anthropicToolChoice(request.tool_choice)
+  }
   const format = jsonSchemaFormat(request)
   if (format) body.output_config = { format: { type: "json_schema", schema: format.schema } }
   if (reasoning && request.reasoning !== undefined) body.thinking = { type: "adaptive" }

@@ -39,6 +39,15 @@ test("mints the initial token with the exact repository permission scope", async
     expect(scopePermissions("base")).toEqual({
       contents: "read",
       metadata: "read",
+      issues: "read",
+      pull_requests: "read",
+      discussions: "read",
+      actions: "read",
+      organization_projects: "read",
+    })
+    expect(scopePermissions("interaction")).toEqual({
+      contents: "read",
+      metadata: "read",
       issues: "write",
       pull_requests: "write",
       discussions: "write",

@@ -3,7 +3,17 @@
 // BOT_* env + act/needs_write outputs, best-effort 👀 acks, renders the prompt,
 // and gathers task-specific context. Every GitHub call goes through the one
 // Octokit client (ADR 0003). The bash route.sh + context.sh, in TS.
-import { appendFileSync, mkdirSync } from "node:fs"
+import {
+  appendFileSync,
+  chmodSync,
+  lstatSync,
+  mkdirSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs"
+import { randomUUID } from "node:crypto"
 import { loadOverlay } from "./config/overlay"
 import { makeOctokit, type GitHubClient } from "./github/client"
 import { readEvent, setEnv, setOutput } from "./github/actions-io"
@@ -27,6 +37,54 @@ function need(name: string): string {
   return v
 }
 
+type RouteAck = NonNullable<RouteResult["ack"]>
+
+function routeAckPath(workdir: string): string {
+  return `${workdir}/ctx/route-ack.json`
+}
+
+function parseRouteAck(value: unknown): RouteAck {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("invalid route ack record")
+  const record = value as Record<string, unknown>
+  if (Object.keys(record).sort().join(",") !== "kind,target") throw new Error("invalid route ack record")
+  if (record.kind !== "rest" && record.kind !== "node") throw new Error("invalid route ack kind")
+  if (typeof record.target !== "string" || record.target.length === 0 || record.target.length > 1024) {
+    throw new Error("invalid route ack target")
+  }
+  return { kind: record.kind, target: record.target }
+}
+
+export function persistRouteAck(workdir: string, value: RouteAck): string {
+  const ack = parseRouteAck(value)
+  const ctxDir = `${workdir}/ctx`
+  const path = routeAckPath(workdir)
+  const temporary = `${ctxDir}/.route-ack.${randomUUID()}.tmp`
+  mkdirSync(ctxDir, { recursive: true })
+  try {
+    writeFileSync(temporary, `${JSON.stringify(ack)}\n`, { encoding: "utf8", flag: "wx", mode: 0o600 })
+    chmodSync(temporary, 0o600)
+    renameSync(temporary, path)
+    return path
+  } finally {
+    rmSync(temporary, { force: true })
+  }
+}
+
+export function readRouteAck(workdir: string): RouteAck | undefined {
+  const path = routeAckPath(workdir)
+  let stat: ReturnType<typeof lstatSync>
+  try {
+    stat = lstatSync(path)
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined
+    throw error
+  }
+  if (!stat.isFile() || stat.isSymbolicLink() || (stat.mode & 0o077) !== 0) {
+    throw new Error("route ack record must be a private regular file")
+  }
+  return parseRouteAck(JSON.parse(readFileSync(path, "utf8")))
+}
+
 /** Best-effort 👀 so a human sees the bot picked the event up (never fatal). */
 async function ack(octokit: GitHubClient, repo: string, a: NonNullable<RouteResult["ack"]>): Promise<void> {
   try {
@@ -41,6 +99,13 @@ async function ack(octokit: GitHubClient, repo: string, a: NonNullable<RouteResu
   } catch {
     // Reactions are cosmetic; a failure must never block the run.
   }
+}
+
+async function runAckMode(): Promise<void> {
+  const workdir = need("BOT_WORKDIR")
+  const routeAck = readRouteAck(workdir)
+  if (!routeAck) return
+  await ack(makeOctokit(need("GH_TOKEN")), need("GH_REPO"), routeAck)
 }
 
 /** Gather task-specific context into ctx/ + append to the prompt, mirroring
@@ -91,6 +156,10 @@ async function gatherContext(deps: CtxDeps, ev: string, e: Record<string, any>, 
 }
 
 export async function run(): Promise<void> {
+  if (process.env.CCHP_ROUTE_ACK === "1") {
+    await runAckMode()
+    return
+  }
   const eventName = need("GITHUB_EVENT_NAME")
   const event = readEvent()
   const repo = need("GH_REPO")
@@ -134,7 +203,8 @@ export async function run(): Promise<void> {
   setOutput("act", "true")
   setOutput("needs_write", result.needsWrite ? "true" : "false")
 
-  if (result.ack) await ack(octokit, repo, result.ack)
+  mkdirSync(`${workdir}/ctx`, { recursive: true })
+  if (result.ack) persistRouteAck(workdir, result.ack)
 
   if (result.intent) appendFileSync(promptFile, renderPrompt(result.intent, { repo, overlay }))
 
@@ -142,7 +212,6 @@ export async function run(): Promise<void> {
   // ${workdir}/ctx), so ensure it exists now — otherwise the first oversized
   // context / trigger / pr-diff / manifest write below throws ENOENT and aborts
   // the whole run. (Regression from the bash route.sh → TS port.)
-  mkdirSync(`${workdir}/ctx`, { recursive: true })
   const reviewDeps = {
     octokit,
     repo,

@@ -1738,6 +1738,39 @@ test("maps Responses Lite additional tools and namespaced history to Chat and An
   expect(anthropic.tool_choice).toEqual({ type: "tool", name: anthropicToolName })
 })
 
+test("removes the unavailable Default-mode request_user_input tool without hiding namespaced tools", () => {
+  const providerJson = (format: "openai-compatible" | "anthropic") => JSON.stringify({
+    relay: {
+      format,
+      base_url: "https://provider.example/v1",
+      models: { primary: { upstream_id: "vendor/gpt-5.6-sol", output: 32000 } },
+    },
+  })
+  const request = {
+    model: "primary",
+    input: [{ type: "message", role: "user", content: "inspect" }],
+    tools: [
+      { type: "function", name: "request_user_input", parameters: { type: "object" } },
+      { type: "function", name: "read_file", parameters: { type: "object" } },
+      { type: "function", namespace: "caller", name: "request_user_input", parameters: { type: "object" } },
+    ],
+    tool_choice: { type: "function", name: "request_user_input" },
+  }
+
+  for (const format of ["openai-compatible", "anthropic"] as const) {
+    const provider = parseProviders({ providerJson: providerJson(format), model: "relay/primary" }).providers[0]!
+    const body = translateResponsesRequest(provider, request).body
+    const names = format === "openai-compatible"
+      ? (body.tools as any[]).map((tool) => tool.function.name as string)
+      : (body.tools as any[]).map((tool) => tool.name as string)
+    expect(names).toContain("read_file")
+    expect(names).not.toContain("request_user_input")
+    expect(names).toHaveLength(2)
+    expect(names.some((name) => name.startsWith("cchpns1_"))).toBe(true)
+    expect(body.tool_choice).toBeUndefined()
+  }
+})
+
 test("maps Responses JSON schema output configuration to compatible provider fields", () => {
   const request = {
     model: "primary",

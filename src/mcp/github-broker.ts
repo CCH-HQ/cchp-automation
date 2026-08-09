@@ -183,6 +183,8 @@ const REPOSITORY_WIDE_TARGET_TASKS = new Set<Task>(["release_notes", "roadmap_it
 interface BrokerAuthorizationState {
   commentIds: Set<number>
   commentNodeIds: Set<string>
+  protectedProgressCommentIds: Set<number>
+  protectedProgressCommentNodeIds: Set<string>
   reviewCommentIds: Set<number>
   reviewThreadIds: Set<string>
   discussionIds: Set<string>
@@ -206,6 +208,8 @@ function createAuthorizationState(options: GitHubBrokerOptions): BrokerAuthoriza
   return {
     commentIds: new Set(options.trustedCommentId ? [options.trustedCommentId] : []),
     commentNodeIds: new Set(),
+    protectedProgressCommentIds: new Set(),
+    protectedProgressCommentNodeIds: new Set(),
     reviewCommentIds: new Set(),
     reviewThreadIds: new Set(),
     discussionIds: new Set(),
@@ -235,6 +239,11 @@ function sameToken(left: string, right: string): boolean {
 const SHA40 = /^[0-9a-f]{40}$/i
 const SHA256 = /^[0-9a-f]{64}$/i
 const MAX_REQUEST_BYTES = 1024 * 1024
+const PROGRESS_MARKER_PREFIX = "<!-- cchp-bot:progress:"
+
+function containsProgressMarker(value: unknown): boolean {
+  return typeof value === "string" && value.includes(PROGRESS_MARKER_PREFIX)
+}
 
 function markerValid(path: string | undefined, options: GitHubBrokerOptions): boolean {
   return Boolean(validMarkerSnapshot(path, options))
@@ -379,13 +388,24 @@ function authorizeRest(
     }
   }
 
+  if (
+    (operation === "rest.issues.createComment" || operation === "rest.issues.updateComment") &&
+    containsProgressMarker(args.body)
+  ) throw new Error("broker progress comments are supervisor-owned")
+
   if (operation === "rest.issues.getComment" || operation === "rest.issues.updateComment") {
     const commentId = positiveInteger(args.comment_id)
     if (!commentId || !state.commentIds.has(commentId)) throw new Error("broker comment id was not trusted or discovered")
+    if (operation === "rest.issues.updateComment" && state.protectedProgressCommentIds.has(commentId)) {
+      throw new Error("broker progress comments are supervisor-owned")
+    }
   }
   if (operation === "rest.issues.deleteComment" || operation === "rest.reactions.listForIssueComment") {
     const commentId = positiveInteger(args.comment_id)
     if (!commentId || !state.commentIds.has(commentId)) throw new Error("broker comment id was not trusted or discovered")
+    if (operation === "rest.issues.deleteComment" && state.protectedProgressCommentIds.has(commentId)) {
+      throw new Error("broker progress comments are supervisor-owned")
+    }
   }
   if (operation === "rest.pulls.deleteReviewComment") {
     const commentId = positiveInteger(args.comment_id)
@@ -627,6 +647,9 @@ function authorizeGraphql(options: GitHubBrokerOptions, state: BrokerAuthorizati
   if (canonical === canonicalGraphql(MINIMIZE_COMMENT)) {
     if (!new Set<Task>(["engage", "pr_opened"]).has(task)) throw new Error(`comment minimization is not allowed for ${task}`)
     requireTypedId(state.commentNodeIds, variables, "id", "comment node")
+    if (state.protectedProgressCommentNodeIds.has(String(variables.id))) {
+      throw new Error("broker progress comments are supervisor-owned")
+    }
     if (!new Set(["SPAM", "ABUSE", "OFF_TOPIC"]).has(String(variables.classifier))) {
       throw new Error("comment minimization classifier is not allowed")
     }
@@ -851,11 +874,22 @@ function rememberRepositoryItem(options: GitHubBrokerOptions, state: BrokerAutho
   }
 }
 
-function rememberComment(targetIds: Set<number>, nodeIds: Set<string>, value: unknown): void {
+function rememberComment(
+  targetIds: Set<number>,
+  nodeIds: Set<string>,
+  value: unknown,
+  protectedIds?: Set<number>,
+  protectedNodeIds?: Set<string>,
+): void {
   for (const object of Array.isArray(dataOf(value)) ? jsonArray(dataOf(value)) : [jsonObject(dataOf(value))].filter((item): item is Json => !!item)) {
     const id = positiveInteger(object.id)
     if (id) targetIds.add(id)
     rememberNodeId(nodeIds, object)
+    if (containsProgressMarker(object.body)) {
+      if (id) protectedIds?.add(id)
+      const nodeId = typeof object.node_id === "string" && object.node_id ? object.node_id : stringId(object)
+      if (nodeId) protectedNodeIds?.add(nodeId)
+    }
   }
 }
 
@@ -940,7 +974,13 @@ function rememberResult(options: GitHubBrokerOptions, state: BrokerAuthorization
     }
   }
   if (["rest.issues.listComments", "rest.issues.getComment", "rest.issues.createComment", "rest.issues.updateComment"].includes(operation)) {
-    rememberComment(state.commentIds, state.commentNodeIds, result)
+    rememberComment(
+      state.commentIds,
+      state.commentNodeIds,
+      result,
+      state.protectedProgressCommentIds,
+      state.protectedProgressCommentNodeIds,
+    )
   }
   if (operation === "rest.pulls.listReviewComments") rememberComment(state.reviewCommentIds, state.commentNodeIds, result)
   if (operation === "rest.checks.create") {

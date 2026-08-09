@@ -160,6 +160,7 @@ interface FakeOpts {
   listReviews?: unknown[]
   reviewComments?: unknown[]
   issueComments?: unknown[]
+  issue?: unknown
   prGet?: unknown
   prGetDiff?: string
   graphqlResult?: unknown
@@ -194,6 +195,7 @@ function fakeOctokit(opts: FakeOpts = {}) {
     releaseUpdate: [] as Record<string, unknown>[],
     compareCommits: [] as Record<string, unknown>[],
     issuesUpdate: [] as Record<string, unknown>[],
+    deleteComment: [] as Record<string, unknown>[],
     issuesLock: [] as Record<string, unknown>[],
     labelsGet: [] as Record<string, unknown>[],
     labelsCreate: [] as Record<string, unknown>[],
@@ -225,6 +227,18 @@ function fakeOctokit(opts: FakeOpts = {}) {
         }),
       },
       issues: {
+        get: async () => ({ data: opts.issue ?? {
+          number: 7,
+          node_id: "ISSUE_7",
+          title: "Fixture",
+          state: "open",
+          state_reason: null,
+          user: { login: "alice" },
+          body: "",
+          labels: [],
+          assignees: [],
+          milestone: null,
+        } }),
         createComment: async (p: Record<string, unknown>) => (calls.createComment.push(p), { data: { id: 11, html_url: "https://gh/c/11" } }),
         getComment: async (p: Record<string, unknown>) => {
           calls.getComment.push(p)
@@ -234,6 +248,7 @@ function fakeOctokit(opts: FakeOpts = {}) {
           return { data: comment ?? { id: p.comment_id, user: { login: "cchp-bot[bot]" } } }
         },
         updateComment: async (p: Record<string, unknown>) => (calls.updateComment.push(p), { data: { id: p.comment_id, html_url: "https://gh/c/up" } }),
+        deleteComment: async (p: Record<string, unknown>) => (calls.deleteComment.push(p), { data: {} }),
         addLabels: async (p: Record<string, unknown>) => (calls.addLabels.push(p), { data: [] }),
         listComments: list(opts.issueComments ?? []),
         listMilestones: list(opts.milestones ?? []),
@@ -653,6 +668,59 @@ test("upsert_sticky_comment creates a marker-tagged comment when none exists", a
   const res = await callTool(tools, "upsert_sticky_comment", { issue_number: 7, sticky_key: "cifix", body: "overview" })
   expect(text(res)).toContain('"action":"created"')
   expect(calls.createComment[0]!.body).toContain("<!-- cchp-bot:cifix -->")
+})
+
+test("engage cannot overwrite the supervisor-owned progress sticky", async () => {
+  const progressBody = "Live progress\n<!-- cchp-bot:progress:engage -->"
+  const { octokit, calls } = fakeOctokit({
+    issueComments: [{ id: 99, node_id: "IC_99", body: progressBody, user: { login: "bot[bot]" } }],
+  })
+  const tools = buildTools({ octokit, repo: REPO, env: { BOT_TASK: "engage", BOT_LOGIN: "bot[bot]" } })
+
+  const sticky = await callTool(tools, "upsert_sticky_comment", {
+    issue_number: 7,
+    sticky_key: "progress:engage",
+    body: "model-owned progress",
+  })
+  expect(sticky.isError).toBe(true)
+  expect(text(sticky)).toContain("progress sticky is supervisor-owned")
+
+  const otherTaskSticky = await callTool(tools, "upsert_sticky_comment", {
+    issue_number: 7,
+    sticky_key: "progress:manual",
+    body: "model-owned progress",
+  })
+  expect(otherTaskSticky.isError).toBe(true)
+  expect(text(otherTaskSticky)).toContain("progress sticky is supervisor-owned")
+
+  const structured = await callTool(tools, "post_structured_comment", {
+    issue_number: 7,
+    sticky_key: "progress:engage",
+    summary: "model-owned progress",
+  })
+  expect(structured.isError).toBe(true)
+  expect(text(structured)).toContain("progress sticky is supervisor-owned")
+
+  for (const [tool, args] of [
+    ["post_comment", { issue_number: 7, comment: progressBody }],
+    ["comment_file", { issue_number: 7, body: progressBody }],
+    ["post_structured_comment", { issue_number: 7, summary: progressBody }],
+    ["update_structured_comment", { comment_id: 99, summary: "replacement" }],
+    ["delete_issue_comment", { comment_id: 99 }],
+  ] as const) {
+    const result = await callTool(tools, tool, args)
+    expect(result.isError).toBe(true)
+    expect(text(result)).toContain("progress sticky is supervisor-owned")
+  }
+
+  expect((await callTool(tools, "get_issue_context", { issue_number: 7 })).isError).toBeUndefined()
+  const minimize = await callTool(tools, "minimize_comment", { subject_id: "IC_99", classifier: "SPAM" })
+  expect(minimize.isError).toBe(true)
+  expect(text(minimize)).toContain("progress sticky is supervisor-owned")
+  expect(calls.createComment).toHaveLength(0)
+  expect(calls.updateComment).toHaveLength(0)
+  expect(calls.deleteComment).toHaveLength(0)
+  expect(calls.graphql).toHaveLength(0)
 })
 
 test("pr_opened rejects malicious publication targets before finalization and hides unsafe mutations", async () => {

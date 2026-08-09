@@ -147,7 +147,7 @@ test("finalizes progress for every acted workflow before cleanup", () => {
   expect(cleanup).toBeGreaterThan(finalizer)
   const block = workflow.slice(freshToken, cleanup)
   expect(block).toContain("if: always() && steps.route.outputs.act == 'true'")
-  expect(block).toContain("GH_TOKEN: ${{ steps.finalizer_token.outputs.token || steps.base.outputs.token }}")
+  expect(block).toContain("GH_TOKEN: ${{ steps.finalizer_token.outputs.token || steps.interaction.outputs.token }}")
   expect(block).toContain("CCHP_WRITE_OUTCOME: ${{ steps.write.outcome }}")
   expect(block).toContain("CCHP_NEEDS_WRITE: ${{ steps.route.outputs.needs_write }}")
   expect(block).toContain("CCHP_INSTALL_OUTCOME: ${{ steps.install_codex.outcome }}")
@@ -156,6 +156,29 @@ test("finalizes progress for every acted workflow before cleanup", () => {
   expect(block).toContain("CCHP_CAPABILITY_OUTCOME: ${{ steps.capability_gate.outcome }}")
   expect(block).toContain("CCHP_SUPERVISOR_OUTCOME: ${{ steps.codex_supervisor.outcome }}")
   expect(block).toContain("src/codex/finalize-workflow-progress.ts")
+})
+
+test("separates read-only routing, interaction publication, and repository write credentials", () => {
+  const workflow = readFileSync(resolve(import.meta.dir, "../../.github/workflows/run.yml"), "utf8")
+  const base = workflow.slice(
+    workflow.indexOf("- name: Mint App token (base"),
+    workflow.indexOf("- name: Checkout engine"),
+  )
+  const interaction = workflow.slice(
+    workflow.indexOf("- name: Mint App token (interaction"),
+    workflow.indexOf("- name: Mint App token (write"),
+  )
+  expect(base).toContain("permission-issues: read")
+  expect(base).toContain("permission-pull-requests: read")
+  expect(base).toContain("permission-discussions: read")
+  expect(base).toContain("permission-organization-projects: read")
+  expect(base).not.toContain("permission-contents: write")
+  expect(interaction).toContain("permission-issues: write")
+  expect(interaction).toContain("permission-pull-requests: write")
+  expect(interaction).toContain("permission-discussions: write")
+  expect(interaction).toContain("permission-contents: read")
+  expect(workflow).toContain("GH_TOKEN: ${{ steps.write.outputs.token || steps.interaction.outputs.token }}")
+  expect(workflow).toContain('CCHP_ROUTE_ACK: "1"')
 })
 
 test("round-trips lifecycle evidence from the exact uploaded artifact id", () => {
@@ -171,9 +194,10 @@ test("round-trips lifecycle evidence from the exact uploaded artifact id", () =>
   const block = workflow.slice(upload)
   expect(block).toContain("id: upload_lifecycle_evidence")
   expect(block).toContain("artifact-ids: ${{ steps.upload_lifecycle_evidence.outputs.artifact-id }}")
-  expect(block).toContain("archive: false")
+  expect(block).toContain("archive: true")
   expect(block).toContain("UPLOADED_SHA256: ${{ steps.upload_lifecycle_evidence.outputs.artifact-digest }}")
-  expect(block).toContain('[[ "$UPLOADED_SHA256" == "$EXPECTED_SHA256" ]]')
+  expect(block).not.toContain('[[ "$UPLOADED_SHA256" == "$EXPECTED_SHA256" ]]')
+  expect(block).toContain("digest-mismatch: error")
   expect(block).toContain("permission-actions: write")
   expect(block).toContain("actions/artifacts/${ARTIFACT_ID}")
   expect(block).toContain("CCHP_LIFECYCLE_ARTIFACT_PATH: ${{ steps.lifecycle_roundtrip_staging.outputs.dir }}/${{ steps.lifecycle_evidence.outputs.filename }}")

@@ -4,6 +4,15 @@ const PERMISSIONS = {
   base: {
     contents: "read",
     metadata: "read",
+    issues: "read",
+    pull_requests: "read",
+    discussions: "read",
+    actions: "read",
+    organization_projects: "read",
+  },
+  interaction: {
+    contents: "read",
+    metadata: "read",
     issues: "write",
     pull_requests: "write",
     discussions: "write",

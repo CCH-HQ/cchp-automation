@@ -113,9 +113,15 @@ test("uses a run-scoped shell home instead of loading runner profiles", () => {
   const env = buildCodexEnvironment({
     HOME: "/home/runner",
     BOT_WORKDIR: workdir,
+    BOT_LOGIN: "cchp-automation[bot]",
+    BOT_GIT_NAME: "cchp-automation[bot]",
+    BOT_SLUG: "cchp-automation",
     BOT_REPO: "CCH-HQ/fixture",
   })
   expect(env.HOME).toBe(join(workdir, "codex-shell-home"))
+  expect(env.BOT_LOGIN).toBe("cchp-automation[bot]")
+  expect(env.BOT_GIT_NAME).toBe("cchp-automation[bot]")
+  expect(env.BOT_SLUG).toBe("cchp-automation")
   expect(statSync(env.HOME!).mode & 0o777).toBe(0o700)
 })
 

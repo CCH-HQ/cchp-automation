@@ -48,6 +48,14 @@ describe("actions lifecycle artifact", () => {
         admissionDenials: 1,
         reservedTokens: 0,
         responsesInFlight: 0,
+        responseLimit: 6,
+        inputTokens: 900,
+        contextInputTokens: 1_100,
+        cachedInputTokens: 400,
+        outputTokens: 334,
+        reasoningOutputTokens: 120,
+        maxResponseTokens: 300,
+        maxContextInputTokens: 220,
       },
     })}\n`)
     writeFileSync(join(codex, "todo.json"), `${JSON.stringify({
@@ -127,7 +135,13 @@ describe("actions lifecycle artifact", () => {
         by_transport: { native_v2: 1, explicit_child: 1 },
         by_terminal_state: { completed: 1, failed: 1, timed_out: 0, interrupted: 0, lost: 0 },
       },
-      usage: { consumed: 1234, reserved: 0, in_flight: 0, limit: 5000, responses: 7, turns: 3, blocking_anomalies: 0, admission_denials: 1 },
+      usage: {
+        consumed: 1234, reserved: 0, in_flight: 0, limit: 5000, responses: 7, turns: 3,
+        blocking_anomalies: 0, admission_denials: 1, response_limit: 6,
+        input_tokens: 900, context_input_tokens: 1_100, cached_input_tokens: 400,
+        output_tokens: 334, reasoning_output_tokens: 120,
+        max_response_tokens: 300, max_context_input_tokens: 220,
+      },
       runtime: { codex_version: "0.146.0", execution_mode: "native_v2" },
       workflow: { finalization_record: "published" },
     })

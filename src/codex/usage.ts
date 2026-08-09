@@ -62,11 +62,19 @@ export interface UsageResult {
   responses: number
   turns: number
   admissionDenials: number
+  responseLimit?: number
+  inputTokens?: number
+  contextInputTokens?: number
+  cachedInputTokens?: number
+  outputTokens?: number
+  reasoningOutputTokens?: number
+  maxResponseTokens?: number
+  maxContextInputTokens?: number
 }
 
 export interface UsageAdmission {
   allowed: boolean
-  reason?: "budget_threshold" | "projected_budget"
+  reason?: "response_limit" | "budget_threshold" | "projected_budget"
   consumed: number
   limit: number
   threshold: number
@@ -114,6 +122,7 @@ export interface UsageLedgerOptions {
   assertWriterOwnership?: () => void
   admissionFraction?: number
   writerFence?: { writerId: string; generation: number }
+  maxResponsesPerTurn?: number
 }
 
 interface UsageReservation {
@@ -180,6 +189,9 @@ export class UsageLedger {
     }
     if (options.admissionFraction !== undefined && (!Number.isFinite(options.admissionFraction) || options.admissionFraction <= 0 || options.admissionFraction > 1)) {
       throw new Error("token admission fraction must be within (0, 1]")
+    }
+    if (options.maxResponsesPerTurn !== undefined && (!Number.isSafeInteger(options.maxResponsesPerTurn) || options.maxResponsesPerTurn <= 0)) {
+      throw new Error("max responses per turn must be a positive integer")
     }
     if (options.writerFence && (
       !options.writerFence.writerId || !Number.isSafeInteger(options.writerFence.generation) || options.writerFence.generation < 1
@@ -295,6 +307,7 @@ export class UsageLedger {
     const scopedTurn = `${input.billingScopeId}\0${input.turnId}`
     const records = this.recordsByScopedTurn.get(scopedTurn) ?? []
     const turnReservations = [...this.reservations.values()].filter((reservation) => reservation.scopedTurn === scopedTurn)
+    const recoveredTurnReservations = [...this.recoveredReservations.values()].filter((reservation) => reservation.scopedTurn === scopedTurn)
     const matchesModel = (record: RawUsageRecord): boolean =>
       (!input.provider || record.provider === input.provider) && (!input.model || record.model === input.model)
     const prior = [...records].reverse().find(matchesModel) ?? (
@@ -312,7 +325,12 @@ export class UsageLedger {
     const reservedBefore = [...this.reservations.values()].reduce((sum, reservation) => sum + reservation.estimatedTokens, 0)
     const responsesInFlightBefore = turnReservations.length
     let reason: UsageAdmission["reason"]
-    if (this.consumed + reservedBefore >= threshold) {
+    if (
+      this.options.maxResponsesPerTurn !== undefined &&
+      records.length + turnReservations.length + recoveredTurnReservations.length >= this.options.maxResponsesPerTurn
+    ) {
+      reason = "response_limit"
+    } else if (this.consumed + reservedBefore >= threshold) {
       reason = "budget_threshold"
     } else if (this.consumed + reservedBefore + estimatedNextTokens > threshold) {
       reason = "projected_budget"
@@ -469,6 +487,23 @@ export class UsageLedger {
     const reservations = [...this.reservations.values()]
     const state: TokenBudgetState =
       fraction >= 1 ? "exceeded" : fraction >= 0.85 ? "throttled" : fraction >= 0.7 ? "warning" : "normal"
+    const aggregate = this.rawCompletions.reduce((result, record) => ({
+      inputTokens: result.inputTokens + finiteToken(record.inputTokens),
+      contextInputTokens: result.contextInputTokens + finiteToken(record.contextInputTokens),
+      cachedInputTokens: result.cachedInputTokens + finiteToken(record.cachedInputTokens),
+      outputTokens: result.outputTokens + finiteToken(record.outputTokens),
+      reasoningOutputTokens: result.reasoningOutputTokens + finiteToken(record.reasoningOutputTokens),
+      maxResponseTokens: Math.max(result.maxResponseTokens, finiteToken(record.totalTokens)),
+      maxContextInputTokens: Math.max(result.maxContextInputTokens, finiteToken(record.contextInputTokens)),
+    }), {
+      inputTokens: 0,
+      contextInputTokens: 0,
+      cachedInputTokens: 0,
+      outputTokens: 0,
+      reasoningOutputTokens: 0,
+      maxResponseTokens: 0,
+      maxContextInputTokens: 0,
+    })
     return {
       acceptedRaw,
       consumed: this.consumed,
@@ -481,6 +516,8 @@ export class UsageLedger {
       responses: this.rawCompletions.length,
       turns: this.recordsByScopedTurn.size,
       admissionDenials: this.admissionDenials,
+      ...(this.options.maxResponsesPerTurn !== undefined ? { responseLimit: this.options.maxResponsesPerTurn } : {}),
+      ...aggregate,
     }
   }
 
