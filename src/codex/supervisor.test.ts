@@ -1081,6 +1081,7 @@ test("runs one durable same-thread continuation before failing a full review wit
   const workdir = mkdtempSync(join(tmpdir(), "cchp-supervisor-full-review-required-"))
   let supervisor!: Supervisor
   const turnStarts: Array<Record<string, unknown>> = []
+  let continuationCompleted = false
   const fake = {
     start: async () => ({ userAgent: "fake" }),
     request: async (method: string, params?: Record<string, unknown>) => {
@@ -1096,10 +1097,13 @@ test("runs one durable same-thread continuation before failing a full review wit
             method: "turn/completed",
             params: { threadId: "root", turn: { id: "initial-turn", status: "completed" } },
           }), 0)
-          setTimeout(() => void supervisor.handleNotification({
-            method: "turn/completed",
-            params: { threadId: "root", turn: { id: turnId, status: "completed" } },
-          }), 5)
+          setTimeout(() => {
+            continuationCompleted = true
+            void supervisor.handleNotification({
+              method: "turn/completed",
+              params: { threadId: "root", turn: { id: turnId, status: "completed" } },
+            })
+          }, 5)
         } else {
           queueMicrotask(() => void supervisor.handleNotification({
             method: "turn/completed",
@@ -1110,7 +1114,7 @@ test("runs one durable same-thread continuation before failing a full review wit
       }
       if (method === "thread/read") return { thread: { id: "root", turns: [
         { id: "initial-turn", status: "completed", items: [] },
-        ...(turnStarts.length > 1 ? [{
+        ...(continuationCompleted ? [{
           id: "continuation-turn",
           status: "completed",
           items: [{ type: "userMessage", clientId: turnStarts[1]?.clientUserMessageId }],
