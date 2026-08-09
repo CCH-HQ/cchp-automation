@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto"
-import { closeSync, constants, fstatSync, openSync, readFileSync } from "node:fs"
+import { closeSync, constants, fstatSync, lstatSync, openSync, readFileSync } from "node:fs"
 import { resolve } from "node:path"
 
 export interface FileSnapshot {
@@ -49,6 +49,14 @@ export function openRegularFileSnapshot(path: string, options: FileSnapshotOptio
     options.afterOpen?.(path, descriptor)
     const bytes = readFileSync(descriptor)
     const after = fstatSync(descriptor)
+    let pathnameStillBound = false
+    try {
+      const currentPath = lstatSync(path)
+      pathnameStillBound = currentPath.dev === before.dev && currentPath.ino === before.ino
+    } catch {
+      // A path replacement or removal is safe here: the descriptor remains the
+      // immutable snapshot that was opened and hashed above.
+    }
     if (
       before.dev !== after.dev ||
       before.ino !== after.ino ||
@@ -57,7 +65,18 @@ export function openRegularFileSnapshot(path: string, options: FileSnapshotOptio
       before.ctimeMs !== after.ctimeMs ||
       before.mode !== after.mode ||
       before.nlink !== after.nlink
-    ) throw new Error(`file changed while snapshotting: ${path}`)
+    ) {
+      const contentMetadataChanged =
+        before.dev !== after.dev ||
+        before.ino !== after.ino ||
+        before.size !== after.size ||
+        before.mtimeMs !== after.mtimeMs ||
+        before.mode !== after.mode ||
+        before.nlink !== after.nlink
+      if (contentMetadataChanged || (pathnameStillBound && before.ctimeMs !== after.ctimeMs)) {
+        throw new Error(`file changed while snapshotting: ${path}`)
+      }
+    }
     return { path, bytes, sha256: createHash("sha256").update(bytes).digest("hex"), nlink: after.nlink }
   } finally {
     closeSync(descriptor)
