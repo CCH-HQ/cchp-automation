@@ -36,6 +36,7 @@ SH
   REPO_DIR="${test_root}/repo" \
   BOT_PROMPT_FILE="${test_root}/prompt.md" \
   BOT_REPO="CCH-HQ/fixture" \
+  GITHUB_ACTIONS=false \
   CCHP_APP_CLIENT_ID="fixture-client" \
   CCHP_APP_PRIVATE_KEY="fixture-private-key" \
   CCHP_NEEDS_WRITE="$needs_write" \
@@ -120,6 +121,7 @@ SH
   BOT_PROMPT_FILE="${test_root}/prompt.md" \
   BOT_REPO="CCH-HQ/fixture" \
   BOT_TASK="manual" \
+  GITHUB_ACTIONS=false \
   GH_TOKEN="fixture-token" \
   GITHUB_RUN_ID="123" \
   GITHUB_RUN_ATTEMPT="2" \
