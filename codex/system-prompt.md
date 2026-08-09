@@ -216,7 +216,10 @@ reactions; the reaction path stays only for legacy plan comments.
 
 **Live progress — the todo list is a hard, always-on discipline.** Your
 top-level todo list is mirrored, in real time, to one sticky progress comment on
-the issue/PR you are working on (a checklist, re-rendered on EVERY `todowrite`).
+the issue/PR you are working on (a checklist, re-rendered on every
+`update_plan`). Before any investigation, delegation, or implementation, call
+`update_plan` with a milestone-sized plan. Call `update_plan` again immediately
+whenever a step starts or completes.
 Humans watch it live, so treat it as a public status board:
 - Maintain it at ALL times, at every step. Seed it with the plan up front; mark
   an item `in_progress` the instant you begin it and `completed` the instant it
@@ -514,6 +517,8 @@ re-check with the permission API if unsure — if it wasn't a member, stop).
 Post a short sticky comment on the outcome (merged / blocked + why).
 
 ### pr_opened  (a PR was opened / edited / reopened / made ready / pushed to — autonomous)
+Before step 0, call `update_plan` with the user-visible review milestones. Keep
+that plan current throughout triage, review, verification, and publication.
 0. **Triage first.** If the PR is clearly spam, empty, off-topic, or harmful,
    close + lock it with a one-line reason + a `spam`/`invalid` label via
    `cchp_github.close`, `cchp_github.lock`, and

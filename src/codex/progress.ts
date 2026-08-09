@@ -73,6 +73,18 @@ export class ProgressTracker {
   private readonly publicationWaiters: Array<{ version: number; resolve: () => void }> = []
   publishError?: string
 
+  get hasReceivedPlan(): boolean {
+    return this.revision > 0
+  }
+
+  get hasUsablePlan(): boolean {
+    return this.todos.length > 0
+  }
+
+  get stepCount(): number {
+    return this.todos.length
+  }
+
   constructor(private readonly options: ProgressTrackerOptions) {
     if (!existsSync(options.path)) return
     const stat = lstatSync(options.path)
@@ -115,6 +127,7 @@ export class ProgressTracker {
     usage?: { consumed: number; limit: number; state: string }
     semanticAgeMs?: number
     warning?: string
+    planState?: "awaiting_first_update" | "empty_update"
   }, signal?: AbortSignal): Promise<void> {
     await this.publish(details, signal)
   }
@@ -141,6 +154,7 @@ export class ProgressTracker {
       usage?: { consumed: number; limit: number; state: string }
       semanticAgeMs?: number
       warning?: string
+      planState?: "awaiting_first_update" | "empty_update"
     } = {},
     signal?: AbortSignal,
   ): Promise<void> {
@@ -158,6 +172,11 @@ export class ProgressTracker {
       details.semanticAgeMs === undefined
         ? undefined
         : `Last semantic progress: ${Math.floor(details.semanticAgeMs / 1000)}s ago`,
+      details.planState === "awaiting_first_update"
+        ? "Plan: awaiting first update"
+        : details.planState === "empty_update"
+          ? "Plan: empty update received"
+          : undefined,
       details.warning ? `⚠️ ${details.warning}` : undefined,
     ].filter(Boolean)
     const body = `${renderProgress(this.todos, this.options.task)}\n\n${metadata.join(" · ")}`
@@ -177,10 +196,19 @@ export class ProgressTracker {
       if (targetVersion <= this.completedPublicationVersion) resolve()
       else this.publicationWaiters.push({ version: targetVersion, resolve })
     })
-    this.publicationLoop ??= this.drainPublications().finally(() => {
-      this.publicationLoop = undefined
-    })
+    this.ensurePublicationLoop()
     await completed
+  }
+
+  private ensurePublicationLoop(): void {
+    if (this.publicationLoop) return
+    const loop = this.drainPublications().finally(() => {
+      if (this.publicationLoop === loop) this.publicationLoop = undefined
+      // A publication can arrive after drainPublications observes an empty
+      // queue but before this finally callback clears the settled loop.
+      if (this.pendingPublication) this.ensurePublicationLoop()
+    })
+    this.publicationLoop = loop
   }
 
   private async drainPublications(): Promise<void> {
