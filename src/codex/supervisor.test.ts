@@ -553,7 +553,6 @@ test("preserves a whole-run timeout that begins while the external finalizer is 
   let enteredFinalizer!: () => void
   const finalizerGate = new Promise<void>((resolve) => { releaseFinalizer = resolve })
   const finalizerEntered = new Promise<void>((resolve) => { enteredFinalizer = resolve })
-  const never = new Promise<never>(() => undefined)
   const fake = {
     start: async () => ({ userAgent: "fake" }),
     request: async (method: string) => {
@@ -565,7 +564,7 @@ test("preserves a whole-run timeout that begins while the external finalizer is 
         }))
         return { turn: { id: "turn" } }
       }
-      if (method === "turn/interrupt") return never
+      if (method === "turn/interrupt") return {}
       return {}
     },
     stop: async () => 0,
