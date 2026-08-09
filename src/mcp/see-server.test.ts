@@ -49,6 +49,91 @@ test("uploads one validated file without exposing the SEE key in argv or parent 
   if (original != null) process.env.SEE_API_KEY = original
 })
 
+test("keeps an in-memory SEE key out of the repository and run-context filesystem", async () => {
+  const value = fixture()
+  unlinkSync(value.keyFile)
+  const calls: Array<Record<string, string>> = []
+  const created = createSeeServer({
+    repoDir: value.repoDir,
+    botWorkdir: join(value.root, "work"),
+    apiKey: "memory-only-key",
+    seeBin: "/opt/see",
+    env: { PATH: "/usr/bin" },
+    run: async (_argv, env) => {
+      calls.push(env)
+      return { exitCode: 0, stdout: '{"url":"https://s.ee/f/memory"}', stderr: "" }
+    },
+  })
+  await expect(created.uploadFile(value.file)).resolves.toMatchObject({ url: "https://s.ee/f/memory" })
+  expect(calls[0]?.SEE_API_KEY).toBe("memory-only-key")
+  expect(existsSync(value.keyFile)).toBe(false)
+})
+
+test("uses a capability-minimal environment when no explicit SEE environment is supplied", async () => {
+  const value = fixture()
+  const original = {
+    PATH: process.env.PATH,
+    CCHP_CODEX_BRIDGE_TOKEN: process.env.CCHP_CODEX_BRIDGE_TOKEN,
+    CCHP_GITHUB_BROKER_TOKEN: process.env.CCHP_GITHUB_BROKER_TOKEN,
+  }
+  process.env.PATH = "/usr/bin"
+  process.env.CCHP_CODEX_BRIDGE_TOKEN = "bridge-secret"
+  process.env.CCHP_GITHUB_BROKER_TOKEN = "broker-secret"
+  const calls: Array<Record<string, string>> = []
+  try {
+    const created = createSeeServer({
+      repoDir: value.repoDir,
+      botWorkdir: join(value.root, "work"),
+      apiKey: "memory-only-key",
+      seeBin: "/opt/see",
+      run: async (_argv, env) => {
+        calls.push(env)
+        return { exitCode: 0, stdout: '{"url":"https://s.ee/f/minimal"}', stderr: "" }
+      },
+    })
+    await created.uploadFile(value.file)
+  } finally {
+    for (const [name, valueToRestore] of Object.entries(original)) {
+      if (valueToRestore == null) delete process.env[name]
+      else process.env[name] = valueToRestore
+    }
+  }
+  expect(calls[0]).not.toHaveProperty("CCHP_CODEX_BRIDGE_TOKEN")
+  expect(calls[0]).not.toHaveProperty("CCHP_GITHUB_BROKER_TOKEN")
+  expect(calls[0]?.HOME).toBe(join(value.root, "work", "ctx", "see", "home"))
+  expect(calls[0]?.TMPDIR).toBe(join(value.root, "work", "ctx", "see", "tmp"))
+})
+
+test("rejects forbidden credential bytes from an otherwise allowed upload", async () => {
+  const value = fixture()
+  writeFileSync(value.file, "safe prefix\nembedded-secret\nsafe suffix")
+  const created = createSeeServer({
+    repoDir: value.repoDir,
+    botWorkdir: join(value.root, "work"),
+    apiKey: "memory-only-key",
+    seeBin: "/opt/see",
+    forbiddenValues: () => ["embedded-secret"],
+    run: async () => { throw new Error("must not run") },
+  })
+  await expect(created.uploadFile(value.file)).rejects.toThrow("credential material")
+})
+
+test("rejects a run-scoped SEE binary whose content no longer matches provenance", async () => {
+  const value = fixture()
+  const seeBin = join(value.root, "work", "ctx", "tools", "see")
+  mkdirSync(dirname(seeBin), { recursive: true })
+  writeFileSync(seeBin, "tampered", { mode: 0o700 })
+  const created = createSeeServer({
+    repoDir: value.repoDir,
+    botWorkdir: join(value.root, "work"),
+    apiKey: "memory-only-key",
+    seeBin,
+    seeSha256: "ab".repeat(32),
+    run: async () => { throw new Error("must not run an unverified SEE binary") },
+  })
+  await expect(created.uploadFile(value.file)).rejects.toThrow("provenance verification failed")
+})
+
 test("uploads an immutable private snapshot when the original pathname is replaced", async () => {
   const value = fixture()
   let snapshot = ""

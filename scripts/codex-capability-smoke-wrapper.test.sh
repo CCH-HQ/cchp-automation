@@ -17,7 +17,7 @@ cat >"$fixture_root/bin/bun" <<'EOF'
 set -euo pipefail
 printf '%s\n' "$CCHP_SMOKE_MODE" >>"${FAKE_SMOKE_TRACE:?}"
 if [[ "$CCHP_SMOKE_MODE" == "native-v2" ]]; then exit 17; fi
-printf '{"schema_version":1,"run_id":"run-42-2","status":"passed","collaborationMode":"explicit-exec","workspace_write":{"status":"passed","thread_completed":true,"apply_patch":"passed","ordinary_repo_write":"passed","git_metadata_protected":"passed","agents_metadata_protected":"passed","enforcement":"direct"}}\n' >"$CCHP_SMOKE_ARTIFACT_DIR/capability-$CCHP_SMOKE_MODE.json"
+printf '{"schema_version":2,"run_id":"run-42-2","status":"passed","collaborationMode":"explicit-exec","workspace_write":{"status":"passed","thread_completed":true,"apply_patch":"passed","ordinary_repo_write":"passed","app_server_long_lived_secrets_absent":"passed","shell_capabilities_excluded":"passed","shell_snapshot_directory_absent":"passed","external_network":{"result":"policy-blocked","reason":"proxy-structured-denial","probe_target":"https://example.com","configured_enforcement":"direct"},"git_metadata_protected":"passed","agents_metadata_protected":"passed","configured_enforcement":"direct"}}\n' >"$CCHP_SMOKE_ARTIFACT_DIR/capability-$CCHP_SMOKE_MODE.json"
 EOF
 chmod +x "$fixture_root/bin/bun"
 

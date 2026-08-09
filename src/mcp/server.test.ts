@@ -179,6 +179,7 @@ function fakeOctokit(opts: FakeOpts = {}) {
     merge: [] as Record<string, unknown>[],
     createReview: [] as Record<string, unknown>[],
     createComment: [] as Record<string, unknown>[],
+    getComment: [] as Record<string, unknown>[],
     updateComment: [] as Record<string, unknown>[],
     checksCreate: [] as Record<string, unknown>[],
     checksUpdate: [] as Record<string, unknown>[],
@@ -225,6 +226,13 @@ function fakeOctokit(opts: FakeOpts = {}) {
       },
       issues: {
         createComment: async (p: Record<string, unknown>) => (calls.createComment.push(p), { data: { id: 11, html_url: "https://gh/c/11" } }),
+        getComment: async (p: Record<string, unknown>) => {
+          calls.getComment.push(p)
+          const comment = opts.issueComments?.find((entry) =>
+            Boolean(entry) && typeof entry === "object" && (entry as { id?: unknown }).id === p.comment_id,
+          )
+          return { data: comment ?? { id: p.comment_id, user: { login: "cchp-bot[bot]" } } }
+        },
         updateComment: async (p: Record<string, unknown>) => (calls.updateComment.push(p), { data: { id: p.comment_id, html_url: "https://gh/c/up" } }),
         addLabels: async (p: Record<string, unknown>) => (calls.addLabels.push(p), { data: [] }),
         listComments: list(opts.issueComments ?? []),
@@ -562,6 +570,21 @@ test("a validation failure surfaces as an isError text result, not a throw", asy
   expect(text(res)).toContain("error: invalid title length")
 })
 
+test("update_structured_comment binds ownership to the trusted bot login", async () => {
+  const { octokit, calls } = fakeOctokit({
+    issueComments: [{ id: 42, user: { login: "cchp-bot[bot]" } }],
+  })
+  const tools = buildTools({
+    octokit,
+    repo: REPO,
+    env: { BOT_TASK: "engage", BOT_LOGIN: "cchp-bot[bot]" },
+  })
+  const result = await callTool(tools, "update_structured_comment", { comment_id: 42, summary: "done" })
+  expect(result.isError).toBeUndefined()
+  expect(calls.getComment).toEqual([{ owner: "CCH-HQ", repo: "repo", comment_id: 42 }])
+  expect(calls.updateComment).toHaveLength(1)
+})
+
 test("artifact tools write only fixed supervisor-guarded paths outside the read-only clone", async () => {
   const workdir = mkdtempSync(join(tmpdir(), "mcp-artifacts-"))
   mkdirSync(join(workdir, "ctx", "review"), { recursive: true })
@@ -586,7 +609,7 @@ test("artifact tools write only fixed supervisor-guarded paths outside the read-
 
 test("set_pr_title delegates to meta.setPrTitle", async () => {
   const { octokit, calls } = fakeOctokit()
-  const tools = buildTools({ octokit, repo: REPO, env: { BOT_TASK: "engage" } })
+  const tools = buildTools({ octokit, repo: REPO, env: { BOT_TASK: "engage", BOT_LOGIN: "bot[bot]" } })
   const res = await callTool(tools, "set_pr_title", { pr_number: 5, title: "feat: retitle" })
   expect(res.isError).toBeUndefined()
   expect(calls.pullsUpdate[0]).toMatchObject({ owner: "CCH-HQ", repo: "repo", pull_number: 5, title: "feat: retitle" })
@@ -626,7 +649,7 @@ test("pr_opened title and triage tools bind BOT_PR_NUMBER and keep the close pur
 
 test("upsert_sticky_comment creates a marker-tagged comment when none exists", async () => {
   const { octokit, calls } = fakeOctokit({ issueComments: [] })
-  const tools = buildTools({ octokit, repo: REPO, env: { BOT_TASK: "engage" } })
+  const tools = buildTools({ octokit, repo: REPO, env: { BOT_TASK: "engage", BOT_LOGIN: "bot[bot]" } })
   const res = await callTool(tools, "upsert_sticky_comment", { issue_number: 7, sticky_key: "cifix", body: "overview" })
   expect(text(res)).toContain('"action":"created"')
   expect(calls.createComment[0]!.body).toContain("<!-- cchp-bot:cifix -->")
@@ -677,7 +700,16 @@ test("pr_opened review publication fails closed before any GitHub write when fin
 
 test("update_check_run uses only the run-created Check Run and rejects model-selected ids", async () => {
   const { octokit, calls } = fakeOctokit()
-  const tools = buildTools({ octokit, repo: REPO, env: { BOT_TASK: "ci_fix", BOT_HEAD_SHA: "a".repeat(40), BOT_RUN_ID: "123" } })
+  const tools = buildTools({
+    octokit,
+    repo: REPO,
+    env: {
+      BOT_TASK: "ci_fix",
+      BOT_HEAD_SHA: "a".repeat(40),
+      BOT_RUN_ID: "engine-2-random",
+      CCHP_WORKFLOW_RUN_ID: "123",
+    },
+  })
   const beforeCreate = await callTool(tools, "update_check_run", {
     status: "completed", title: "Blocked", summary: "1 finding",
   })
@@ -685,6 +717,7 @@ test("update_check_run uses only the run-created Check Run and rejects model-sel
   expect(text(beforeCreate)).toContain("create_check_run")
 
   expect((await callTool(tools, "create_check_run", {})).isError).toBeUndefined()
+  expect(calls.checksCreate[0]).toMatchObject({ external_id: "123" })
   const ok = await callTool(tools, "update_check_run", {
     status: "completed",
     conclusion: "failure",

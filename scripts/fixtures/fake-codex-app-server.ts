@@ -14,7 +14,7 @@ function send(value: unknown): void {
   process.stdout.write(`${JSON.stringify(value)}\n`)
 }
 
-if (scenario === "ignore_signals") {
+if (scenario === "ignore_signals" || scenario === "leader_exits") {
   process.on("SIGINT", () => trace("SIGINT"))
   process.on("SIGTERM", () => trace("SIGTERM"))
   const descendant = Bun.spawn(["sh", "-c", "trap '' INT TERM; while :; do sleep 1; done"], {
@@ -39,6 +39,7 @@ async function accept(line: string): Promise<void> {
   if (message.method === "initialized") {
     if (scenario === "crash") process.exit(23)
     if (scenario === "malformed") process.stdout.write("{not-json}\n")
+    if (scenario === "leader_exits") process.exit(0)
     return
   }
   if (message.method === "thread/read") {
@@ -90,6 +91,6 @@ while (true) {
 
 if (buffer.trim()) await accept(buffer.trim())
 
-if (scenario === "ignore_signals") {
+if (scenario === "ignore_signals" || scenario === "leader_exits") {
   await new Promise<never>(() => undefined)
 }

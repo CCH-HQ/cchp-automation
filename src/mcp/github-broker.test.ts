@@ -67,6 +67,7 @@ function fakeClient(options: FakeClientOptions = {}) {
           return { data: { number: args.issue_number, node_id: `ISSUE_${args.issue_number}`, pull_request: undefined } }
         },
         listComments: async (args: Record<string, unknown>) => { calls.push({ operation: "issues.listComments", args }); return [{ id: 91, node_id: "IC_91" }] },
+        getComment: async (args: Record<string, unknown>) => { calls.push({ operation: "issues.getComment", args }); return { data: { id: args.comment_id, node_id: `IC_${args.comment_id}`, user: { login: "cchp-bot[bot]" } } } },
         createComment: async (args: Record<string, unknown>) => { calls.push({ operation: "issues.createComment", args }); return { data: { id: 2 } } },
         updateComment: async (args: Record<string, unknown>) => { calls.push({ operation: "issues.updateComment", args }); return { data: { id: args.comment_id } } },
         listMilestones: async (args: Record<string, unknown>) => {
@@ -194,6 +195,8 @@ async function withBroker(
     repoDir?: string
     allowRepositoryMutation?: boolean
     herouiAuthToken?: string
+    seeUpload?: (path: string, name?: string, isPrivate?: boolean) => Promise<unknown>
+    forbiddenValues?: () => readonly string[]
     runCommand?: RunCommand
   } = {},
 ): Promise<void> {
@@ -218,6 +221,8 @@ async function withBroker(
     repoDir: options.repoDir,
     allowRepositoryMutation: options.allowRepositoryMutation,
     herouiAuthToken: options.herouiAuthToken,
+    seeUpload: options.seeUpload,
+    forbiddenValues: options.forbiddenValues,
     runCommand: options.runCommand,
   })
   try {
@@ -323,6 +328,47 @@ test("typed host Git and dependency operations use fixed commands, cwd and secre
   expect(calls[2]?.env).not.toHaveProperty("GH_TOKEN")
 })
 
+test("routes SEE uploads through the bounded supervisor-owned capability", async () => {
+  const root = mkdtempSync(join(tmpdir(), "cchp-broker-see-"))
+  const calls: Array<{ path: string; name?: string; isPrivate?: boolean }> = []
+  await withBroker(async (client) => {
+    const seeUpload = (client as unknown as {
+      cchp: { seeUpload(args: { path: string; name?: string; is_private?: boolean }): Promise<unknown> }
+    }).cchp.seeUpload
+    await expect(seeUpload({ path: `${root}/figure.png`, name: "proof.png", is_private: true })).resolves.toEqual({
+      url: "https://s.ee/f/proof",
+      filename: "proof.png",
+    })
+    await expect(seeUpload({ path: "" })).rejects.toThrow("non-empty")
+    await expect(seeUpload({ path: `${root}/figure.png`, unexpected: true } as never)).rejects.toThrow("unexpected fields")
+    await expect(seeUpload({ path: `${root}/bridge-secret-sentinel` })).rejects.toThrow("credential material")
+  }, {
+    task: "manual",
+    noDefaultTarget: true,
+    repoDir: root,
+    seeUpload: async (path, name, isPrivate) => {
+      calls.push({ path, name, isPrivate })
+      return { url: "https://s.ee/f/proof", filename: name }
+    },
+    forbiddenValues: () => ["bridge-secret-sentinel"],
+  })
+  expect(calls).toEqual([{ path: `${root}/figure.png`, name: "proof.png", isPrivate: true }])
+})
+
+test("rejects raw multiline credentials before broker mutations", async () => {
+  const secret = "-----BEGIN PRIVATE KEY-----\nline\\\"value\n-----END PRIVATE KEY-----"
+  await withBroker(async (client) => {
+    const cchp = (client as unknown as { cchp: { seeUpload(args: Record<string, unknown>): Promise<unknown> } }).cchp
+    await expect(cchp.seeUpload({ path: "fixture.txt", name: secret })).rejects.toThrow("credential material")
+  }, {
+    task: "manual",
+    noDefaultTarget: true,
+    repoDir: "/tmp/cchp-broker-secret-fixture",
+    seeUpload: async () => ({ url: "https://s.ee/f/should-not-run" }),
+    forbiddenValues: () => [secret],
+  })
+})
+
 test("typed Git mutation and dependency installation fail closed for read-only runs", async () => {
   const root = mkdtempSync(join(tmpdir(), "cchp-broker-read-only-"))
   mkdirSync(join(root, "web"), { recursive: true })
@@ -384,9 +430,12 @@ test("targeted operations fail closed when the broker has no trusted target bind
 
 test("comment updates require a trusted or previously discovered comment id", async () => {
   await withBroker(async (client) => {
+    await expect(client.rest.issues.getComment({ owner: "CCH-HQ", repo: "fixture", comment_id: 999 })).rejects.toThrow("comment")
     await expect(client.rest.issues.updateComment({ owner: "CCH-HQ", repo: "fixture", comment_id: 999, body: "x" })).rejects.toThrow("comment")
     await client.rest.issues.listComments({ owner: "CCH-HQ", repo: "fixture", issue_number: 9 })
+    await expect(client.rest.issues.getComment({ owner: "CCH-HQ", repo: "fixture", comment_id: 91 })).resolves.toMatchObject({ data: { id: 91 } })
     await expect(client.rest.issues.updateComment({ owner: "CCH-HQ", repo: "fixture", comment_id: 91, body: "x" })).resolves.toMatchObject({ data: { id: 91 } })
+    await expect(client.rest.issues.getComment({ owner: "CCH-HQ", repo: "fixture", comment_id: 77 })).resolves.toMatchObject({ data: { id: 77 } })
     await expect(client.rest.issues.updateComment({ owner: "CCH-HQ", repo: "fixture", comment_id: 77, body: "x" })).resolves.toMatchObject({ data: { id: 77 } })
   }, { task: "engage", target: 9, targetKind: "issue", trustedCommentId: 77 })
 })
@@ -611,7 +660,7 @@ test("requires a complete finalizer attestation before publication", async () =>
   })
 })
 
-test("marker replacement after authorization fails closed before publication", async () => {
+test("marker replacement while snapshotting fails closed before publication", async () => {
   let replaced = false
   await withBroker(async (client, marker) => {
     writeFileSync(marker, JSON.stringify(finalizedMarker()))
@@ -620,7 +669,7 @@ test("marker replacement after authorization fails closed before publication", a
       repo: "fixture",
       issue_number: 42,
       body: "review",
-    })).rejects.toThrow("finalization marker changed")
+    })).rejects.toThrow("finalization marker")
     expect(replaced).toBe(true)
     expect(JSON.parse(readFileSync(marker, "utf8"))).toEqual({ valid: false })
   }, {

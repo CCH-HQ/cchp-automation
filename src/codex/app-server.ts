@@ -1,6 +1,9 @@
-import { existsSync, readFileSync, unlinkSync } from "node:fs"
-import { durableWriteFile } from "./durable-file"
-import { processIdentity, type RunFence } from "./run-lock"
+import { existsSync } from "node:fs"
+import { spawnSync } from "node:child_process"
+import { resolve } from "node:path"
+import { attachRecordHmac, validateRecordHmacKey } from "./authenticated-record"
+import { durableCreateFile } from "./durable-file"
+import { processIdentity, sameProcessIdentity, type ProcessIdentity, type RunFence } from "./run-lock"
 
 export interface JsonRpcNotification {
   method: string
@@ -176,12 +179,14 @@ export interface CodexAppServerOptions {
   onExit?(event: CodexAppServerExit): void | Promise<void>
   requestTimeoutMs?: number
   processRecordPath?: string
+  processRecordHmacKey?: string
   runId?: string
   writerFence?: Pick<RunFence, "writerId" | "generation">
+  beforeProcessRecordRemoval?: () => void
 }
 
 export interface AppServerProcessRecord {
-  schemaVersion: 1
+  schemaVersion: 2
   pid: number
   pgid: number
   startTicks: string
@@ -190,7 +195,10 @@ export interface AppServerProcessRecord {
   runId?: string
   writerId?: string
   writerGeneration?: number
+  githubRunId?: string
+  githubRunAttempt?: string
   createdAt: string
+  mac: string
 }
 
 export interface CodexAppServerExit {
@@ -237,6 +245,8 @@ export class CodexAppServer {
   private stopping = false
   private exitReported = false
   private pidRecord?: { path: string; record: AppServerProcessRecord }
+  private processRecordRemovalError?: Error
+  private launchedIdentity?: ProcessIdentity
 
   constructor(private readonly options: CodexAppServerOptions) {}
 
@@ -244,6 +254,7 @@ export class CodexAppServer {
     if (this.process) throw new Error("Codex app-server already started")
     this.stopping = false
     this.exitReported = false
+    this.processRecordRemovalError = undefined
     let child: ReturnType<typeof Bun.spawn>
     try {
       child = Bun.spawn([this.options.codexBin, "app-server", "--stdio", "--strict-config"], {
@@ -265,11 +276,12 @@ export class CodexAppServer {
       throw error
     }
     this.process = child
+    this.launchedIdentity = processIdentity(child.pid)
     const processRecordPath = this.options.processRecordPath ?? process.env.CCHP_CODEX_PID_FILE
     if (processRecordPath) {
-      const identity = processIdentity(child.pid)
-      const record: AppServerProcessRecord = {
-        schemaVersion: 1,
+      const identity = this.launchedIdentity
+      const payload = {
+        schemaVersion: 2 as const,
         pid: child.pid,
         pgid: child.pid,
         startTicks: identity.startTicks,
@@ -277,9 +289,22 @@ export class CodexAppServer {
         codexHome: this.options.codexHome,
         ...(this.options.runId ? { runId: this.options.runId } : {}),
         ...(this.options.writerFence ? { writerId: this.options.writerFence.writerId, writerGeneration: this.options.writerFence.generation } : {}),
+        ...(process.env.GITHUB_RUN_ID ? { githubRunId: process.env.GITHUB_RUN_ID } : {}),
+        ...(process.env.GITHUB_RUN_ATTEMPT ? { githubRunAttempt: process.env.GITHUB_RUN_ATTEMPT } : {}),
         createdAt: new Date().toISOString(),
       }
-      durableWriteFile(processRecordPath, `${JSON.stringify(record, null, 2)}\n`)
+      const record = attachRecordHmac(payload, validateRecordHmacKey(
+        this.options.processRecordHmacKey ?? process.env.CCHP_PROCESS_RECORD_HMAC_KEY,
+      )) as AppServerProcessRecord
+      try {
+        durableCreateFile(processRecordPath, `${JSON.stringify(record, null, 2)}\n`)
+      } catch (error) {
+        try { this.signalProcessGroup(child, "SIGKILL") } catch {}
+        await child.exited.catch(() => undefined)
+        this.process = undefined
+        this.launchedIdentity = undefined
+        throw error
+      }
       this.pidRecord = { path: processRecordPath, record }
     }
     this.peer = new JsonRpcPeer({
@@ -304,7 +329,13 @@ export class CodexAppServer {
         exitCode,
         signalCode: child.signalCode,
       })
-      this.removeOwnedPidRecord()
+      if (!this.processGroupAlive(child.pid)) {
+        try {
+          this.removeOwnedPidRecord()
+        } catch (error) {
+          this.processRecordRemovalError = error instanceof Error ? error : new Error(String(error))
+        }
+      }
       return exitCode
     })
     try {
@@ -360,7 +391,11 @@ export class CodexAppServer {
 
   private async stopInternal(options: CodexAppServerStopOptions): Promise<number> {
     const child = this.process
-    if (!child) return 0
+    if (!child) {
+      this.removeOwnedPidRecord()
+      if (this.processRecordRemovalError) throw this.processRecordRemovalError
+      return 0
+    }
     this.stopping = true
     this.peer?.close("Codex app-server stopped")
     try {
@@ -371,54 +406,54 @@ export class CodexAppServer {
     const interruptGraceMs = options.interruptGraceMs ?? 15_000
     const termGraceMs = options.termGraceMs ?? 15_000
     const killGraceMs = options.killGraceMs ?? 5_000
+    let processGroupStopped = false
     try {
       this.signalProcessGroup(child, "SIGINT")
-      if (!(await this.waitForExit(child, interruptGraceMs))) {
+      if (!(await this.waitForProcessGroupExit(child.pid, interruptGraceMs))) {
         this.signalProcessGroup(child, "SIGTERM")
-        if (!(await this.waitForExit(child, termGraceMs))) {
+        if (!(await this.waitForProcessGroupExit(child.pid, termGraceMs))) {
           this.signalProcessGroup(child, "SIGKILL")
-          if (!(await this.waitForExit(child, killGraceMs))) {
+          if (!(await this.waitForProcessGroupExit(child.pid, killGraceMs))) {
             throw new Error(`Codex app-server process group ${child.pid} did not exit after SIGKILL`)
           }
         }
       }
       const exitCode = await child.exited
       await this.allSettledWithin([this.stdoutTask, this.stderrTask], killGraceMs)
+      processGroupStopped = true
       return exitCode
     } finally {
-      this.process = undefined
-      this.peer = undefined
-      this.stdoutTask = undefined
-      this.stderrTask = undefined
-      this.exitTask = undefined
       this.stopping = false
-      this.removeOwnedPidRecord()
+      if (processGroupStopped) {
+        this.process = undefined
+        this.peer = undefined
+        this.stdoutTask = undefined
+        this.stderrTask = undefined
+        this.exitTask = undefined
+        this.launchedIdentity = undefined
+        this.removeOwnedPidRecord()
+      }
     }
   }
 
   private removeOwnedPidRecord(): void {
     const record = this.pidRecord
-    this.pidRecord = undefined
     if (!record || !existsSync(record.path)) return
-    try {
-      const raw = readFileSync(record.path, "utf8").trim()
-      if (raw === String(record.record.pid)) {
-        unlinkSync(record.path)
-        return
-      }
-      const current = JSON.parse(raw) as Partial<AppServerProcessRecord>
-      const identity = processIdentity(record.record.pid)
-      if (
-        current.schemaVersion === 1
-        && current.pid === record.record.pid
-        && current.startTicks === record.record.startTicks
-        && current.bootId === record.record.bootId
-        && identity.startTicks === record.record.startTicks
-        && identity.bootId === record.record.bootId
-        && (!record.record.writerId || current.writerId === record.record.writerId)
-        && (!record.record.writerGeneration || current.writerGeneration === record.record.writerGeneration)
-      ) unlinkSync(record.path)
-    } catch { /* a newer process record must never be removed by this instance */ }
+    if (this.processGroupAlive(record.record.pgid)) throw new Error("refusing to remove a live Codex app-server process record")
+    this.options.beforeProcessRecordRemoval?.()
+    const key = validateRecordHmacKey(this.options.processRecordHmacKey ?? process.env.CCHP_PROCESS_RECORD_HMAC_KEY)
+    const helper = resolve(import.meta.dir, "../../scripts/secure-unlink.py")
+    const result = spawnSync("python3", [helper, "--path", record.path, "--expected-mac", record.record.mac], {
+      env: { ...process.env, CCHP_RECORD_HMAC_KEY: key },
+      encoding: "utf8",
+    })
+    if (result.status !== 0) {
+      const error = new Error(`Codex app-server process record changed before removal: ${result.stderr.trim() || `exit ${result.status}`}`)
+      this.processRecordRemovalError = error
+      throw error
+    }
+    this.pidRecord = undefined
+    this.processRecordRemovalError = undefined
   }
 
   private async consumeStdout(stream: ReadableStream<Uint8Array>): Promise<void> {
@@ -495,12 +530,30 @@ export class CodexAppServer {
   }
 
   private signalProcessGroup(child: ReturnType<typeof Bun.spawn>, signal: NodeJS.Signals): void {
+    const ownership = this.processGroupOwnership(child.pid)
+    if (ownership === "absent") return
+    if (ownership === "unproven") {
+      throw new Error(`refusing to signal unproven Codex app-server process group ${child.pid}`)
+    }
     try {
       if (process.platform === "win32") child.kill(signal)
       else process.kill(-child.pid, signal)
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error
     }
+  }
+
+  private processGroupOwnership(pgid: number): "live" | "absent" | "unproven" {
+    if (process.platform === "win32") return this.process?.exitCode === null && this.process?.signalCode === null ? "live" : "absent"
+    const identity = this.launchedIdentity
+    if (!identity || identity.pid !== pgid) return "unproven"
+    try {
+      process.kill(identity.pid, 0)
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error
+      return this.processGroupAlive(pgid) ? "unproven" : "absent"
+    }
+    return sameProcessIdentity(identity, processIdentity(identity.pid)) ? "live" : "unproven"
   }
 
   private async waitForExit(child: ReturnType<typeof Bun.spawn>, timeoutMs: number): Promise<boolean> {
@@ -516,6 +569,26 @@ export class CodexAppServer {
     } finally {
       if (timer) clearTimeout(timer)
     }
+  }
+
+  private processGroupAlive(pgid: number): boolean {
+    if (process.platform === "win32") return this.process?.exitCode === null && this.process?.signalCode === null
+    try {
+      process.kill(-pgid, 0)
+      return true
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ESRCH") return false
+      throw error
+    }
+  }
+
+  private async waitForProcessGroupExit(pgid: number, timeoutMs: number): Promise<boolean> {
+    const deadline = Date.now() + Math.max(0, timeoutMs)
+    while (this.processGroupAlive(pgid)) {
+      if (Date.now() >= deadline) return false
+      await Bun.sleep(Math.min(25, Math.max(1, deadline - Date.now())))
+    }
+    return true
   }
 
   private async allSettledWithin(

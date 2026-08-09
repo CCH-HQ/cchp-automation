@@ -81,7 +81,7 @@ export function findByMarker<T extends { body?: string | null }>(
   comments: readonly T[],
   markerKey: string,
 ): T | undefined {
-  const needle = `<!-- ${markerKey}`
+  const needle = `<!-- ${markerKey} -->`
   return comments.find((c) => (c.body ?? "").includes(needle))
 }
 

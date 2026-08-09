@@ -499,7 +499,7 @@ Before production root execution, `codex-capability-smoke.sh` must run in a fres
 3. generated `[features.multi_agent_v2]` is accepted under `--strict-config`;
 4. root can create one `explorer` child;
 5. child completion reaches the direct parent;
-6. parent can `wait_agent`, `send_message`, `followup_task`, `interrupt_agent`; native Codex 0.146.0 has no `close_agent`, so native close is the `interrupt_agent` + `wait_agent` terminal sequence;
+6. parent can `wait_agent`, `send_message`, `followup_task`, `interrupt_agent`; Codex 0.146.0 exposes no `close_agent` in native v2 or its normalized explicit `agents` MCP catalog, so explicit close is `interrupt_agent` + `wait_agent`, while native close is `interrupt_agent` + `list_agents` terminal confirmation;
 7. child and root terminal states are observable through app-server notifications;
 8. a dead-parent completion does not block child termination (the deterministic lost-child/reconcile assertion is covered by `supervisor.test.ts` and the pre-cutover matrix);
 9. per-thread usage is visible through `thread/tokenUsage/updated` or a documented app-server read path;
@@ -529,7 +529,7 @@ The supervisor listens to `collab_tool_call` and graph events, records parent/ch
 
 ### 8.3 Explicit child mode
 
-`src/codex/child-adapter.ts` is mandatory and fully implemented for the shared collaboration contract. Native v2 has no `close_agent` catalog entry; its terminal close semantics are `interrupt_agent` followed by `wait_agent`. The explicit adapter additionally exposes `close_agent` through its MCP server:
+`src/codex/child-adapter.ts` is mandatory and fully implemented for the shared collaboration contract. Codex 0.146.0 normalizes the explicit `agents` MCP server to the same provider-visible collaboration vocabulary as native v2 and filters `close_agent`. The adapter therefore implements terminal close through the operations Codex actually exposes:
 
 | v2 operation | explicit adapter |
 | --- | --- |
@@ -538,7 +538,7 @@ The supervisor listens to `collab_tool_call` and graph events, records parent/ch
 | `followup_task` | `resume` child thread or app-server `turn/start` after terminal state |
 | `wait_agent` | wait on normalized child terminal event with bounded deadline |
 | `interrupt_agent` | `turn/interrupt`, then process-group TERM/KILL if needed |
-| `close_agent` | mark graph edge closed, stop child process/thread and persist reason |
+| terminal close | explicit: `interrupt_agent` + `wait_agent`; native: `interrupt_agent` + `list_agents` terminal confirmation |
 
 Every child gets a stable `run_id`, `parent_run_id`, `child_id`, `role`, `deadline_at`, `sandbox`, `token_scope` and `result_path`. The parent is resumed by the supervisor with a signed result envelope, not by an unbounded model wait.
 
@@ -919,7 +919,7 @@ The migration is accepted only when all gates below are true. A skipped gate is 
 
 - native v2 capability gate passes the live catalog/isolation checks in section 8.1 and the deterministic dead-parent/process-group checks in the pre-cutover matrix, or the explicit child adapter is selected and its full contract passes;
 - root and child concurrency never exceed 10 review workers;
-- spawn, send, followup, wait and interrupt each have a native-v2 and explicit test; explicit `close_agent` and native interrupt+wait close equivalence each have a real test;
+- spawn, send, followup, wait and interrupt each have a native-v2 and explicit test; explicit interrupt+wait and native interrupt+list close equivalence each have a real test;
 - parent wake is delivered exactly once for one child terminal result;
 - no child result is accepted without terminal status and schema-valid result artifact;
 - reviewer child has no write, nested task, shell or GitHub publication path.
@@ -1069,7 +1069,7 @@ Final implementation evidence captured on 2026-08-06:
 - [x] Provider, auth, MCP, sandbox and approval contracts are tested.
 - [x] app-server and exec adapters parse all required events.
 - [x] Native multi-agent v2 gate passes and explicit child fallback is verified.
-- [x] Spawn/wait/send/followup/interrupt and reconcile are implemented for native-v2; explicit fallback additionally implements close_agent.
+- [x] Spawn/wait/send/followup/interrupt and reconcile are implemented for native-v2 and explicit fallback, including each mode's Codex 0.146.0 terminal close sequence.
 - [x] Root/child deadlines and no-progress termination are enforced.
 - [x] TODO and sticky progress are event-driven and root-only.
 - [x] Usage ledger separates raw, cumulative, root and child usage.

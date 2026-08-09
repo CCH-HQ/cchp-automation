@@ -3,6 +3,7 @@ import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import { startCodexExec } from "./exec-adapter"
+import { processIdentity } from "./run-lock"
 
 const fakeCodex = resolve(import.meta.dir, "../../scripts/fixtures/fake-codex-exec.ts")
 chmodSync(fakeCodex, 0o755)
@@ -64,6 +65,84 @@ test("starts a resumable Codex exec turn and drains ordered JSONL before complet
     ])
     expect(invocation.prompt).toBe("inspect the fixture\n")
     expect(invocation.cwd).toBe(root)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test("keeps Codex behind the durable launch barrier until the checkpoint is committed", async () => {
+  const root = mkdtempSync(join(tmpdir(), "cchp-exec-launch-barrier-"))
+  const trace = join(root, "trace.jsonl")
+  let release!: () => void
+  let entered!: (pid: number) => void
+  const gate = new Promise<void>((resolveGate) => { release = resolveGate })
+  const checkpointed = new Promise<number>((resolveCheckpoint) => { entered = resolveCheckpoint })
+  try {
+    const run = startCodexExec({
+      codexBin: fakeCodex,
+      cwd: root,
+      env: { PATH: process.env.PATH ?? "", FAKE_CODEX_EXEC_TRACE: trace },
+      prompt: "checkpointed",
+      beforeExec: async (pid) => {
+        entered(pid)
+        await gate
+      },
+    })
+    expect(await checkpointed).toBe(run.pid)
+    await Bun.sleep(30)
+    expect(existsSync(trace)).toBe(false)
+    release()
+    expect(await run.completed).toMatchObject({ terminal: "completed", lastMessage: "completed:checkpointed" })
+    expect(existsSync(trace)).toBe(true)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test("never executes Codex when the durable launch checkpoint fails", async () => {
+  const root = mkdtempSync(join(tmpdir(), "cchp-exec-launch-reject-"))
+  const trace = join(root, "trace.jsonl")
+  try {
+    const run = startCodexExec({
+      codexBin: fakeCodex,
+      cwd: root,
+      env: { PATH: process.env.PATH ?? "", FAKE_CODEX_EXEC_TRACE: trace },
+      prompt: "must-not-run",
+      beforeExec: () => { throw new Error("checkpoint fsync failed") },
+    })
+    await expect(run.completed).rejects.toThrow("checkpoint fsync failed")
+    expect(existsSync(trace)).toBe(false)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test("a failed durable launch checkpoint does not poison the next Codex exec", async () => {
+  const root = mkdtempSync(join(tmpdir(), "cchp-exec-launch-recovery-"))
+  const rejectedTrace = join(root, "rejected.jsonl")
+  const recoveredTrace = join(root, "recovered.jsonl")
+  try {
+    const rejected = startCodexExec({
+      codexBin: fakeCodex,
+      cwd: root,
+      env: { PATH: process.env.PATH ?? "", FAKE_CODEX_EXEC_TRACE: rejectedTrace },
+      prompt: "must-not-run",
+      beforeExec: () => { throw new Error("checkpoint fsync failed") },
+    })
+    await expect(rejected.completed).rejects.toThrow("checkpoint fsync failed")
+
+    const recovered = startCodexExec({
+      codexBin: fakeCodex,
+      cwd: root,
+      env: { PATH: process.env.PATH ?? "", FAKE_CODEX_EXEC_TRACE: recoveredTrace },
+      prompt: "runs-after-checkpoint-failure",
+    })
+    await expect(recovered.completed).resolves.toMatchObject({
+      terminal: "completed",
+      lastMessage: "completed:runs-after-checkpoint-failure",
+    })
+    expect(existsSync(rejectedTrace)).toBe(false)
+    expect(existsSync(recoveredTrace)).toBe(true)
   } finally {
     rmSync(root, { recursive: true, force: true })
   }
@@ -172,6 +251,34 @@ test("times out with bounded process-group escalation and removes descendants", 
       }
     })
   } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test("refuses to signal a codex exec process after its recorded identity drifts", async () => {
+  const root = mkdtempSync(join(tmpdir(), "cchp-exec-identity-drift-"))
+  let drifted = false
+  const run = startCodexExec({
+    codexBin: fakeCodex,
+    cwd: root,
+    env: { PATH: process.env.PATH ?? "", FAKE_CODEX_EXEC_SCENARIO: "hang" },
+    prompt: "fixture",
+    timeoutMs: 5_000,
+    identifyProcess: (pid) => {
+      const identity = processIdentity(pid)
+      return drifted ? { ...identity, startTicks: `${identity.startTicks}-reused` } : identity
+    },
+  })
+  try {
+    await run.started
+    drifted = true
+    await expect(run.interrupt()).rejects.toThrow("unproven codex exec process group")
+    expect(() => process.kill(run.pid, 0)).not.toThrow()
+  } finally {
+    if (process.platform !== "win32") {
+      try { process.kill(-run.pid, "SIGKILL") } catch { /* already stopped */ }
+    }
+    await run.completed.catch(() => undefined)
     rmSync(root, { recursive: true, force: true })
   }
 })

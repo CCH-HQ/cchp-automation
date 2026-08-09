@@ -29,7 +29,7 @@ fi
 node - "$artifact_dir/summary.json" <<'NODE'
 const summary = require(process.argv[2])
 if (summary.run_id !== "run-77-3" || summary.status !== "failed" || summary.stage !== "tests" || summary.exit_code !== 23) process.exit(1)
-if (summary.phases.tests !== "failed" || summary.phases.typecheck !== "skipped") process.exit(1)
+if (summary.phases.tests !== "failed" || summary.phases.typecheck !== "skipped" || summary.phases.cleanup !== "skipped") process.exit(1)
 NODE
 
 expect_unsafe() {

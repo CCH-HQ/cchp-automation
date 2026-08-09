@@ -22,6 +22,15 @@ export interface SubmitReviewInput {
   comments?: ReviewComment[]
   /** Org-var kill-switch: when true, an APPROVE is downgraded to COMMENT. */
   autoApproveDisabled?: boolean
+  beforeMutation?: () => void | Promise<void>
+}
+
+export interface SubmittedReview {
+  event: Verdict
+  reviewId: number
+  commitId: string
+  state: string
+  htmlUrl: string
 }
 
 export async function submitReview(
@@ -29,7 +38,7 @@ export async function submitReview(
   repo: string,
   prNumber: number,
   input: SubmitReviewInput,
-): Promise<{ event: Verdict }> {
+): Promise<SubmittedReview> {
   let event = input.event
   let body = input.body
   if (event === "APPROVE" && input.autoApproveDisabled) {
@@ -37,11 +46,24 @@ export async function submitReview(
     body = `${body}\n\n_Auto-approve is disabled; posting as a comment instead of an approval._`
   }
   const { owner, name } = splitRepo(repo)
-  await octokit.rest.pulls.createReview({
+  await input.beforeMutation?.()
+  const { data } = await octokit.rest.pulls.createReview({
     owner, repo: name, pull_number: prNumber, event, body, commit_id: input.headSha,
     ...(input.comments ? { comments: input.comments } : {}),
   })
-  return { event }
+  if (!Number.isSafeInteger(data.id) || data.id <= 0) {
+    throw new Error("GitHub createReview response is missing a valid review identity")
+  }
+  if (data.commit_id !== input.headSha || typeof data.state !== "string" || !data.state) {
+    throw new Error("GitHub createReview response binding is invalid")
+  }
+  return {
+    event,
+    reviewId: data.id,
+    commitId: data.commit_id,
+    state: data.state,
+    htmlUrl: data.html_url,
+  }
 }
 
 /** The kill-switch, read from the org/repo variable `CCHP_DISABLE_AUTO_APPROVE`. */

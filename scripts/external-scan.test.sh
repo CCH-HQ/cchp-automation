@@ -22,7 +22,12 @@ grep -Fq 'external-scan-github.ts" changed-files' "$SCAN_SH" || fail "engine Oct
 grep -Fq 'https://github.com/github/codeql-action/releases/download/' "$SCAN_SH" || fail "fixed CodeQL release URL missing"
 grep -Fq 'refs/pull/${BOT_PR_NUMBER}/head' "$SCAN_SH" || fail "base-repo pull head ref fetch missing"
 grep -Fq 'timeout 900' "$SCAN_SH" || fail "semgrep outer timeout missing"
-grep -Fq 'timeout 1500' "$SCAN_SH" || fail "codeql outer timeout missing"
+grep -Fq 'BOT_CODEQL_GO_CREATE_TIMEOUT_SECONDS:-480' "$SCAN_SH" || fail "codeql Go create budget missing"
+grep -Fq 'BOT_CODEQL_GO_ANALYZE_TIMEOUT_SECONDS:-300' "$SCAN_SH" || fail "codeql Go analyze budget missing"
+grep -Fq 'CODEQL_GO_CREATE_TIMEOUT_MAX_SECONDS=600' "$SCAN_SH" || fail "codeql Go create hard maximum missing"
+grep -Fq 'CODEQL_GO_ANALYZE_TIMEOUT_MAX_SECONDS=420' "$SCAN_SH" || fail "codeql Go analyze hard maximum missing"
+grep -Fq 'setsid "$@"' "$SCAN_SH" || fail "codeql deadline runner must create a dedicated session"
+grep -Fq "trap 'if [[ -n \"\${timer:-}\" ]]" "$SCAN_SH" || fail "deadline watchdog must reap its timer on early termination"
 grep -Fq -- '--build-mode=none' "$SCAN_SH" || fail "JS extraction must not build"
 grep -Fq 'javascript-code-scanning.qls' "$SCAN_SH" || fail "JS suite missing"
 grep -Fq 'go-code-scanning.qls' "$SCAN_SH" || fail "Go suite missing"
@@ -198,7 +203,15 @@ printf 'codeql %s\n' "$*" >> "${FAKE_CODEQL_LOG:-/dev/null}"
 sub="${1:-} ${2:-}"
 case "$sub" in
   "database create")
-    if [[ "${FAKE_CODEQL_CREATE_FAIL:-0}" == "1" ]]; then exit 32; fi
+    if [[ "$*" == *"--language=go"* && "${FAKE_CODEQL_CREATE_TERM_IGNORING:-0}" == "1" ]]; then
+      bash -c 'trap "" TERM; printf "%s\n" "$$" > "${FAKE_CODEQL_CHILD_PID_FILE:?}"; while :; do sleep 1; done' &
+      wait $!
+    fi
+    if [[ "$*" == *"--language=go"* && "${FAKE_CODEQL_CREATE_SLEEP_SECONDS:-0}" != "0" ]]; then
+      sleep "${FAKE_CODEQL_CREATE_SLEEP_SECONDS}"
+    fi
+    if [[ "$*" == *"--language=go"* && -n "${FAKE_CODEQL_CREATE_EXIT_CODE:-}" ]]; then exit "${FAKE_CODEQL_CREATE_EXIT_CODE}"; fi
+    if [[ "$*" == *"--language=go"* && "${FAKE_CODEQL_CREATE_FAIL:-0}" == "1" ]]; then exit 32; fi
     mkdir -p "$3"
     ;;
   "database analyze")
@@ -213,6 +226,10 @@ case "$sub" in
       esac
       prev="$a"
     done
+    if [[ "$lang" == "go" && "${FAKE_CODEQL_ANALYZE_SLEEP_SECONDS:-0}" != "0" ]]; then
+      sleep "${FAKE_CODEQL_ANALYZE_SLEEP_SECONDS}"
+    fi
+    if [[ "$lang" == "go" && "${FAKE_CODEQL_ANALYZE_FAIL:-0}" == "1" ]]; then exit 33; fi
     if [[ "$lang" == "js" ]]; then
       cat "${FAKE_CODEQL_SARIF_JS:?}" > "$out"
     else
@@ -270,6 +287,7 @@ run_scan() { # extra VAR=value overrides win over the defaults
     BOT_HEAD_SHA="${TEST_SHA}" GH_TOKEN=test-token \
     BOT_SEMGREP_RULES_COMMIT="${TEST_RULES_COMMIT}" \
     BOT_CODEQL_VERSION="${TEST_CODEQL_VERSION}" \
+    BOT_CODEQL_KILL_GRACE_SECONDS=1 \
     FAKE_GIT_LOG="${CASE}/git.log" FAKE_GITHUB_HELPER_LOG="${CASE}/github-helper.log" \
     FAKE_SEMGREP_LOG="${CASE}/semgrep.log" FAKE_CODEQL_LOG="${CASE}/codeql.log" \
     FAKE_GIT_HEAD_SHA="${TEST_SHA}" \
@@ -307,15 +325,19 @@ assert_untouched gate-no-pr
 new_case happy
 seed_caches
 write_patch
+watchdogs_before="$(pgrep -f '^sleep (480|300)$' 2>/dev/null | sort -n || true)"
 run_scan
+watchdogs_after="$(pgrep -f '^sleep (480|300)$' 2>/dev/null | sort -n || true)"
+[[ "$watchdogs_after" == "$watchdogs_before" ]] || fail "happy: deadline watchdog left a sleep process behind"
 st="${WORK}/ctx/external/status.json"
 fd="${WORK}/ctx/external/findings.json"
 [[ -s "$st" && -s "$fd" ]] || fail "happy: status/findings missing"
 jq -e --arg sha "$TEST_SHA" '
   .head_sha == $sha and (.generated_at | length) > 0 and
   (.scanners | keys) == ["codeql_go", "codeql_javascript", "semgrep"] and
-  ([.scanners[] | (keys | sort) == ["duration_seconds","findings_in_diff","findings_total","reason","status"]] | all) and
+  ([.scanners[] | (keys | sort) == ["duration_seconds","exit_code","findings_in_diff","findings_total","reason","status","timed_out"]] | all) and
   ([.scanners[] | .duration_seconds | type == "number"] | all) and
+  ([.scanners[] | .exit_code == null and .timed_out == null] | all) and
   .scanners.semgrep.status == "ran" and .scanners.semgrep.reason == null and
   .scanners.semgrep.findings_total == 2 and .scanners.semgrep.findings_in_diff == 1 and
   .scanners.codeql_javascript.status == "ran" and
@@ -406,6 +428,8 @@ st="${WORK}/ctx/external/status.json"
 jq -e '
   .scanners.semgrep.status == "failed" and
   (.scanners.semgrep.reason | test("semgrep exited rc=2")) and
+  .scanners.semgrep.exit_code == 2 and
+  .scanners.semgrep.timed_out == null and
   .scanners.codeql_javascript.status == "ran" and
   .scanners.codeql_go.status == "ran"
 ' "$st" >/dev/null || fail "crash: semgrep failed must not affect codeql"
@@ -427,5 +451,81 @@ jq -e '
 ' "$st" >/dev/null || fail "github-fallback: scanners must run on Octokit-derived file list"
 jq -e '(.findings | length) == 3' "${WORK}/ctx/external/findings.json" >/dev/null \
   || fail "github-fallback: findings must match the happy path"
+
+# ── 7. Go create budget → timeout is classified and finalization survives ──
+new_case go-timeout
+seed_caches
+write_patch
+child_pid_file="${CASE}/term-ignoring-child.pid"
+run_scan BOT_CODEQL_GO_CREATE_TIMEOUT_SECONDS=1 \
+  FAKE_CODEQL_CREATE_TERM_IGNORING=1 FAKE_CODEQL_CHILD_PID_FILE="$child_pid_file"
+st="${WORK}/ctx/external/status.json"
+jq -e '
+  .scanners.semgrep.status == "ran" and
+  .scanners.codeql_javascript.status == "ran" and
+  .scanners.codeql_go.status == "failed" and
+  .scanners.codeql_go.timed_out == true and
+  .scanners.codeql_go.exit_code == 124 and
+  (.scanners.codeql_go.reason | test("create timed out after 1s")) and
+  (.scanners.codeql_go.duration_seconds >= 1)
+' "$st" >/dev/null || fail "go-timeout: budget must fail-open and record the timeout"
+[[ -s "$child_pid_file" ]] || fail "go-timeout: TERM-ignoring child pid was not recorded"
+child_pid="$(cat "$child_pid_file")"
+if kill -0 "$child_pid" 2>/dev/null; then fail "go-timeout: TERM-ignoring descendant survived the deadline"; fi
+grep -Fq 'Some scanners were skipped or failed' "${WORK}/prompt.md" \
+  || fail "go-timeout: degraded scanner prompt note missing"
+
+# ── 8. Go analyze has its own enforced budget ─────────────────────────────────
+new_case go-analyze-timeout
+seed_caches
+write_patch
+run_scan BOT_CODEQL_GO_ANALYZE_TIMEOUT_SECONDS=1 FAKE_CODEQL_ANALYZE_SLEEP_SECONDS=3
+st="${WORK}/ctx/external/status.json"
+jq -e '
+  .scanners.codeql_go.status == "failed" and
+  .scanners.codeql_go.timed_out == true and
+  .scanners.codeql_go.exit_code == 124 and
+  (.scanners.codeql_go.reason | test("analyze timed out after 1s"))
+' "$st" >/dev/null || fail "go-analyze-timeout: analyze budget must be enforced"
+
+# ── 9. Ordinary CodeQL failures preserve their real exit code ─────────────────
+new_case go-create-failure
+seed_caches
+write_patch
+run_scan FAKE_CODEQL_CREATE_FAIL=1
+st="${WORK}/ctx/external/status.json"
+jq -e '
+  .scanners.codeql_go.status == "failed" and
+  .scanners.codeql_go.timed_out == false and
+  .scanners.codeql_go.exit_code == 32 and
+  (.scanners.codeql_go.reason | test("create failed rc=32"))
+' "$st" >/dev/null || fail "go-create-failure: ordinary failure must retain exit code"
+
+new_case go-analyze-failure
+seed_caches
+write_patch
+run_scan FAKE_CODEQL_ANALYZE_FAIL=1
+st="${WORK}/ctx/external/status.json"
+jq -e '
+  .scanners.codeql_go.status == "failed" and
+  .scanners.codeql_go.timed_out == false and
+  .scanners.codeql_go.exit_code == 33 and
+  (.scanners.codeql_go.reason | test("analyze failed rc=33"))
+' "$st" >/dev/null || fail "go-analyze-failure: ordinary analyze failure must retain exit code"
+
+# ── 10. Command-owned 124/137 exits are failures, not watchdog timeouts ───────
+for exit_code in 124 137; do
+  new_case "go-self-exit-${exit_code}"
+  seed_caches
+  write_patch
+  run_scan FAKE_CODEQL_CREATE_EXIT_CODE="$exit_code"
+  st="${WORK}/ctx/external/status.json"
+  jq -e --argjson exit_code "$exit_code" '
+    .scanners.codeql_go.status == "failed" and
+    .scanners.codeql_go.timed_out == false and
+    .scanners.codeql_go.exit_code == $exit_code and
+    (.scanners.codeql_go.reason | test("create failed rc="))
+  ' "$st" >/dev/null || fail "go-self-exit-${exit_code}: command exit must not be classified as timeout"
+done
 
 echo "external-scan tests passed"

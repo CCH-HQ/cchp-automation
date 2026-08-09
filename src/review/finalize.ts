@@ -308,15 +308,17 @@ export function finalizeReview(
     const resultSnapshot = snapshot(entry.result.artifactPath)
     if (resultSnapshot.sha256 !== entry.result.artifactSha256) fail(`review result artifact hash mismatch for ${entry.taskId}`)
     const result = asRec(readJson(resultSnapshot))
-    if (result.schemaVersion !== 2 || result.runId !== context.runId || result.state !== "completed" || typeof result.output !== "string") {
+    if (result.runId !== context.runId || result.state !== "completed" || typeof result.output !== "string") {
       fail(`review result artifact identity/state mismatch for ${entry.taskId}`)
     }
     if (result.mode !== entry.mode) fail(`review result artifact mode drift for ${entry.taskId}`)
     if (entry.mode === "native_v2") {
+      if (result.schemaVersion !== 2) fail(`review result artifact schema mismatch for ${entry.taskId}`)
       if (result.taskId !== entry.taskId || result.spawnItemId !== entry.spawnItemId || result.childThreadId !== entry.childThreadId || result.role !== entry.role || result.passKind !== entry.passKind) {
         fail(`review result artifact identity drift for ${entry.taskId}`)
       }
     } else if (entry.mode === "explicit_child") {
+      if (result.schemaVersion !== 2 && result.schemaVersion !== 3) fail(`review result artifact schema mismatch for ${entry.taskId}`)
       if (result.childId !== entry.taskId || result.role !== entry.role || result.passKind !== entry.passKind || result.sessionId !== entry.childThreadId) {
         fail(`review result artifact identity drift for ${entry.taskId}`)
       }

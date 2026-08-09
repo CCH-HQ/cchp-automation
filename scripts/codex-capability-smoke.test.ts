@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test"
-import { capabilityEngineRoot, collaborationLifecycleObserved, customToolCall, extractToolRefs, isChildProviderRequest, isCollaborationToolName, metadataProbeProtected, parentObservedChildOutput, parentObservedNativeChildOutput, toolCall, waitAgentArguments, workspaceEnforcement } from "./codex-capability-smoke"
+import { capabilityEngineRoot, classifyCapabilityNetworkEvidence, closeAgentCatalogMatchesCodex, collaborationLifecycleObserved, customToolCall, deferredExecArguments, extractToolRefs, interruptCapabilityObserved, isChildProviderRequest, isCollaborationToolName, metadataProbeProtected, parentObservedChildOutput, parentObservedNativeChildOutput, parseNetworkProbeEvidence, shellBoundaryExecProgram, toolCall, toolOutputText, waitAgentArguments, waitForProgressingCompletion, workspaceEnforcement } from "./codex-capability-smoke"
 
 test("resolves the engine root from the smoke script instead of the caller working directory", () => {
   expect(capabilityEngineRoot("/opt/cchp-engine/scripts")).toBe("/opt/cchp-engine")
@@ -8,6 +8,44 @@ test("resolves the engine root from the smoke script instead of the caller worki
 test("maps wait_agent arguments to the selected collaboration ABI", () => {
   expect(waitAgentArguments("native-v2", "/root/child", 2_000)).toEqual({ timeout_ms: 2_000 })
   expect(waitAgentArguments("explicit-exec", "child", 2_000)).toEqual({ target: "child", timeout_ms: 2_000 })
+})
+
+test("requires both the interrupt request and provider stream cancellation", () => {
+  expect(interruptCapabilityObserved(true, true)).toBe(true)
+  expect(interruptCapabilityObserved(true, false)).toBe(false)
+  expect(interruptCapabilityObserved(false, true)).toBe(false)
+})
+
+test("matches the pinned Codex catalog that has no close_agent operation", () => {
+  expect(closeAgentCatalogMatchesCodex([["collaboration.spawn_agent", "collaboration.wait_agent"]])).toBe(true)
+  expect(closeAgentCatalogMatchesCodex([["mcp__agents.close_agent"]])).toBe(false)
+})
+
+test("bounds capability turns by inactivity while allowing an active multi-step turn to exceed the old wall-clock limit", async () => {
+  let progressAt = Date.now()
+  let resolveCompletion!: () => void
+  const completion = new Promise<void>((resolve) => { resolveCompletion = resolve })
+  const waiting = waitForProgressingCompletion(
+    completion,
+    () => progressAt,
+    () => "stage=interrupt",
+    { inactivityMs: 120, absoluteMs: 400, pollMs: 10 },
+  )
+  await Bun.sleep(35)
+  progressAt = Date.now()
+  await Bun.sleep(35)
+  progressAt = Date.now()
+  resolveCompletion()
+  await expect(waiting).resolves.toBeUndefined()
+})
+
+test("fails closed after a capability turn stops making provider progress", async () => {
+  await expect(waitForProgressingCompletion(
+    new Promise<void>(() => {}),
+    () => Date.now() - 100,
+    () => "stage=wait-interrupt",
+    { inactivityMs: 10, absoluteMs: 100, pollMs: 2 },
+  )).rejects.toThrow(/idleMs=.*stage=wait-interrupt/)
 })
 
 test("extracts collaboration tools from classic Responses and Responses Lite requests", () => {
@@ -75,6 +113,73 @@ test("emits a custom exec call that can invoke deferred MCP tools", () => {
       name: "exec",
       input: "text('ok');",
     },
+  })
+})
+
+test("locks deferred shell probes to the non-login default sandbox", () => {
+  expect(deferredExecArguments("command true", "/workspace")).toEqual({
+    cmd: "command true",
+    workdir: "/workspace",
+    login: false,
+    sandbox_permissions: "use_default",
+    tty: false,
+    yield_time_ms: 10_000,
+    max_output_tokens: 2_000,
+  })
+  const program = shellBoundaryExecProgram("command true", "/workspace")
+  expect(program).toContain('"login":false')
+  expect(() => new Function(`return async () => { ${program} }`)).not.toThrow()
+})
+
+test("accepts a paired host-reachable sandbox refusal without weakening generic network failures", () => {
+  const reachable = {
+    result: "reachable" as const,
+    reason: "http-response" as const,
+    target: "https://example.com",
+    detail: "status=200;proxy_error=none",
+  }
+  const sandbox = {
+    result: "indeterminate" as const,
+    reason: "unclassified-error" as const,
+    target: "https://example.com",
+    detail: "Unable to connect:ConnectionRefused",
+  }
+  expect(classifyCapabilityNetworkEvidence({
+    target: "https://example.com",
+    configuredEnforcement: "direct",
+    hostBefore: reachable,
+    sandbox,
+    hostAfter: reachable,
+  })).toMatchObject({ result: "policy-blocked", reason: "host-reachable-sandbox-refused" })
+  for (const override of [
+    { configuredEnforcement: "unknown" as const },
+    { hostAfter: { ...reachable, result: "indeterminate" as const, reason: "unclassified-error" as const } },
+    { sandbox: { ...sandbox, detail: "connect timeout" } },
+    { sandbox: { ...sandbox, target: "https://different.invalid" } },
+  ]) {
+    expect(classifyCapabilityNetworkEvidence({
+      target: "https://example.com",
+      configuredEnforcement: "direct",
+      hostBefore: reachable,
+      sandbox,
+      hostAfter: reachable,
+      ...override,
+    })).toBeUndefined()
+  }
+})
+
+test("extracts structured network evidence from nested custom-tool output", () => {
+  const output = [{
+    type: "input_text",
+    text: 'Script completed\n{"result":"indeterminate","reason":"unclassified-error","target":"https://example.com","detail":"ConnectionRefused"}\n',
+  }]
+  const text = toolOutputText(output)
+  expect(text).toContain("ConnectionRefused")
+  expect(parseNetworkProbeEvidence(text)).toEqual({
+    result: "indeterminate",
+    reason: "unclassified-error",
+    target: "https://example.com",
+    detail: "ConnectionRefused",
   })
 })
 

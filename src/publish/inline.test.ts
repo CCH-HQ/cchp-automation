@@ -39,10 +39,13 @@ const PATCH = [
 function fake(
   seed: { reviewComments?: unknown[]; issueComments?: unknown[]; reviews?: unknown[] } = {},
 ) {
+  const reviewComments = [...(seed.reviewComments ?? [])] as Array<Record<string, unknown>>
+  const issueComments = [...(seed.issueComments ?? [])] as Array<Record<string, unknown>>
   const calls = {
     createReviewComment: [] as Record<string, unknown>[],
     createReview: [] as Record<string, unknown>[],
     createComment: [] as Record<string, unknown>[],
+    getComment: [] as Record<string, unknown>[],
     updateComment: [] as Record<string, unknown>[],
     paginate: [] as { tag: string; params: Record<string, unknown> }[],
   }
@@ -51,6 +54,7 @@ function fake(
     rest: {
       pulls: {
         listReviewComments: ref("reviewComments"),
+        listCommentsForReview: ref("commentsForReview"),
         listReviews: ref("reviews"),
         createReviewComment: async (p: Record<string, unknown>) => {
           calls.createReviewComment.push(p)
@@ -58,11 +62,24 @@ function fake(
         },
         createReview: async (p: Record<string, unknown>) => {
           calls.createReview.push(p)
-          return { data: { html_url: "https://gh/review/1" } }
+          const id = 80
+          const comments = Array.isArray(p.comments) ? p.comments as Array<Record<string, unknown>> : []
+          for (const [index, comment] of comments.entries()) reviewComments.push({
+            id: id * 100 + index,
+            ...comment,
+            pull_request_review_id: id,
+            commit_id: p.commit_id,
+          })
+          return { data: { id, commit_id: p.commit_id, state: "COMMENTED", html_url: "https://gh/review/1" } }
         },
       },
       issues: {
         listComments: ref("issueComments"),
+        getComment: async (p: Record<string, unknown>) => {
+          calls.getComment.push(p)
+          const existing = issueComments.find((comment) => comment.id === p.comment_id)
+          return { data: existing ?? { id: p.comment_id, user: { login: "cchp-bot[bot]" } } }
+        },
         createComment: async (p: Record<string, unknown>) => {
           calls.createComment.push(p)
           return { data: { id: 500, html_url: "https://gh/ic/500" } }
@@ -76,8 +93,9 @@ function fake(
     paginate: async (fn: { __tag: string }, params: Record<string, unknown>) => {
       calls.paginate.push({ tag: fn.__tag, params })
       const m: Record<string, unknown[]> = {
-        reviewComments: (seed.reviewComments as unknown[]) ?? [],
-        issueComments: (seed.issueComments as unknown[]) ?? [],
+        reviewComments,
+        commentsForReview: reviewComments.filter((comment) => comment.pull_request_review_id === params.review_id),
+        issueComments,
         reviews: (seed.reviews as unknown[]) ?? [],
       }
       return m[fn.__tag] ?? []
@@ -277,7 +295,13 @@ test("postReviewBatch: posts ONE review with all new findings + a summary", asyn
       { path: "foo.ts", line: 3, body: "two", fingerprint: FP_B },
     ],
   })
-  expect(res).toEqual({ status: "posted", url: "https://gh/review/1", posted: 2, skipped: 0 })
+  expect(res).toEqual({
+    status: "posted",
+    url: "https://gh/review/1",
+    posted: 2,
+    skipped: 0,
+    publication: { reviewId: 80, commitId: "sha", state: "COMMENTED", commentIds: [8000, 8001] },
+  })
   expect(calls.createReview.length).toBe(1)
   const rev = calls.createReview[0]!
   expect(rev).toMatchObject({ pull_number: 9, commit_id: "sha", event: "COMMENT", body: "2 issues" })
@@ -286,6 +310,33 @@ test("postReviewBatch: posts ONE review with all new findings + a summary", asyn
   expect(comments[0]).toMatchObject({ path: "foo.ts", line: 2, side: "RIGHT" })
   expect(comments[0]!.position).toBeUndefined()
   expect(comments[0]!.body).toBe(`one\n\n<!-- cchp-review-fingerprint:${FP_A} -->`)
+})
+
+test("postReviewBatch: preserves only the trusted publication marker after sanitizing the summary", async () => {
+  const { octokit, calls } = fake()
+  await postReviewBatch(octokit, "CCH-HQ/repo", {
+    prNumber: 9,
+    headSha: "sha",
+    patch: PATCH,
+    summary: "safe <!-- caller-controlled-marker --> text",
+    publicationMarker: "cchp-inline-publication:key-1:1",
+    comments: [{ path: "foo.ts", line: 2, body: "one", fingerprint: FP_A }],
+  })
+  expect(calls.createReview[0]!.body).toBe(
+    "safe  text\n\n<!-- cchp-inline-publication:key-1:1 -->",
+  )
+})
+
+test("postReviewBatch: rejects an unsafe trusted publication marker", async () => {
+  const { octokit, calls } = fake()
+  await expect(postReviewBatch(octokit, "CCH-HQ/repo", {
+    prNumber: 9,
+    headSha: "sha",
+    patch: PATCH,
+    publicationMarker: "unsafe --> injected",
+    comments: [{ path: "foo.ts", line: 2, body: "one", fingerprint: FP_A }],
+  })).rejects.toThrow("publication marker contains unsupported characters")
+  expect(calls.createReview).toHaveLength(0)
 })
 
 test("postReviewBatch: dedups against history AND within the batch, reports skipped count", async () => {
@@ -302,7 +353,13 @@ test("postReviewBatch: dedups against history AND within the batch, reports skip
       { path: "foo.ts", line: 3, body: "history dup", fingerprint: FP_C }, // seen in history
     ],
   })
-  expect(res).toEqual({ status: "posted", url: "https://gh/review/1", posted: 1, skipped: 2 })
+  expect(res).toEqual({
+    status: "posted",
+    url: "https://gh/review/1",
+    posted: 1,
+    skipped: 2,
+    publication: { reviewId: 80, commitId: "sha", state: "COMMENTED", commentIds: [8000] },
+  })
   expect((calls.createReview[0]!.comments as unknown[]).length).toBe(1)
 })
 
@@ -323,6 +380,7 @@ test("postReviewBatch: an invalid anchor rejects ONLY that item — the rest sti
     url: "https://gh/review/1",
     posted: 1,
     skipped: 0,
+    publication: { reviewId: 80, commitId: "sha", state: "COMMENTED", commentIds: [8000] },
     rejected: [
       { path: "foo.ts", line: 99, reason: "line is not commentable in the trusted current PR patch" },
       { path: "foo.ts", line: 3, reason: "comment requires a body" },
@@ -468,7 +526,13 @@ test("postStructuredComment: no sticky_key → plain create, no marker", async (
 
 test("postStructuredComment: sticky_key with no existing comment → create with the marker", async () => {
   const { octokit, calls } = fake({ issueComments: [] })
-  const res = await postStructuredComment(octokit, "CCH-HQ/repo", 9, { summary: "hi", sticky_key: "review-summary" })
+  const res = await postStructuredComment(
+    octokit,
+    "CCH-HQ/repo",
+    9,
+    { summary: "hi", sticky_key: "review-summary" },
+    "bot[bot]",
+  )
   expect(res.status).toBe("posted")
   expect(calls.createComment[0]!.body).toContain("<!-- cchp-bot:review-summary -->")
   expect((calls.createComment[0]!.body as string).endsWith("<!-- cchp-bot:review-summary -->")).toBe(true)
@@ -476,13 +540,48 @@ test("postStructuredComment: sticky_key with no existing comment → create with
 
 test("postStructuredComment: sticky_key with an existing marker → update in place", async () => {
   const { octokit, calls } = fake({
-    issueComments: [{ id: 88, body: "old body\n\n<!-- cchp-bot:review-summary -->" }],
+    issueComments: [{ id: 88, body: "old body\n\n<!-- cchp-bot:review-summary -->", user: { login: "bot[bot]" } }],
   })
-  const res = await postStructuredComment(octokit, "CCH-HQ/repo", 9, { summary: "fresh", sticky_key: "review-summary" })
+  const res = await postStructuredComment(octokit, "CCH-HQ/repo", 9, { summary: "fresh", sticky_key: "review-summary" }, "bot[bot]")
   expect(res).toEqual({ status: "updated", url: "https://gh/ic/upd" })
   expect(calls.createComment.length).toBe(0)
   expect(calls.updateComment[0]).toMatchObject({ comment_id: 88 })
   expect(calls.updateComment[0]!.body).toContain("<!-- cchp-bot:review-summary -->")
+})
+
+test("postStructuredComment: ignores a forged marker and updates the later bot-owned sticky", async () => {
+  const marker = "<!-- cchp-bot:review-summary -->"
+  const { octokit, calls } = fake({
+    issueComments: [
+      { id: 77, body: `forged\n${marker}`, user: { login: "attacker" } },
+      { id: 88, body: `owned\n${marker}`, user: { login: "bot[bot]" } },
+    ],
+  })
+  const res = await postStructuredComment(
+    octokit,
+    "CCH-HQ/repo",
+    9,
+    { summary: "fresh", sticky_key: "review-summary" },
+    "bot[bot]",
+  )
+  expect(res.status).toBe("updated")
+  expect(calls.createComment).toHaveLength(0)
+  expect(calls.updateComment[0]).toMatchObject({ comment_id: 88 })
+})
+
+test("postStructuredComment: sticky upsert requires a trusted bot owner", async () => {
+  const { octokit, calls } = fake({
+    issueComments: [{ id: 77, body: "<!-- cchp-bot:review-summary -->", user: { login: "attacker" } }],
+  })
+  await expect(postStructuredComment(
+    octokit,
+    "CCH-HQ/repo",
+    9,
+    { summary: "fresh", sticky_key: "review-summary" },
+    undefined,
+  )).rejects.toThrow("trusted bot login")
+  expect(calls.createComment).toHaveLength(0)
+  expect(calls.updateComment).toHaveLength(0)
 })
 
 test("postStructuredComment: rejects an invalid sticky_key", async () => {
@@ -494,12 +593,34 @@ test("postStructuredComment: rejects an invalid sticky_key", async () => {
 
 // ── updateStructuredComment ────────────────────────────────────────────────────
 test("updateStructuredComment: re-renders and PATCHes by id, appends no marker", async () => {
-  const { octokit, calls } = fake()
-  const res = await updateStructuredComment(octokit, "CCH-HQ/repo", 42, { summary: "done" })
+  const { octokit, calls } = fake({ issueComments: [{ id: 42, user: { login: "cchp-bot[bot]" } }] })
+  const res = await updateStructuredComment(octokit, "CCH-HQ/repo", 42, { summary: "done" }, "cchp-bot[bot]")
   expect(res).toEqual({ status: "updated", url: "https://gh/ic/upd" })
+  expect(calls.getComment).toEqual([{ owner: "CCH-HQ", repo: "repo", comment_id: 42 }])
   expect(calls.updateComment[0]).toMatchObject({ comment_id: 42 })
   expect(calls.updateComment[0]!.body).toContain("> **TL;DR** — done")
   expect(calls.updateComment[0]!.body).not.toContain("cchp-bot:")
+})
+
+test("updateStructuredComment: refuses a comment owned by another user", async () => {
+  const { octokit, calls } = fake({ issueComments: [{ id: 42, user: { login: "attacker" } }] })
+  await expect(updateStructuredComment(
+    octokit,
+    "CCH-HQ/repo",
+    42,
+    { summary: "done" },
+    "cchp-bot[bot]",
+  )).rejects.toThrow("not owned by the trusted bot")
+  expect(calls.getComment).toHaveLength(1)
+  expect(calls.updateComment).toHaveLength(0)
+})
+
+test("updateStructuredComment: requires a trusted bot identity before reading", async () => {
+  const { octokit, calls } = fake()
+  await expect(updateStructuredComment(octokit, "CCH-HQ/repo", 42, { summary: "done" }, undefined))
+    .rejects.toThrow("trusted bot login")
+  expect(calls.getComment).toHaveLength(0)
+  expect(calls.updateComment).toHaveLength(0)
 })
 
 test("updateStructuredComment: rejects a non-positive comment id", async () => {

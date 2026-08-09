@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test"
-import { mkdtempSync, readFileSync } from "node:fs"
+import { mkdirSync, mkdtempSync, readFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { prepareCodexHome } from "./config"
@@ -7,6 +7,7 @@ import { parseProviders } from "./providers"
 
 test("writes an isolated strict Codex config with loopback providers and no caller secrets", () => {
   const botWorkdir = mkdtempSync(join(tmpdir(), "cchp-codex-"))
+  mkdirSync(join(botWorkdir, "repo", ".git"), { recursive: true })
   const providerSet = parseProviders({
     providerJson: JSON.stringify({
       "gpt-cchp": {
@@ -52,12 +53,29 @@ test("writes an isolated strict Codex config with loopback providers and no call
 
   expect(result.codexHome).toBe(join(botWorkdir, "codex-home"))
   expect(config).toContain('model = "gpt-5.6-sol"')
+  expect(config).toContain('allow_login_shell = false')
   expect(config).toContain('model_provider = "cchp_gpt_cchp_')
   expect(config).toContain('base_url = "http://127.0.0.1:43123/providers/gpt-cchp/v1"')
   expect(config).toContain('env_key = "CCHP_CODEX_BRIDGE_TOKEN"')
   expect(config).toContain(`model_catalog_json = "${join(result.codexHome, "models.json")}"`)
   expect(config).toContain("[features.multi_agent_v2]")
   expect(config).not.toContain("use_legacy_landlock = true")
+  expect(config).not.toContain("[permissions.cchp-workspace]")
+  expect(config).not.toContain("[sandbox_workspace_write]")
+  expect(config).not.toContain("[features.network_proxy]")
+  expect(config).toContain('[features]\nshell_snapshot = false\ncode_mode_host = false')
+  expect(config).toContain('[shell_environment_policy]\ninherit = "all"\nignore_default_excludes = false')
+  for (const name of [
+    "CCHP_CODEX_BRIDGE_TOKEN",
+    "CCHP_GITHUB_BROKER_SOCKET",
+    "CCHP_GITHUB_BROKER_TOKEN",
+    "CCHP_GITHUB_BROKER_FINALIZER",
+    "CCHP_PROCESS_RECORD_HMAC_KEY",
+    "SEE_API_KEY",
+    "HEROUI_AUTH_TOKEN",
+  ]) {
+    expect(config).toContain(`"${name}" = "exclude"`)
+  }
   // gpt-5.6-sol is code-mode-only. This setting makes collaboration tools
   // DirectModelOnly so they remain top-level and cannot be swallowed by exec.
   expect(config).toContain("non_code_mode_only = true")
@@ -105,7 +123,9 @@ test("writes an isolated strict Codex config with loopback providers and no call
   expect(config).toContain('[mcp_servers.see_upload]')
   expect(config).toContain('[mcp_servers.see_upload]\ncommand = "/opt/cchp/bin/bun"')
   expect(config).toContain('enabled_tools = ["upload_file"]')
-  expect(config).toContain(`SEE_API_KEY_FILE = "${join(botWorkdir, "ctx", "see", "api-key")}"`)
+  expect(config).toContain('"CCHP_GITHUB_BROKER_SOCKET"')
+  expect(config).toContain('"CCHP_GITHUB_BROKER_TOKEN"')
+  expect(config).not.toContain("SEE_API_KEY_FILE")
   expect(config).not.toContain("SEE_API_KEY =")
   for (const role of [reviewer, explorer, planner]) {
     expect(role.indexOf("developer_instructions = ")).toBeLessThan(role.indexOf("[features]"))
@@ -136,6 +156,7 @@ test("writes an isolated strict Codex config with loopback providers and no call
 
 test("explicit fallback disables native collaboration and registers exactly one agents MCP", () => {
   const botWorkdir = mkdtempSync(join(tmpdir(), "cchp-codex-explicit-"))
+  mkdirSync(join(botWorkdir, "repo", ".git"), { recursive: true })
   const providerSet = parseProviders({
     providerJson: JSON.stringify({
       "gpt-cchp": {
@@ -170,6 +191,7 @@ test("explicit fallback disables native collaboration and registers exactly one 
   const agentsMcp = config.slice(config.indexOf("[mcp_servers.agents]"))
   expect(agentsMcp).toContain('command = "/opt/cchp/bin/bun"')
   expect(agentsMcp).toContain('"BOT_TASK"')
+  expect(agentsMcp).toContain('"CCHP_PROCESS_RECORD_HMAC_KEY"')
   for (const name of ["PATH", "HOME", "LANG", "TMPDIR"]) {
     expect(agentsMcp).toContain(`"${name}"`)
   }
@@ -206,6 +228,8 @@ test("non-reasoning small models do not advertise or force reasoning", () => {
   const explorer = readFileSync(join(result.codexHome, "agents", "explorer.toml"), "utf8")
   const config = readFileSync(result.configPath, "utf8")
   expect(config).toContain("use_legacy_landlock = true")
+  expect(config).not.toContain("[sandbox_workspace_write]")
+  expect(config).not.toContain("[features.network_proxy]")
   expect(reviewer).not.toContain("model_reasoning_effort")
   expect(explorer).not.toContain("model_reasoning_effort")
   const models = JSON.parse(readFileSync(join(result.codexHome, "models.json"), "utf8")) as { models: Array<Record<string, unknown>> }

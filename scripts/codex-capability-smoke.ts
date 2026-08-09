@@ -10,12 +10,108 @@ import { startGitHubBroker } from "../src/mcp/github-broker"
 import type { GitHubClient } from "../src/github/client"
 import { parseProviders } from "../src/codex/providers"
 import { startProviderBridge } from "../src/codex/provider-bridge"
+import { hideProcEnviron } from "../src/github/token-rotation"
+import { initializeCollaborationAdmission, type CollaborationAdmissionIdentity } from "../src/codex/collaboration-admission"
+import { probeNetworkPolicy, type NetworkProbeEvidence } from "./network-policy-probe"
 
 type Json = Record<string, unknown>
 
 export interface ToolRef {
   name: string
   namespace?: string
+}
+
+export type CapabilityNetworkReason =
+  | "proxy-structured-denial"
+  | "os-connect-denied"
+  | "host-reachable-sandbox-refused"
+
+export interface CapabilityNetworkEvidence {
+  result: "policy-blocked"
+  reason: CapabilityNetworkReason
+  target: string
+  observations: {
+    host_before: NetworkProbeEvidence
+    sandbox: NetworkProbeEvidence
+    host_after: NetworkProbeEvidence
+  }
+}
+
+export function interruptCapabilityObserved(requestObserved: boolean, streamCancelled: boolean): boolean {
+  return requestObserved && streamCancelled
+}
+
+export function closeAgentCatalogMatchesCodex(requestTools: readonly string[][]): boolean {
+  return !requestTools.some((tools) => tools.some((name) => name.endsWith("close_agent")))
+}
+
+export function deferredExecArguments(cmd: string, workdir: string) {
+  return {
+    cmd,
+    workdir,
+    login: false,
+    sandbox_permissions: "use_default" as const,
+    tty: false,
+    yield_time_ms: 10_000,
+    max_output_tokens: 2_000,
+  }
+}
+
+export function shellBoundaryExecProgram(cmd: string, workdir: string): string {
+  return `const result = await tools.exec_command(${JSON.stringify(deferredExecArguments(cmd, workdir))}); const output = result.output ?? ""; text(output.slice(-1800) + "\\nCCHP_NETWORK_PROBE_EXIT:" + String(result.exit_code));`
+}
+
+export function toolOutputText(value: unknown): string {
+  if (typeof value === "string") return value
+  if (Array.isArray(value)) return value.map(toolOutputText).filter(Boolean).join("\n")
+  if (!value || typeof value !== "object") return ""
+  return Object.values(value as Record<string, unknown>).map(toolOutputText).filter(Boolean).join("\n")
+}
+
+export function parseNetworkProbeEvidence(output: string): NetworkProbeEvidence | undefined {
+  for (const line of output.split(/\r?\n/).reverse()) {
+    const start = line.indexOf('{"result"')
+    if (start < 0) continue
+    try {
+      const value = JSON.parse(line.slice(start)) as Partial<NetworkProbeEvidence>
+      if (
+        ["policy-blocked", "reachable", "indeterminate"].includes(String(value.result)) &&
+        ["proxy-structured-denial", "os-connect-denied", "http-response", "unclassified-error"].includes(String(value.reason)) &&
+        typeof value.target === "string" &&
+        typeof value.detail === "string"
+      ) return value as NetworkProbeEvidence
+    } catch {
+      // Ignore unrelated diagnostic lines which happen to contain a JSON prefix.
+    }
+  }
+  return undefined
+}
+
+export function classifyCapabilityNetworkEvidence(input: {
+  target: string
+  configuredEnforcement: "direct" | "legacy-landlock" | "unknown"
+  hostBefore: NetworkProbeEvidence
+  sandbox: NetworkProbeEvidence
+  hostAfter: NetworkProbeEvidence
+}): CapabilityNetworkEvidence | undefined {
+  const { target, configuredEnforcement, hostBefore, sandbox, hostAfter } = input
+  const allTargetSame = [hostBefore, sandbox, hostAfter].every((evidence) => evidence.target === target)
+  if (!allTargetSame || configuredEnforcement !== "direct") return undefined
+  const observations = { host_before: hostBefore, sandbox, host_after: hostAfter }
+  if (
+    sandbox.result === "policy-blocked" &&
+    (sandbox.reason === "proxy-structured-denial" || sandbox.reason === "os-connect-denied")
+  ) {
+    return { result: "policy-blocked", reason: sandbox.reason, target, observations }
+  }
+  const hostReachable = [hostBefore, hostAfter].every((evidence) =>
+    evidence.result === "reachable" && evidence.reason === "http-response"
+  )
+  const sandboxRefused = sandbox.result === "indeterminate" &&
+    sandbox.reason === "unclassified-error" &&
+    /\bConnectionRefused\b/.test(sandbox.detail)
+  if (!hostReachable || !sandboxRefused) return undefined
+  return { result: "policy-blocked", reason: "host-reachable-sandbox-refused", target, observations }
 }
 
 export function capabilityEngineRoot(scriptDirectory = import.meta.dir): string {
@@ -28,6 +124,46 @@ export function waitAgentArguments(
   timeoutMs = 10_000,
 ): { timeout_ms: number; target?: string } {
   return mode === "native-v2" ? { timeout_ms: timeoutMs } : { target, timeout_ms: timeoutMs }
+}
+
+export function waitForProgressingCompletion(
+  completion: Promise<void>,
+  lastProgressAt: () => number,
+  diagnostic: () => string,
+  options: { inactivityMs?: number; absoluteMs?: number; pollMs?: number } = {},
+): Promise<void> {
+  // native collaboration 启动或中断 child 时可能几十秒不发 provider request.
+  // 保留严格 inactivity bound, 但不能把正常 native tool invocation 判为 hang.
+  const inactivityMs = options.inactivityMs ?? 60_000
+  const absoluteMs = options.absoluteMs ?? 180_000
+  const pollMs = options.pollMs ?? 250
+  for (const [name, value] of Object.entries({ inactivityMs, absoluteMs, pollMs })) {
+    if (!Number.isSafeInteger(value) || value < 1) throw new Error(`${name} must be a positive integer`)
+  }
+  const startedAt = Date.now()
+  return new Promise<void>((resolve, reject) => {
+    let timer: ReturnType<typeof setInterval> | undefined
+    const settle = (operation: () => void) => {
+      if (timer) clearInterval(timer)
+      timer = undefined
+      operation()
+    }
+    timer = setInterval(() => {
+      const now = Date.now()
+      const idleMs = now - lastProgressAt()
+      const elapsedMs = now - startedAt
+      if (idleMs >= inactivityMs || elapsedMs >= absoluteMs) {
+        settle(() => reject(new Error(
+          `capability turn timed out; idleMs=${idleMs} elapsedMs=${elapsedMs} ${diagnostic()}`,
+        )))
+      }
+    }, pollMs)
+    timer.unref?.()
+    void completion.then(
+      () => settle(resolve),
+      (error) => settle(() => reject(error)),
+    )
+  })
 }
 
 export function isChildProviderRequest(requestThreadId: string | undefined, rootThreadId: string | undefined): boolean {
@@ -204,7 +340,7 @@ function assertFixtureEnvironment(rows: Json[], fixture: "fff" | "serena", repo:
     "HEROUI_AUTH_TOKEN", "CCHP_GITHUB_BROKER_SOCKET", "CCHP_GITHUB_BROKER_TOKEN",
     "CCHP_GITHUB_BROKER_FINALIZER", "github-sentinel", "provider-sentinel",
     "provider-config-sentinel", "app-client-sentinel", "app-private-sentinel", "see-sentinel",
-    "heroui-sentinel",
+    "heroui-sentinel", "CCHP_PROCESS_RECORD_HMAC_KEY",
   ]
   for (const row of rows) {
     if (row.fixture !== fixture) throw new Error(`${fixture} MCP fixture identity drifted`)
@@ -218,6 +354,7 @@ function assertFixtureEnvironment(rows: Json[], fixture: "fff" | "serena", repo:
 }
 
 async function main(): Promise<void> {
+  hideProcEnviron((message) => process.stderr.write(`[codex-capability] ${message}\n`))
   const expected = process.env.CCHP_CODEX_VERSION ?? "0.146.0"
   const selectedMode = collaborationMode()
   const engineRoot = capabilityEngineRoot()
@@ -228,6 +365,13 @@ async function main(): Promise<void> {
   }
 
   const root = mkdtempSync(join(tmpdir(), "cchp-capability-"))
+  const rootAdmission: CollaborationAdmissionIdentity = {
+    runId: "capability-smoke",
+    writerId: "capability-smoke-writer",
+    generation: 1,
+  }
+  const processRecordHmacKey = "a".repeat(64)
+  initializeCollaborationAdmission(root, rootAdmission)
   const repo = join(root, "repo")
   const readonlyProbePath = join(repo, ".codex-read-only-probe")
   const gitMetadataProbePath = join(repo, ".git", "cchp-workspace-write-probe")
@@ -240,19 +384,25 @@ async function main(): Promise<void> {
   }
   mkdirSync(join(repo, ".agents"), { recursive: true })
   let requestNumber = 0
-  let rootStage: "sandbox" | "fff" | "serena" | "spawn" | "send" | "wait" | "followup" | "list" | "spawn-interrupt" | "interrupt" | "wait-interrupt" | "audit-interrupt" | "close-interrupt" | "final" = "sandbox"
+  let rootStage: "sandbox" | "fff" | "serena" | "spawn" | "send" | "wait" | "followup" | "list" | "spawn-interrupt" | "interrupt" | "wait-interrupt" | "audit-interrupt" | "final" = "sandbox"
   let childStage: "fff" | "serena" | "final" = "fff"
   let rootModelThreadId: string | undefined
   let workspaceThreadId: string | undefined
-  let workspaceStage: "apply-patch" | "git-metadata" | "agents-metadata" | "final" = "apply-patch"
+  let workspaceStage: "apply-patch" | "shell-boundary" | "git-metadata" | "agents-metadata" | "final" = "apply-patch"
   const workspaceRequestedOperations = new Set<string>()
   const workspaceCompletedOperations = new Set<string>()
+  let workspaceBoundaryObservation = ""
+  let workspaceShellCapabilitiesExcluded = false
+  let workspaceSandboxNetworkEvidence: NetworkProbeEvidence | undefined
   const parentObservedSentinels = new Set<string>()
   const requestedOperations = new Set<string>()
   const completedOperations = new Set<string>()
   const operationByCallId = new Map<string, string>()
   let interruptRequestObserved = false
   let interruptStreamCancelled = false
+  let interruptThreadId: string | undefined
+  let resolveInterruptStreamCancellation!: () => void
+  const interruptStreamCancellation = new Promise<void>((resolve) => { resolveInterruptStreamCancellation = resolve })
   let nativeInterruptListObserved = false
   let resolveInterruptRequest!: () => void
   const interruptRequest = new Promise<void>((resolve) => { resolveInterruptRequest = resolve })
@@ -262,6 +412,7 @@ async function main(): Promise<void> {
   const requestCatalogs: string[] = []
   const decisions: string[] = []
   const requestOwners = new Map<string, { threadId: string; turnId: string }>()
+  let lastProviderProgressAt = Date.now()
   const smokeBasePort = Number(process.env.CCHP_SMOKE_PORT ?? 39765)
   if (!Number.isInteger(smokeBasePort) || smokeBasePort < 1024 || smokeBasePort > 64000) throw new Error("CCHP_SMOKE_PORT must be a valid unprivileged port")
   let upstream: ReturnType<typeof Bun.serve> | undefined
@@ -270,6 +421,7 @@ async function main(): Promise<void> {
     try {
       upstream = Bun.serve({ hostname: "127.0.0.1", port: smokeBasePort + offset, async fetch(request) {
     const body = await request.json() as Json
+    lastProviderProgressAt = Date.now()
     requestShapes.push(`${Object.keys(body).sort().join(",")}:tools=${Array.isArray(body.tools) ? body.tools.length : typeof body.tools}`)
     requestCatalogs.push(JSON.stringify(Array.isArray(body.input) ? body.input.filter((item) => item && typeof item === "object" && (item as Json).type === "additional_tools") : []).slice(0, 20_000))
     const tools = extractToolRefs(body)
@@ -280,9 +432,6 @@ async function main(): Promise<void> {
     const sendMessage = tools.find((tool) => tool.name === "send_message")
     const followup = tools.find((tool) => tool.name === "followup_task")
     const interrupt = tools.find((tool) => tool.name === "interrupt_agent")
-    // Codex 0.146 native catalog has no close_agent. The explicit MCP server
-    // still exposes it, so exercise that contract with a synthesized ref.
-    const close = tools.find((tool) => tool.name === "close_agent") ?? (selectedMode === "explicit-exec" ? { name: "close_agent" } : undefined)
     const list = tools.find((tool) => tool.name === "list_agents")
     const exec = tools.find((tool) => tool.name === "exec")
     const fff = tools.find((tool) => tool.name === "grep" && tool.namespace?.includes("fff"))
@@ -303,9 +452,16 @@ async function main(): Promise<void> {
         const callId = typeof output.call_id === "string" ? output.call_id : undefined
         const operation = callId ? operationByCallId.get(callId) : undefined
         if (!operation?.startsWith("workspace_")) continue
-        const serialized = JSON.stringify(output.output ?? output.result ?? "")
+        const toolOutput = output.output ?? output.result ?? ""
+        const serialized = JSON.stringify(toolOutput)
         if (operation === "workspace_apply_patch" && !/\"isError\"\s*:\s*true|\"is_error\"\s*:\s*true|^\"?error:/i.test(serialized)) {
           workspaceCompletedOperations.add(operation)
+        }
+        if (operation === "workspace_shell_boundary") {
+          const text = toolOutputText(toolOutput)
+          workspaceBoundaryObservation = text.slice(-2_000)
+          workspaceShellCapabilitiesExcluded = text.includes("CCHP_SHELL_CAPABILITIES_EXCLUDED")
+          workspaceSandboxNetworkEvidence = parseNetworkProbeEvidence(text)
         }
         if (operation === "workspace_git_metadata" && serialized.includes("GIT_METADATA_PROTECTED")) {
           workspaceCompletedOperations.add(operation)
@@ -315,7 +471,7 @@ async function main(): Promise<void> {
         }
       }
       if (workspaceStage === "apply-patch" && exec) {
-        workspaceStage = "git-metadata"
+        workspaceStage = "shell-boundary"
         workspaceRequestedOperations.add("workspace_apply_patch")
         operationByCallId.set(`call_${id}`, "workspace_apply_patch")
         const patch = [
@@ -328,19 +484,37 @@ async function main(): Promise<void> {
         ].join("\n")
         return sse(customToolCall(id, exec, `const result = await tools.apply_patch(${JSON.stringify(patch)}); text(result);`))
       }
+      if (workspaceStage === "shell-boundary" && exec) {
+        workspaceStage = "git-metadata"
+        workspaceRequestedOperations.add("workspace_shell_boundary")
+        operationByCallId.set(`call_${id}`, "workspace_shell_boundary")
+        const command = [
+          "set -eu",
+          "[ -z \"${CCHP_CODEX_BRIDGE_TOKEN:-}\" ] || exit 96",
+          "[ -z \"${CCHP_GITHUB_BROKER_SOCKET:-}\" ] || exit 97",
+          "[ -z \"${CCHP_GITHUB_BROKER_TOKEN:-}\" ] || exit 98",
+          "[ -z \"${CCHP_GITHUB_BROKER_FINALIZER:-}\" ] || exit 99",
+          "command -v bun >/dev/null 2>&1 || exit 100",
+          "printf '%s\\n' CCHP_SHELL_CAPABILITIES_EXCLUDED",
+          `bun ${JSON.stringify(join(engineRoot, "scripts", "network-policy-probe.ts"))} https://example.com`,
+        ].join("\n")
+        return sse(customToolCall(id, exec, shellBoundaryExecProgram(command, repo)))
+      }
       const startupPattern = "Unable to spawn codex-linux-sandbox|fs sandbox helper failed|bwrap: Failed .*Permission denied|permission profiles requiring direct runtime enforcement are incompatible with --use-legacy-landlock|panicked at .*linux-sandbox"
       const denialPattern = "permission denied|operation not permitted|read[- ]only|protected metadata|not permitted"
       if (workspaceStage === "git-metadata" && exec) {
         workspaceStage = "agents-metadata"
         workspaceRequestedOperations.add("workspace_git_metadata")
         operationByCallId.set(`call_${id}`, "workspace_git_metadata")
-        return sse(customToolCall(id, exec, `const result = await tools.exec_command({ cmd: "touch .git/cchp-workspace-write-probe", workdir: ${JSON.stringify(repo)} }); const output = result.output ?? ""; const startupFailed = new RegExp(${JSON.stringify(startupPattern)}, "i").test(output); const denied = typeof result.exit_code === "number" && Number.isInteger(result.exit_code) && result.exit_code !== 0 && output.includes(".git/cchp-workspace-write-probe") && new RegExp(${JSON.stringify(denialPattern)}, "i").test(output); text(!startupFailed && denied ? "GIT_METADATA_PROTECTED" : "GIT_METADATA_PROTECTION_FAILED:" + output.slice(-1000));`))
+        const command = `command touch -- ${JSON.stringify(gitMetadataProbePath)}`
+        return sse(customToolCall(id, exec, `const result = await tools.exec_command(${JSON.stringify(deferredExecArguments(command, repo))}); const output = result.output ?? ""; const startupFailed = new RegExp(${JSON.stringify(startupPattern)}, "i").test(output); const denied = typeof result.exit_code === "number" && Number.isInteger(result.exit_code) && result.exit_code !== 0 && output.includes(${JSON.stringify(gitMetadataProbePath)}) && new RegExp(${JSON.stringify(denialPattern)}, "i").test(output); text(!startupFailed && denied ? "GIT_METADATA_PROTECTED" : "GIT_METADATA_PROTECTION_FAILED:" + output.slice(-1000));`))
       }
       if (workspaceStage === "agents-metadata" && exec) {
         workspaceStage = "final"
         workspaceRequestedOperations.add("workspace_agents_metadata")
         operationByCallId.set(`call_${id}`, "workspace_agents_metadata")
-        return sse(customToolCall(id, exec, `const result = await tools.exec_command({ cmd: "touch .agents/cchp-workspace-write-probe", workdir: ${JSON.stringify(repo)} }); const output = result.output ?? ""; const startupFailed = new RegExp(${JSON.stringify(startupPattern)}, "i").test(output); const denied = typeof result.exit_code === "number" && Number.isInteger(result.exit_code) && result.exit_code !== 0 && output.includes(".agents/cchp-workspace-write-probe") && new RegExp(${JSON.stringify(denialPattern)}, "i").test(output); text(!startupFailed && denied ? "AGENTS_METADATA_PROTECTED" : "AGENTS_METADATA_PROTECTION_FAILED:" + output.slice(-1000));`))
+        const command = `command touch -- ${JSON.stringify(agentsMetadataProbePath)}`
+        return sse(customToolCall(id, exec, `const result = await tools.exec_command(${JSON.stringify(deferredExecArguments(command, repo))}); const output = result.output ?? ""; const startupFailed = new RegExp(${JSON.stringify(startupPattern)}, "i").test(output); const denied = typeof result.exit_code === "number" && Number.isInteger(result.exit_code) && result.exit_code !== 0 && output.includes(${JSON.stringify(agentsMetadataProbePath)}) && new RegExp(${JSON.stringify(denialPattern)}, "i").test(output); text(!startupFailed && denied ? "AGENTS_METADATA_PROTECTED" : "AGENTS_METADATA_PROTECTION_FAILED:" + output.slice(-1000));`))
       }
       return sse(outputMessage(id, "WORKSPACE_WRITE_OK_FINAL"))
     }
@@ -372,13 +546,17 @@ async function main(): Promise<void> {
       }
     }
     if (childRequest) childRequestTools.push(names)
-    decisions.push(`${requestNumber}:thread=${requestThreadId}:turn=${requestTurnId}:child=${childRequest}:root=${rootStage}:childStage=${childStage}:functionOutputs=${outputs.length}:${outputs.map((item) => JSON.stringify(item.output)).join(",").slice(-500)}:customOutputs=${customOutputs.length}`)
+    decisions.push(`${requestNumber}:thread=${requestThreadId}:turn=${requestTurnId}:child=${childRequest}:root=${rootStage}:childStage=${childStage}:tools=${names.join(",")}:functionOutputs=${outputs.length}:${outputs.map((item) => JSON.stringify(item.output)).join(",").slice(-500)}:customOutputs=${customOutputs.length}`)
     if (childRequest) {
       const serializedInput = JSON.stringify(body.input ?? [])
       if (serializedInput.includes("INTERRUPT_CHILD_PROBE")) {
+        interruptThreadId = requestThreadId
         interruptRequestObserved = true
         resolveInterruptRequest()
-        return hangingSse(id, () => { interruptStreamCancelled = true })
+        return hangingSse(id, () => {
+          interruptStreamCancelled = true
+          resolveInterruptStreamCancellation()
+        })
       }
       if (childStage === "final" && serializedInput.includes("CHILD_FOLLOWUP_PROBE")) return sse(outputMessage(id, "CHILD_FOLLOWUP_OK"))
       if (childStage === "final" && serializedInput.includes("CHILD_QUEUED_PROBE")) return sse(outputMessage(id, "CHILD_QUEUED_OK"))
@@ -404,7 +582,8 @@ async function main(): Promise<void> {
       rootStage = "fff"
       requestedOperations.add("sandbox_exec")
       operationByCallId.set(`call_${id}`, "sandbox_exec")
-      return sse(customToolCall(id, exec, `const result = await tools.exec_command({ cmd: "pwd; touch .codex-read-only-probe", workdir: ${JSON.stringify(repo)} }); const output = result.output ?? ""; const startupFailed = /Unable to spawn codex-linux-sandbox|fs sandbox helper failed|bwrap: Failed .*Permission denied/i.test(output); text(!startupFailed && result.exit_code !== 0 && output.includes(${JSON.stringify(repo)}) ? "SANDBOX_READ_ONLY_ENFORCED" : "SANDBOX_READ_ONLY_FAILED");`))
+      const command = "pwd; command touch -- .codex-read-only-probe"
+      return sse(customToolCall(id, exec, `const result = await tools.exec_command(${JSON.stringify(deferredExecArguments(command, repo))}); const output = result.output ?? ""; const startupFailed = /Unable to spawn codex-linux-sandbox|fs sandbox helper failed|bwrap: Failed .*Permission denied/i.test(output); text(!startupFailed && result.exit_code !== 0 && output.includes(${JSON.stringify(repo)}) ? "SANDBOX_READ_ONLY_ENFORCED" : "SANDBOX_READ_ONLY_FAILED");`))
     }
     if (rootStage === "fff" && exec) {
       rootStage = "serena"
@@ -485,7 +664,7 @@ async function main(): Promise<void> {
       return sse(toolCall(id, selectedMode === "explicit-exec" ? { ...interrupt, namespace: "mcp__agents" } : interrupt, { target: interruptTarget }))
     }
     if (rootStage === "wait-interrupt" && wait) {
-      rootStage = "close-interrupt"
+      rootStage = "final"
       requestedOperations.add("wait_interrupt_agent")
       operationByCallId.set(`call_${id}`, "wait_interrupt_agent")
       return sse(toolCall(id, selectedMode === "explicit-exec" ? { ...wait, namespace: "mcp__agents" } : wait, waitAgentArguments(selectedMode, interruptTarget)))
@@ -495,12 +674,6 @@ async function main(): Promise<void> {
       requestedOperations.add("audit_interrupt_agent")
       operationByCallId.set(`call_${id}`, "audit_interrupt_agent")
       return sse(toolCall(id, list, {}))
-    }
-    if (rootStage === "close-interrupt" && close) {
-      rootStage = "final"
-      requestedOperations.add("close_agent")
-      operationByCallId.set(`call_${id}`, "close_agent")
-      return sse(toolCall(id, selectedMode === "explicit-exec" ? { ...close, namespace: "mcp__agents" } : close, { target: interruptTarget, reason: "capability smoke completed" }))
     }
     return sse(outputMessage(id, "ROOT_OK_FINAL"))
       } })
@@ -515,7 +688,7 @@ async function main(): Promise<void> {
     providerKeysJson: JSON.stringify({ fake: "fixture-key" }),
     model: "fake/gpt-5.6-sol",
   })
-  const bridge = startProviderBridge(providers)
+  const bridge = startProviderBridge(providers, { onUsage: async () => undefined })
   const bridgeEnv = "CCHP_CODEX_BRIDGE_TOKEN"
   const broker = await startGitHubBroker({
     socketPath: join(root, "ctx", "codex", "github-broker.sock"),
@@ -547,31 +720,37 @@ async function main(): Promise<void> {
     codexBin: process.env.CODEX_BIN ?? "codex",
     codexHome: prepared.codexHome,
     cwd: repo,
-    env: buildCodexEnvironment({
-      ...Object.fromEntries(
-        ["PATH", "HOME", "TMPDIR", "XDG_RUNTIME_DIR", "LANG", "LC_ALL", "TERM", "NO_COLOR"]
-          .flatMap((name) => typeof process.env[name] === "string" ? [[name, process.env[name]!]] : []),
-      ),
-      CODEX_HOME: prepared.codexHome,
-      [bridgeEnv]: bridge.token,
-      BOT_REPO: "CCH-HQ/fixture",
-      BOT_TASK: "manual",
-      BOT_WORKDIR: root,
-      REPO_DIR: repo,
-      BOT_RUN_ID: "capability-smoke",
-      CCHP_GITHUB_BROKER_SOCKET: broker.socketPath,
-      CCHP_GITHUB_BROKER_TOKEN: broker.token,
-      CCHP_GITHUB_BROKER_FINALIZER: join(root, "ctx", "review-finalized.json"),
-      GH_TOKEN: "github-sentinel",
-      CCHP_GH_TOKEN_FILE: "/secret/token",
-      CCHP_BOT_PROVIDER_KEYS: "provider-sentinel",
-      CCHP_BOT_PROVIDERS: "provider-config-sentinel",
-      CCHP_APP_CLIENT_ID: "app-client-sentinel",
-      CCHP_APP_PRIVATE_KEY: "app-private-sentinel",
-      SEE_API_KEY: "see-sentinel",
-      HEROUI_AUTH_TOKEN: "heroui-sentinel",
-    }),
+    env: {
+      ...buildCodexEnvironment({
+        ...Object.fromEntries(
+          ["PATH", "HOME", "TMPDIR", "XDG_RUNTIME_DIR", "LANG", "LC_ALL", "TERM", "NO_COLOR"]
+            .flatMap((name) => typeof process.env[name] === "string" ? [[name, process.env[name]!]] : []),
+        ),
+        CODEX_HOME: prepared.codexHome,
+        [bridgeEnv]: bridge.token,
+        BOT_REPO: "CCH-HQ/fixture",
+        BOT_TASK: "manual",
+        BOT_WORKDIR: root,
+        REPO_DIR: repo,
+        BOT_RUN_ID: rootAdmission.runId,
+        CCHP_RUN_WRITER_ID: rootAdmission.writerId,
+        CCHP_RUN_WRITER_GENERATION: String(rootAdmission.generation),
+        CCHP_GITHUB_BROKER_SOCKET: broker.socketPath,
+        CCHP_GITHUB_BROKER_TOKEN: broker.token,
+        CCHP_GITHUB_BROKER_FINALIZER: join(root, "ctx", "review-finalized.json"),
+        GH_TOKEN: "github-sentinel",
+        CCHP_GH_TOKEN_FILE: "/secret/token",
+        CCHP_BOT_PROVIDER_KEYS: "provider-sentinel",
+        CCHP_BOT_PROVIDERS: "provider-config-sentinel",
+        CCHP_APP_CLIENT_ID: "app-client-sentinel",
+        CCHP_APP_PRIVATE_KEY: "app-private-sentinel",
+        SEE_API_KEY: "see-sentinel",
+        HEROUI_AUTH_TOKEN: "heroui-sentinel",
+      }),
+      CCHP_PROCESS_RECORD_HMAC_KEY: processRecordHmacKey,
+    },
     onNotification(notification) {
+      lastProviderProgressAt = Date.now()
       notifications.push(notification)
       if (
         notification.method === "turn/completed" &&
@@ -580,6 +759,7 @@ async function main(): Promise<void> {
       ) resolveCompleted()
     },
     onStderr(line) {
+      lastProviderProgressAt = Date.now()
       appServerStderr.push(line)
       process.stderr.write(`[codex-app-server] ${line}\n`)
     },
@@ -606,10 +786,22 @@ async function main(): Promise<void> {
     })
     expectedRootThreadId = String((thread.thread as Json).id)
     const closeInstruction = selectedMode === "explicit-exec"
-      ? "close the interrupted child with close_agent"
-      : "native-v2 has no close_agent; interrupt the second child and confirm its terminal state with list_agents"
+      ? "treat interrupt_agent followed by wait_agent as the terminal close sequence"
+      : "confirm the interrupted child's terminal state with list_agents"
+    lastProviderProgressAt = Date.now()
     await app.request("turn/start", { threadId: expectedRootThreadId, input: [{ type: "text", text: `Call fff and serena. Spawn one child, send it a queued message, wait, follow it up, list agents, spawn a second child, interrupt it, wait for interruption, ${closeInstruction}, and finish with ROOT_OK_FINAL.` }] })
-    await Promise.race([completed, new Promise((_, reject) => setTimeout(() => reject(new Error(`capability turn timed out; requests=${requestNumber} rootStage=${rootStage} childStage=${childStage} requested=${[...requestedOperations].join("|")} completed=${[...completedOperations].join("|")} decisions=${decisions.join("|")} tools=${requestTools.map((entries) => entries.join("|")).join(";")}`)), 20_000))])
+    await waitForProgressingCompletion(
+      completed,
+      () => lastProviderProgressAt,
+      () => `requests=${requestNumber} rootStage=${rootStage} childStage=${childStage} requested=${[...requestedOperations].join("|")} completed=${[...completedOperations].join("|")} decisions=${decisions.join("|")} tools=${requestTools.map((entries) => entries.join("|")).join(";")}`,
+    )
+    if (selectedMode === "native-v2" && interruptThreadId && !interruptStreamCancelled) {
+      await bridge.cancelThread(interruptThreadId, "native_child_terminal")
+      await Promise.race([
+        interruptStreamCancellation,
+        Bun.sleep(1_000).then(() => { throw new Error("native child stream cancellation did not reach the upstream") }),
+      ])
+    }
     const methods = notifications.map((item) => item.method)
     if (!methods.includes("turn/completed")) throw new Error("root turn completion was not observed")
     const rawCompletions = notifications
@@ -641,7 +833,7 @@ async function main(): Promise<void> {
       requestTools.some((tools) => tools.some((name) => name.endsWith("wait_agent"))) &&
       requestTools.some((tools) => tools.some((name) => name.endsWith("followup_task"))) &&
       requestTools.some((tools) => tools.some((name) => name.endsWith("interrupt_agent"))) &&
-      (selectedMode === "native-v2" || selectedMode === "explicit-exec" || requestTools.some((tools) => tools.some((name) => name.endsWith("close_agent")))) &&
+      closeAgentCatalogMatchesCodex(requestTools) &&
       requestTools.some((tools) => tools.some((name) => name.endsWith("list_agents")))
     const childCollaborationTools = childRequestTools.flat().filter(isCollaborationToolName)
     const nativeInterruptLifecycle = lifecycleItems.some((item) =>
@@ -651,13 +843,13 @@ async function main(): Promise<void> {
       .filter((item) => item.type === "subAgentActivity" && item.kind === "interacted" && String(item.agentPath ?? "").endsWith("/capability_child"))
       .map((item) => String(item.id ?? "")))
     const requiredSentinels = selectedMode === "explicit-exec"
-      ? ["CHILD_QUEUED_OK", "CHILD_FOLLOWUP_OK"]
+      ? ["CHILD_INITIAL_OK", "CHILD_QUEUED_OK", "CHILD_FOLLOWUP_OK"]
       : ["CHILD_FOLLOWUP_OK"]
     const requiredOperations = [
       "sandbox_exec", "spawn_agent", "send_message", "wait_agent", "followup_task", "list_agents",
       "spawn_interrupt_agent", "interrupt_agent",
     ]
-    if (selectedMode === "explicit-exec") requiredOperations.push("wait_interrupt_agent", "close_agent")
+    if (selectedMode === "explicit-exec") requiredOperations.push("wait_interrupt_agent")
     else requiredOperations.push("audit_interrupt_agent")
     const missingOperations = requiredOperations.filter((operation) => !requestedOperations.has(operation) || !completedOperations.has(operation))
     if (
@@ -666,7 +858,7 @@ async function main(): Promise<void> {
       || !requiredSentinels.every((sentinel) => parentObservedSentinels.has(sentinel))
       || !finalMessages.includes("ROOT_OK_FINAL")
       || missingOperations.length > 0
-      || !interruptRequestObserved
+      || !interruptCapabilityObserved(interruptRequestObserved, interruptStreamCancelled)
       || (selectedMode === "native-v2" && !nativeInterruptLifecycle)
       || (selectedMode === "native-v2" && !nativeInterruptListObserved)
       || (selectedMode === "native-v2" && nativeInteractions.size < 2)
@@ -689,7 +881,7 @@ async function main(): Promise<void> {
         .filter((item) => item.type === "subAgentActivity" || item.type === "collabAgentToolCall")
         .map((item) => JSON.stringify(item))
         .join("|")
-      throw new Error(`collab agent lifecycle/final root message was not observed; missingOperations=${missingOperations.join("|")} parentObservedSentinels=${[...parentObservedSentinels].join("|")} nativeInteractions=${nativeInteractions.size} interruptRequestObserved=${interruptRequestObserved} interruptStreamCancelled=${interruptStreamCancelled} nativeInterruptLifecycle=${nativeInterruptLifecycle} nativeInterruptListObserved=${nativeInterruptListObserved} childCollaborationTools=${childCollaborationTools.join("|")} methods=${methods.join(",")} items=${items} lifecycle=${lifecycleDetails} finalMessages=${finalMessages.join("|")} warnings=${warnings} startup=${startup} stderr=${appServerStderr.join("|")} shapes=${requestShapes.join(";")} tools=${requestTools.map((entries) => entries.join("|")).join(";")} decisions=${decisions.join("|")} catalogs=${requestCatalogs.join(";")}`)
+      throw new Error(`collab agent lifecycle/final root message was not observed; missingOperations=${missingOperations.join("|")} parentObservedSentinels=${[...parentObservedSentinels].join("|")} nativeInteractions=${nativeInteractions.size} interruptRequestObserved=${interruptRequestObserved} interruptStreamCancelled=${interruptStreamCancelled} nativeInterruptLifecycle=${nativeInterruptLifecycle} nativeInterruptListObserved=${nativeInterruptListObserved} childCollaborationTools=${childCollaborationTools.join("|")} decisions=${decisions.join("|")} shapes=${requestShapes.join(";")} tools=${requestTools.map((entries) => entries.join("|")).join(";")} methods=${methods.join(",")} items=${items} lifecycle=${lifecycleDetails} finalMessages=${finalMessages.join("|")} warnings=${warnings} startup=${startup} stderr=${appServerStderr.join("|")} catalogs=${requestCatalogs.join(";")}`)
     }
     if (existsSync(readonlyProbePath)) throw new Error("read-only sandbox allowed a repository write")
     const childHome = join(root, "explicit-codex-home")
@@ -716,6 +908,12 @@ async function main(): Promise<void> {
 
     const workspaceRoot = join(root, "workspace-write-smoke")
     mkdirSync(workspaceRoot, { recursive: true })
+    const workspaceAdmission: CollaborationAdmissionIdentity = {
+      runId: "capability-smoke-workspace-write",
+      writerId: "capability-smoke-workspace-write-writer",
+      generation: 1,
+    }
+    initializeCollaborationAdmission(workspaceRoot, workspaceAdmission)
     const workspacePrepared = prepareCodexHome({
       botWorkdir: workspaceRoot,
       engineDir: engineRoot,
@@ -731,29 +929,57 @@ async function main(): Promise<void> {
     })
     const workspaceNotifications: JsonRpcNotification[] = []
     const workspaceStderr: string[] = []
+    const secretSentinels = {
+      GH_TOKEN: "github-sentinel",
+      CCHP_BOT_PROVIDER_KEYS: "provider-sentinel",
+      CCHP_BOT_PROVIDERS: "provider-config-sentinel",
+      CCHP_PK_GPT_CCHP: "provider-key-sentinel",
+      CCHP_APP_CLIENT_ID: "app-client-sentinel",
+      CCHP_APP_PRIVATE_KEY: "app-private-sentinel",
+      SEE_API_KEY: "see-sentinel",
+      HEROUI_AUTH_TOKEN: "heroui-sentinel",
+    }
+    const workspaceEnvInput = {
+      ...Object.fromEntries(
+        ["PATH", "HOME", "TMPDIR", "XDG_RUNTIME_DIR", "LANG", "LC_ALL", "TERM", "NO_COLOR"]
+          .flatMap((name) => typeof process.env[name] === "string" ? [[name, process.env[name]!]] : []),
+      ),
+      ...secretSentinels,
+      CODEX_HOME: workspacePrepared.codexHome,
+      [bridgeEnv]: bridge.token,
+      BOT_REPO: "CCH-HQ/fixture",
+      BOT_TASK: "manual",
+      BOT_WORKDIR: workspaceRoot,
+      REPO_DIR: repo,
+      BOT_RUN_ID: workspaceAdmission.runId,
+      CCHP_RUN_WRITER_ID: workspaceAdmission.writerId,
+      CCHP_RUN_WRITER_GENERATION: String(workspaceAdmission.generation),
+      CCHP_GITHUB_BROKER_SOCKET: broker.socketPath,
+      CCHP_GITHUB_BROKER_TOKEN: broker.token,
+      CCHP_GITHUB_BROKER_FINALIZER: join(root, "ctx", "review-finalized.json"),
+    }
+    for (const [name, value] of Object.entries(secretSentinels)) {
+      if (workspaceEnvInput[name as keyof typeof workspaceEnvInput] !== value) throw new Error(`capability smoke failed to seed ${name}`)
+    }
+    const workspaceCodexEnv: Record<string, string> = {
+      ...buildCodexEnvironment(workspaceEnvInput),
+      CCHP_PROCESS_RECORD_HMAC_KEY: processRecordHmacKey,
+    }
+    for (const name of Object.keys(secretSentinels)) {
+      if (workspaceCodexEnv[name] != null) throw new Error(`Codex app-server environment retained ${name}`)
+    }
+    const appServerLongLivedSecretsAbsent = true
+    const networkProbeTarget = "https://example.com"
+    const hostNetworkBefore = await probeNetworkPolicy(networkProbeTarget)
     let resolveWorkspaceCompleted!: () => void
     const workspaceCompleted = new Promise<void>((resolve) => { resolveWorkspaceCompleted = resolve })
     workspaceApp = new CodexAppServer({
       codexBin: process.env.CODEX_BIN ?? "codex",
       codexHome: workspacePrepared.codexHome,
       cwd: repo,
-      env: buildCodexEnvironment({
-        ...Object.fromEntries(
-          ["PATH", "HOME", "TMPDIR", "XDG_RUNTIME_DIR", "LANG", "LC_ALL", "TERM", "NO_COLOR"]
-            .flatMap((name) => typeof process.env[name] === "string" ? [[name, process.env[name]!]] : []),
-        ),
-        CODEX_HOME: workspacePrepared.codexHome,
-        [bridgeEnv]: bridge.token,
-        BOT_REPO: "CCH-HQ/fixture",
-        BOT_TASK: "manual",
-        BOT_WORKDIR: workspaceRoot,
-        REPO_DIR: repo,
-        BOT_RUN_ID: "capability-smoke-workspace-write",
-        CCHP_GITHUB_BROKER_SOCKET: broker.socketPath,
-        CCHP_GITHUB_BROKER_TOKEN: broker.token,
-        CCHP_GITHUB_BROKER_FINALIZER: join(root, "ctx", "review-finalized.json"),
-      }),
+      env: workspaceCodexEnv,
       onNotification(notification) {
+        lastProviderProgressAt = Date.now()
         workspaceNotifications.push(notification)
         if (
           notification.method === "turn/completed" &&
@@ -762,6 +988,7 @@ async function main(): Promise<void> {
         ) resolveWorkspaceCompleted()
       },
       onStderr(line) {
+        lastProviderProgressAt = Date.now()
         workspaceStderr.push(line)
         process.stderr.write(`[codex-workspace-app-server] ${line}\n`)
       },
@@ -776,16 +1003,16 @@ async function main(): Promise<void> {
       experimentalRawEvents: true,
     })
     workspaceThreadId = String((workspaceThread.thread as Json).id)
+    lastProviderProgressAt = Date.now()
     await workspaceApp.request("turn/start", {
       threadId: workspaceThreadId,
       input: [{ type: "text", text: "Use apply_patch to update README.md, then prove .git and .agents metadata remain protected, and finish with WORKSPACE_WRITE_OK_FINAL." }],
     })
-    await Promise.race([
+    await waitForProgressingCompletion(
       workspaceCompleted,
-      new Promise((_, reject) => setTimeout(() => reject(new Error(
-        `workspace-write turn timed out; stage=${workspaceStage} requested=${[...workspaceRequestedOperations].join("|")} completed=${[...workspaceCompletedOperations].join("|")}`,
-      )), 20_000)),
-    ])
+      () => lastProviderProgressAt,
+      () => `workspace-write stage=${workspaceStage} requested=${[...workspaceRequestedOperations].join("|")} completed=${[...workspaceCompletedOperations].join("|")}`,
+    )
 
     const workspaceFinalMessages = workspaceNotifications
       .filter((notification) => notification.method === "item/completed")
@@ -794,10 +1021,6 @@ async function main(): Promise<void> {
         const item = params.item && typeof params.item === "object" ? params.item as Json : {}
         return item.type === "agentMessage" ? String(item.text ?? "") : ""
       })
-    const requiredWorkspaceOperations = ["workspace_apply_patch", "workspace_git_metadata", "workspace_agents_metadata"]
-    const missingWorkspaceOperations = requiredWorkspaceOperations.filter((operation) =>
-      !workspaceRequestedOperations.has(operation) || !workspaceCompletedOperations.has(operation),
-    )
     const sandboxFailures = workspaceStderr.flatMap((line) => {
       const failure = fatalSandboxError(line)
       return failure ? [failure] : []
@@ -808,10 +1031,31 @@ async function main(): Promise<void> {
     })
     const workspaceConfig = readFileSync(workspacePrepared.configPath, "utf8")
     const enforcement = workspaceEnforcement(workspaceConfig)
+    const hostNetworkAfter = await probeNetworkPolicy(networkProbeTarget)
+    const workspaceNetworkEvidence = workspaceSandboxNetworkEvidence
+      ? classifyCapabilityNetworkEvidence({
+          target: networkProbeTarget,
+          configuredEnforcement: enforcement,
+          hostBefore: hostNetworkBefore,
+          sandbox: workspaceSandboxNetworkEvidence,
+          hostAfter: hostNetworkAfter,
+        })
+      : undefined
+    if (workspaceShellCapabilitiesExcluded && workspaceNetworkEvidence) {
+      workspaceCompletedOperations.add("workspace_shell_boundary")
+    }
+    const requiredWorkspaceOperations = ["workspace_apply_patch", "workspace_shell_boundary", "workspace_git_metadata", "workspace_agents_metadata"]
+    const missingWorkspaceOperations = requiredWorkspaceOperations.filter((operation) =>
+      !workspaceRequestedOperations.has(operation) || !workspaceCompletedOperations.has(operation),
+    )
+    const shellSnapshotDirectoryAbsent = !existsSync(join(workspacePrepared.codexHome, "shell_snapshots"))
     if (
       missingWorkspaceOperations.length > 0 ||
       !workspaceFinalMessages.includes("WORKSPACE_WRITE_OK_FINAL") ||
       readFileSync(join(repo, "README.md"), "utf8") !== "smoke\nworkspace-write-ok\n" ||
+      !appServerLongLivedSecretsAbsent ||
+      !shellSnapshotDirectoryAbsent ||
+      !workspaceNetworkEvidence ||
       existsSync(gitMetadataProbePath) ||
       existsSync(agentsMetadataProbePath) ||
       rootSandboxFailures.length > 0 ||
@@ -820,6 +1064,8 @@ async function main(): Promise<void> {
     ) {
       throw new Error(
         `workspace-write capability failed; missing=${missingWorkspaceOperations.join("|")} final=${workspaceFinalMessages.join("|")} ` +
+        `shellBoundary=${workspaceBoundaryObservation} ` +
+        `shellSnapshots=${existsSync(join(workspacePrepared.codexHome, "shell_snapshots"))} ` +
         `gitProbe=${existsSync(gitMetadataProbePath)} agentsProbe=${existsSync(agentsMetadataProbePath)} ` +
         `sandboxFailures=${[...rootSandboxFailures, ...sandboxFailures].join("|")} enforcement=${enforcement} stderr=${workspaceStderr.join("|")} ` +
         `tools=${requestTools.slice(-6).map((entries) => entries.join("|")).join(";")} catalogs=${requestCatalogs.slice(-3).join(";")}`,
@@ -832,14 +1078,24 @@ async function main(): Promise<void> {
       thread_completed: true,
       apply_patch: "passed",
       ordinary_repo_write: "passed",
+      app_server_long_lived_secrets_absent: appServerLongLivedSecretsAbsent ? "passed" : "failed",
+      shell_capabilities_excluded: "passed",
+      shell_snapshot_directory_absent: shellSnapshotDirectoryAbsent ? "passed" : "failed",
+      external_network: {
+        result: "policy-blocked",
+        reason: workspaceNetworkEvidence.reason,
+        probe_target: workspaceNetworkEvidence.target,
+        configured_enforcement: enforcement,
+        observations: workspaceNetworkEvidence.observations,
+      },
       git_metadata_protected: "passed",
       agents_metadata_protected: "passed",
-      enforcement,
+      configured_enforcement: enforcement,
       requested_operations: [...workspaceRequestedOperations],
       completed_operations: [...workspaceCompletedOperations],
     }
     const report = {
-      schema_version: 1,
+      schema_version: 2,
       run_id: process.env.CCHP_ARTIFACT_RUN_ID ?? "local",
       status: "passed",
       version: capability.version,
@@ -875,14 +1131,17 @@ async function main(): Promise<void> {
 
 if (import.meta.main) {
   main().catch((error) => {
+    const nested = error instanceof AggregateError
+      ? error.errors.map((cause) => cause instanceof Error ? `${cause.name}:${cause.message}` : String(cause)).join("|")
+      : ""
     writeModeArtifact({
-      schema_version: 1,
+      schema_version: 2,
       run_id: process.env.CCHP_ARTIFACT_RUN_ID ?? "local",
       status: "failed",
       collaborationMode: collaborationMode(),
       error_type: error instanceof Error ? error.name : "Error",
     })
-    process.stderr.write(`[codex-capability] failed: ${(error as Error).message}\n`)
+    process.stderr.write(`[codex-capability] failed: ${(error as Error).message}${nested ? ` causes=${nested}` : ""}\n`)
     process.exit(1)
   })
 }

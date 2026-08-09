@@ -88,6 +88,48 @@ printf '%s\n' "${SEE_API_KEY:-missing}" > "${SEE_INVOCATION_LOG:?}"
 SH
 chmod +x "$test_root/bin/see-cli"
 
+cat > "$test_root/bin/curl" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+output=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -o) output="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+[[ -n "$output" ]]
+printf 'verified archive fixture\n' > "$output"
+SH
+chmod +x "$test_root/bin/curl"
+
+cat > "$test_root/bin/sha256sum" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ "${1:-}" == *see_Linux_x86_64.tar.gz ]]; then
+  printf 'ef0ff8e41579a828db303585e6711bf599619b3e0929b15e7616ed446647db90  %s\n' "$1"
+else
+  exec /usr/bin/sha256sum "$@"
+fi
+SH
+chmod +x "$test_root/bin/sha256sum"
+
+cat > "$test_root/bin/tar" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+destination=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -C) destination="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+[[ -n "$destination" ]]
+printf '%s\n' '#!/bin/sh' 'exit 0' > "$destination/see"
+chmod +x "$destination/see"
+SH
+chmod +x "$test_root/bin/tar"
+
 PATH="$test_root/bin:/usr/bin:/bin" \
 HOME="$test_root/home" \
 BOT_WORKDIR="$test_root/work" \
@@ -133,10 +175,12 @@ for env_file in "$test_root/work/skills-install-home/bunx-env.names" "$test_root
     exit 1
   }
 done
-[[ -f "$test_root/work/ctx/see/api-key" ]]
-[[ "$(stat -c '%a' "$test_root/work/ctx/see/api-key")" == "600" ]]
-[[ "$(<"$test_root/work/ctx/see/api-key")" == "see-sentinel" ]]
+[[ ! -e "$test_root/work/ctx/see/api-key" ]]
 [[ ! -e "$test_root/see-env.log" ]]
+[[ -x "$test_root/work/ctx/tools/see/see" ]]
+[[ ! -e "$test_root/home/.local/lib/see-cli/see" ]]
+jq -e '.schemaVersion == 1 and .version == "v1.2.0" and (.binarySha256 | test("^[a-f0-9]{64}$"))' \
+  "$test_root/work/ctx/tools/see/provenance.json" >/dev/null
 
 second_work="$test_root/read-only-work"
 second_home="$test_root/read-only-home"

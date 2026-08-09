@@ -51,6 +51,12 @@ tests=(
   src/codex/jsonl.test.ts
   src/codex/file-snapshot.test.ts
   src/codex/durable-file.test.ts
+  src/codex/workflow-runtime-snapshot.test.ts
+  src/codex/finalize-workflow-progress.test.ts
+  src/codex/lifecycle-artifact.test.ts
+  src/codex/workflow-finalization.test.ts
+  src/codex/workflow-lifecycle-contract.test.ts
+  src/codex/prepared-review-finalization-e2e.test.ts
   src/codex/review-admission.test.ts
   src/review/finalize.test.ts
   src/mcp/server.test.ts
@@ -80,6 +86,7 @@ tests_state="pending"
 typecheck_state="pending"
 prepare_state="pending"
 run_state="pending"
+cleanup_state="pending"
 completed=0
 
 write_summary() {
@@ -92,7 +99,7 @@ write_summary() {
     printf '  "status": "%s",\n' "$status"
     printf '  "stage": "%s",\n' "$stage"
     if [[ -n "$exit_code" ]]; then printf '  "exit_code": %s,\n' "$exit_code"; fi
-    printf '  "phases": {"tests": "%s", "typecheck": "%s", "prepare_codex_env": "%s", "run_codex": "%s"},\n' "$tests_state" "$typecheck_state" "$prepare_state" "$run_state"
+    printf '  "phases": {"tests": "%s", "typecheck": "%s", "prepare_codex_env": "%s", "run_codex": "%s", "cleanup": "%s"},\n' "$tests_state" "$typecheck_state" "$prepare_state" "$run_state" "$cleanup_state"
     printf '  "caller_abi_unchanged": %s,\n' "$([[ "$status" == "passed" ]] && printf true || printf false)"
     printf '  "collaboration_modes": ["native-v2", "explicit-exec"],\n'
     printf '  "provider_formats": ["openai-responses", "openai-compatible", "anthropic"]\n'
@@ -106,6 +113,7 @@ skip_pending() {
   if [[ "$typecheck_state" == "pending" ]]; then typecheck_state="skipped"; fi
   if [[ "$prepare_state" == "pending" ]]; then prepare_state="skipped"; fi
   if [[ "$run_state" == "pending" ]]; then run_state="skipped"; fi
+  if [[ "$cleanup_state" == "pending" ]]; then cleanup_state="skipped"; fi
 }
 
 on_exit() {
@@ -126,7 +134,8 @@ run_phase() {
     tests) tests_state="running" ;;
     typecheck) typecheck_state="running" ;;
     prepare_codex_env) prepare_state="running" ;;
-    run_codex) run_state="running" ;;
+      run_codex) run_state="running" ;;
+      cleanup) cleanup_state="running" ;;
   esac
   write_summary running
   set +e
@@ -139,6 +148,7 @@ run_phase() {
       typecheck) typecheck_state="failed" ;;
       prepare_codex_env) prepare_state="failed" ;;
       run_codex) run_state="failed" ;;
+      cleanup) cleanup_state="failed" ;;
     esac
     skip_pending
     write_summary failed "$status"
@@ -149,6 +159,7 @@ run_phase() {
     typecheck) typecheck_state="passed" ;;
     prepare_codex_env) prepare_state="passed" ;;
     run_codex) run_state="passed" ;;
+    cleanup) cleanup_state="passed" ;;
   esac
   write_summary running
 }
@@ -157,6 +168,7 @@ run_phase tests "$out/tests.txt" bun test "${tests[@]}"
 run_phase typecheck "$out/typecheck.txt" bun run typecheck
 run_phase prepare_codex_env "$out/prepare-codex-env.txt" bash "$root/scripts/prepare-codex-env.test.sh"
 run_phase run_codex "$out/run-codex.txt" bash "$root/scripts/run-codex.test.sh"
+run_phase cleanup "$out/cleanup.txt" bash "$root/scripts/cleanup.test.sh"
 
 stage="completed"
 completed=1

@@ -7,14 +7,22 @@ run_scope_case() {
   local needs_write="$1" expected="$2" test_root
   test_root="$(mktemp -d)"
   trap 'rm -rf -- "$test_root"' RETURN
-  mkdir -p "${test_root}/bin" "${test_root}/repo" "${test_root}/work"
+  mkdir -p "${test_root}/bin" "${test_root}/repo" "${test_root}/work/ctx/tools/see" "${test_root}/home/.local/lib/see-cli"
   : > "${test_root}/prompt.md"
+  printf '%s\n' '#!/bin/sh' 'exit 99' > "${test_root}/home/.local/lib/see-cli/see"
+  chmod +x "${test_root}/home/.local/lib/see-cli/see"
+  printf '%s\n' '#!/bin/sh' 'exit 0' > "${test_root}/work/ctx/tools/see/see"
+  chmod +x "${test_root}/work/ctx/tools/see/see"
+  see_sha="$(sha256sum "${test_root}/work/ctx/tools/see/see" | awk '{print $1}')"
+  jq -n --arg sha "$see_sha" '{schemaVersion: 1, binarySha256: $sha}' > "${test_root}/work/ctx/tools/see/provenance.json"
 cat > "${test_root}/bin/bun" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
 if [[ "${1:-}" == *src/codex/runtime.ts ]]; then
   env | sed 's/=.*//' | sort > "${BOT_WORKDIR:?}/runtime.env"
   printf '%s\n' "${CCHP_NEEDS_WRITE:-<unset>}" > "${BOT_WORKDIR:?}/runtime.scope"
+  printf '%s\n' "${BOT_HAVE_SEE:-<unset>}" > "${BOT_WORKDIR:?}/runtime.see"
+  cat > "${BOT_WORKDIR:?}/runtime.see-stdin"
   mkdir -p "${BOT_WORKDIR}/ctx/codex"
   printf '{"state":"SUCCEEDED"}\n' > "${BOT_WORKDIR}/ctx/codex/terminal.json"
 fi
@@ -28,6 +36,7 @@ SH
   REPO_DIR="${test_root}/repo" \
   BOT_PROMPT_FILE="${test_root}/prompt.md" \
   BOT_REPO="CCH-HQ/fixture" \
+  GITHUB_ACTIONS=false \
   CCHP_APP_CLIENT_ID="fixture-client" \
   CCHP_APP_PRIVATE_KEY="fixture-private-key" \
   CCHP_NEEDS_WRITE="$needs_write" \
@@ -46,12 +55,32 @@ SH
   }
   local runtime_names
   runtime_names="$(<"${test_root}/work/runtime.env")"
-  for required in CCHP_APP_CLIENT_ID CCHP_APP_PRIVATE_KEY GH_TOKEN HEROUI_AUTH_TOKEN; do
+  for required in CCHP_APP_CLIENT_ID CCHP_APP_PRIVATE_KEY GH_TOKEN HEROUI_AUTH_TOKEN BOT_HAVE_SEE; do
     [[ $'\n'"$runtime_names"$'\n' == *$'\n'"$required"$'\n'* ]] || {
       printf 'runtime did not receive required rotation input: %s\n' "$required" >&2
       return 1
     }
   done
+  [[ $'\n'"$runtime_names"$'\n' == *$'\n'CCHP_PROCESS_RECORD_HMAC_KEY$'\n'* ]] || {
+    printf 'runtime did not receive the controller process-record HMAC key\n' >&2
+    return 1
+  }
+  [[ "$(<"${test_root}/work/ctx/codex/process-record-hmac.key")" =~ ^[a-f0-9]{64}$ ]] || {
+    printf 'local process-record HMAC key was not persisted correctly\n' >&2
+    return 1
+  }
+  [[ $'\n'"$runtime_names"$'\n' != *$'\n'SEE_API_KEY$'\n'* ]] || {
+    printf 'SEE_API_KEY leaked into runtime environment\n' >&2
+    return 1
+  }
+  [[ "$(<"${test_root}/work/runtime.see-stdin")" == "see-sentinel" ]] || {
+    printf 'SEE_API_KEY stdin channel was not delivered\n' >&2
+    return 1
+  }
+  [[ "$(<"${test_root}/work/runtime.see")" == "1" ]] || {
+    printf 'SEE broker capability was not enabled\n' >&2
+    return 1
+  }
   [[ $'\n'"$runtime_names"$'\n' != *$'\n'CCHP_GH_TOKEN_FILE$'\n'* ]] || {
     printf 'legacy token file capability leaked to runtime\n' >&2
     return 1
@@ -92,6 +121,7 @@ SH
   BOT_PROMPT_FILE="${test_root}/prompt.md" \
   BOT_REPO="CCH-HQ/fixture" \
   BOT_TASK="manual" \
+  GITHUB_ACTIONS=false \
   GH_TOKEN="fixture-token" \
   GITHUB_RUN_ID="123" \
   GITHUB_RUN_ATTEMPT="2" \
@@ -107,7 +137,31 @@ SH
   }
 }
 
+run_production_key_gate_case() {
+  local test_root
+  test_root="$(mktemp -d)"
+  trap 'rm -rf -- "$test_root"' RETURN
+  mkdir -p "${test_root}/repo" "${test_root}/work"
+  : > "${test_root}/prompt.md"
+  if PATH="/usr/bin:/bin" \
+    HOME="${test_root}/home" \
+    BOT_WORKDIR="${test_root}/work" \
+    ENGINE_DIR="$ROOT" \
+    REPO_DIR="${test_root}/repo" \
+    BOT_PROMPT_FILE="${test_root}/prompt.md" \
+    GITHUB_ACTIONS=true \
+    bash "$ROOT/scripts/run-codex.sh" 2>"${test_root}/stderr"; then
+    printf 'production run unexpectedly accepted a missing process-record HMAC key\n' >&2
+    return 1
+  fi
+  grep -q 'CCHP_PROCESS_RECORD_HMAC_KEY is required' "${test_root}/stderr" || {
+    printf 'production process-record key failure was not explicit\n' >&2
+    return 1
+  }
+}
+
 run_scope_case true true
 run_scope_case false false
 run_restart_case
+run_production_key_gate_case
 printf 'run-codex token scope tests passed\n'

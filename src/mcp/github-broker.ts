@@ -6,6 +6,7 @@ import { unlink } from "node:fs/promises"
 import { dirname } from "node:path"
 import { mkdirSync } from "node:fs"
 import { openRegularFileSnapshot, type FileSnapshot } from "../codex/file-snapshot"
+import { assertNoForbiddenMaterial } from "../security/secret-material"
 import type { GitHubClient, TokenSource } from "../github/client"
 import { CHECK_RUN_NAME } from "../publish/checkrun"
 import { ARTIFACT_SCHEMA_VERSION, TASKS, type Task } from "../types"
@@ -50,6 +51,8 @@ export interface GitHubBrokerOptions {
   repoDir?: string
   allowRepositoryMutation?: boolean
   herouiAuthToken?: string
+  seeUpload?: (path: string, name?: string, isPrivate?: boolean) => Promise<unknown>
+  forbiddenValues?: () => readonly string[]
   runCommand?: (command: string, args: string[], options: { cwd: string; env: Record<string, string>; timeoutMs: number }) => Promise<{ stdout: string; stderr: string }>
 }
 
@@ -104,6 +107,7 @@ const ISSUE_READ = new Set([
   "rest.issues.get",
   "rest.issues.listComments",
 ])
+const COMMENT_READ = new Set(["rest.issues.getComment"])
 const SEARCH_READ = new Set(["rest.search.issuesAndPullRequests"])
 const ACTOR_READ = new Set([
   "rest.repos.getCollaboratorPermissionLevel",
@@ -153,7 +157,7 @@ const RELEASE_REST = new Set([
 ])
 
 const TASK_REST: Record<Task, ReadonlySet<string>> = {
-  engage: union(PR_READ, ISSUE_READ, SEARCH_READ, ACTOR_READ, COMMENT_MUTATIONS, MODERATION_MUTATIONS, PULL_REQUEST_MUTATIONS, ROADMAP_REST),
+  engage: union(PR_READ, ISSUE_READ, COMMENT_READ, SEARCH_READ, ACTOR_READ, COMMENT_MUTATIONS, MODERATION_MUTATIONS, PULL_REQUEST_MUTATIONS, ROADMAP_REST),
   pr_opened: union(PR_OPENED_READ, PR_OPENED_MUTATIONS, PR_OPENED_TRIAGE, SEARCH_READ, ISSUE_READ, ACTOR_READ, new Set([
     "rest.issues.deleteComment", "rest.pulls.deleteReviewComment", "rest.reactions.listForIssueComment",
   ])),
@@ -161,11 +165,11 @@ const TASK_REST: Record<Task, ReadonlySet<string>> = {
     "rest.issues.listComments",
     "rest.issues.getLabel", "rest.issues.createLabel", "rest.issues.addLabels",
   ]), MERGE_MUTATIONS),
-  ci_fix: union(PR_READ, ISSUE_READ, SEARCH_READ, ACTOR_READ, WORKFLOW_READ, COMMENT_MUTATIONS, CHECK_MUTATIONS, WORKFLOW_MUTATIONS, PULL_REQUEST_MUTATIONS),
+  ci_fix: union(PR_READ, ISSUE_READ, COMMENT_READ, SEARCH_READ, ACTOR_READ, WORKFLOW_READ, COMMENT_MUTATIONS, CHECK_MUTATIONS, WORKFLOW_MUTATIONS, PULL_REQUEST_MUTATIONS),
   release_notes: union(ISSUE_READ, SEARCH_READ, new Set(["rest.issues.update"]), RELEASE_REST, ROADMAP_REST),
   roadmap_item: union(PR_READ, ISSUE_READ, SEARCH_READ, new Set(["rest.issues.update"]), ROADMAP_REST),
   roadmap_sync: union(PR_READ, ISSUE_READ, SEARCH_READ, new Set(["rest.issues.update"]), ROADMAP_REST),
-  reaction_execute: union(ISSUE_READ, SEARCH_READ, ACTOR_READ, new Set(["rest.issues.updateComment"]), PULL_REQUEST_MUTATIONS),
+  reaction_execute: union(ISSUE_READ, COMMENT_READ, SEARCH_READ, ACTOR_READ, new Set(["rest.issues.updateComment"]), PULL_REQUEST_MUTATIONS),
   manual: new Set(),
   dispatch: new Set(),
 }
@@ -375,7 +379,7 @@ function authorizeRest(
     }
   }
 
-  if (operation === "rest.issues.updateComment") {
+  if (operation === "rest.issues.getComment" || operation === "rest.issues.updateComment") {
     const commentId = positiveInteger(args.comment_id)
     if (!commentId || !state.commentIds.has(commentId)) throw new Error("broker comment id was not trusted or discovered")
   }
@@ -684,7 +688,11 @@ function authorizeGraphql(options: GitHubBrokerOptions, state: BrokerAuthorizati
 
 function authorize(options: GitHubBrokerOptions, state: BrokerAuthorizationState, operation: string, args: Json): void {
   if (operation.startsWith("cchp.")) {
-    assertOnlyKeys(args, operation === "cchp.installWebDependencies" ? ["mode"] : [])
+    assertOnlyKeys(args,
+      operation === "cchp.installWebDependencies" ? ["mode"]
+        : operation === "cchp.seeUpload" ? ["path", "name", "is_private"]
+          : [],
+    )
     if (!options.repoDir) throw new Error("broker runtime operation has no trusted repository directory")
     if (operation === "cchp.gitFetch") return
     if (operation === "cchp.gitPush") {
@@ -694,6 +702,13 @@ function authorize(options: GitHubBrokerOptions, state: BrokerAuthorizationState
     if (operation === "cchp.installWebDependencies") {
       if (!options.allowRepositoryMutation) throw new Error("broker dependency installation is not allowed for this run")
       if (!new Set(["frozen", "update"]).has(String(args.mode))) throw new Error("dependency install mode must be frozen or update")
+      return
+    }
+    if (operation === "cchp.seeUpload") {
+      if (!options.seeUpload) throw new Error("SEE upload is unavailable for this run")
+      if (typeof args.path !== "string" || !args.path.trim()) throw new Error("SEE upload path must be a non-empty string")
+      if (args.name != null && (typeof args.name !== "string" || !args.name.trim())) throw new Error("SEE upload name must be a non-empty string")
+      if (args.is_private != null && typeof args.is_private !== "boolean") throw new Error("SEE upload privacy flag must be boolean")
       return
     }
     throw new Error(`unknown broker runtime operation: ${operation}`)
@@ -751,6 +766,13 @@ async function executeRuntimeOperation(options: GitHubBrokerOptions, operation: 
   }
   if (operation === "cchp.gitPush") {
     return run("git", ["push", "origin", "HEAD"], { cwd: repoDir, env: baseEnv, timeoutMs: 300_000 })
+  }
+  if (operation === "cchp.seeUpload") {
+    return options.seeUpload!(
+      String(args.path),
+      typeof args.name === "string" ? args.name : undefined,
+      args.is_private === true,
+    )
   }
   const webDir = `${repoDir}/web`
   if (!existsSync(`${webDir}/package.json`)) throw new Error("trusted repository has no web/package.json")
@@ -917,7 +939,7 @@ function rememberResult(options: GitHubBrokerOptions, state: BrokerAuthorization
       rememberReturnedGraphqlId(state.roadmapFieldIds, result, "updateProjectV2Field", "projectV2Field")
     }
   }
-  if (["rest.issues.listComments", "rest.issues.createComment", "rest.issues.updateComment"].includes(operation)) {
+  if (["rest.issues.listComments", "rest.issues.getComment", "rest.issues.createComment", "rest.issues.updateComment"].includes(operation)) {
     rememberComment(state.commentIds, state.commentNodeIds, result)
   }
   if (operation === "rest.pulls.listReviewComments") rememberComment(state.reviewCommentIds, state.commentNodeIds, result)
@@ -1122,14 +1144,16 @@ async function handleRequest(socket: Socket, options: GitHubBrokerOptions, state
   const id = request.id
   try {
     if (typeof request.token !== "string" || !sameToken(request.token, token)) throw new Error("invalid GitHub broker token")
-    const result = await execute(options, state, String(request.operation ?? ""), (request.args as Json) ?? {})
+    const args = (request.args as Json) ?? {}
+    assertNoForbiddenMaterial(args, [token, ...(options.forbiddenValues?.() ?? [])], "broker request contains credential material")
+    const result = await execute(options, state, String(request.operation ?? ""), args)
     socket.write(`${JSON.stringify({ id, ok: true, result })}\n`)
   } catch (error) {
     socket.write(`${JSON.stringify({ id, ok: false, error: error instanceof Error ? error.message : String(error) })}\n`)
   }
 }
 
-function brokerRequest(socketPath: string, token: string, operation: string, args: Json): Promise<unknown> {
+export function brokerRequest(socketPath: string, token: string, operation: string, args: Json): Promise<unknown> {
   return new Promise((resolve, reject) => {
     const id = randomBytes(8).toString("hex")
     const socket = connect(socketPath)

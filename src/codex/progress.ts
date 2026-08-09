@@ -11,15 +11,39 @@ export interface ProgressTrackerOptions {
   rootThreadId: string
   task: string
   runId: string
-  publish?: (body: string) => Promise<void>
+  publish?: (body: string, signal?: AbortSignal) => Promise<void>
 }
 
-interface TodoLedger {
+export interface TodoLedger {
   schemaVersion: 1
   revision: number
   rootThreadId: string
   updatedAt: string
   todos: Todo[]
+}
+
+export function parseTodoLedger(value: unknown): TodoLedger {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("invalid todo ledger")
+  const ledger = value as Partial<TodoLedger>
+  if (
+    ledger.schemaVersion !== 1 ||
+    !Number.isSafeInteger(ledger.revision) || Number(ledger.revision) < 0 ||
+    typeof ledger.rootThreadId !== "string" || !ledger.rootThreadId ||
+    typeof ledger.updatedAt !== "string" || !ledger.updatedAt || Number.isNaN(Date.parse(ledger.updatedAt)) ||
+    !Array.isArray(ledger.todos) ||
+    !ledger.todos.every((todo) =>
+      todo && typeof todo === "object" && !Array.isArray(todo) &&
+      typeof todo.content === "string" &&
+      ["pending", "in_progress", "completed", "cancelled"].includes(String(todo.status)),
+    )
+  ) throw new Error("invalid todo ledger")
+  return {
+    schemaVersion: 1,
+    revision: Number(ledger.revision),
+    rootThreadId: ledger.rootThreadId,
+    updatedAt: ledger.updatedAt,
+    todos: ledger.todos.map((todo) => ({ content: todo.content, status: todo.status })),
+  }
 }
 
 function todoStatus(status: string): string {
@@ -41,20 +65,19 @@ export class ProgressTracker {
   private todos: Todo[] = []
   private fingerprint = ""
   private lastBody = ""
+  private publicationVersion = 0
+  private completedPublicationVersion = 0
+  private activePublication?: { version: number; body: string }
+  private pendingPublication?: { version: number; body: string; signal?: AbortSignal }
+  private publicationLoop?: Promise<void>
+  private readonly publicationWaiters: Array<{ version: number; resolve: () => void }> = []
   publishError?: string
 
   constructor(private readonly options: ProgressTrackerOptions) {
     if (!existsSync(options.path)) return
     const stat = lstatSync(options.path)
     if (!stat.isFile() || stat.isSymbolicLink()) throw new Error("todo ledger must be a regular file")
-    const value = JSON.parse(readFileSync(options.path, "utf8")) as Partial<TodoLedger>
-    if (
-      value.schemaVersion !== 1 ||
-      !Number.isSafeInteger(value.revision) || Number(value.revision) < 0 ||
-      typeof value.rootThreadId !== "string" || !value.rootThreadId ||
-      !Array.isArray(value.todos) ||
-      !value.todos.every((todo) => todo && typeof todo.content === "string" && typeof todo.status === "string")
-    ) throw new Error("invalid todo ledger")
+    const value = parseTodoLedger(JSON.parse(readFileSync(options.path, "utf8")))
     if (options.rootThreadId !== "pending" && options.rootThreadId !== value.rootThreadId) {
       throw new Error(`todo ledger root thread mismatch: expected ${options.rootThreadId}, got ${value.rootThreadId}`)
     }
@@ -81,7 +104,9 @@ export class ProgressTracker {
     this.fingerprint = fingerprint
     this.revision++
     this.persist()
-    await this.publish()
+    // The durable ledger and semantic deadline are local invariants. GitHub is
+    // an external mirror and must not block JSON-RPC event processing.
+    void this.publish()
     return true
   }
 
@@ -90,8 +115,8 @@ export class ProgressTracker {
     usage?: { consumed: number; limit: number; state: string }
     semanticAgeMs?: number
     warning?: string
-  }): Promise<void> {
-    await this.publish(details)
+  }, signal?: AbortSignal): Promise<void> {
+    await this.publish(details, signal)
   }
 
   snapshot(): TodoLedger {
@@ -117,6 +142,7 @@ export class ProgressTracker {
       semanticAgeMs?: number
       warning?: string
     } = {},
+    signal?: AbortSignal,
   ): Promise<void> {
     if (!this.options.publish) return
     const metadata = [
@@ -135,16 +161,51 @@ export class ProgressTracker {
       details.warning ? `⚠️ ${details.warning}` : undefined,
     ].filter(Boolean)
     const body = `${renderProgress(this.todos, this.options.task)}\n\n${metadata.join(" · ")}`
-    if (body === this.lastBody) return
-    try {
-      await this.options.publish(body)
-      this.lastBody = body
-      this.publishError = undefined
-    } catch (error) {
-      // GitHub is an external status surface. Local todo state remains canonical
-      // and has already been durably written, so publication is intentionally
-      // fail-open while the error stays observable to the supervisor.
-      this.publishError = (error as Error).message
+    if (body === this.lastBody && !this.activePublication && !this.pendingPublication) return
+
+    let targetVersion: number
+    if (this.pendingPublication?.body === body) {
+      targetVersion = this.pendingPublication.version
+    } else if (this.activePublication?.body === body && !this.pendingPublication) {
+      targetVersion = this.activePublication.version
+    } else {
+      targetVersion = ++this.publicationVersion
+      this.pendingPublication = { version: targetVersion, body, ...(signal ? { signal } : {}) }
+    }
+
+    const completed = new Promise<void>((resolve) => {
+      if (targetVersion <= this.completedPublicationVersion) resolve()
+      else this.publicationWaiters.push({ version: targetVersion, resolve })
+    })
+    this.publicationLoop ??= this.drainPublications().finally(() => {
+      this.publicationLoop = undefined
+    })
+    await completed
+  }
+
+  private async drainPublications(): Promise<void> {
+    while (this.pendingPublication) {
+      const publication = this.pendingPublication
+      this.pendingPublication = undefined
+      this.activePublication = { version: publication.version, body: publication.body }
+      if (publication.body !== this.lastBody) {
+        try {
+          await this.options.publish!(publication.body, publication.signal)
+          this.lastBody = publication.body
+          this.publishError = undefined
+        } catch (error) {
+          // GitHub is an external status surface. Local todo state remains canonical
+          // and has already been durably written, so publication is intentionally
+          // fail-open while the error stays observable to the supervisor.
+          this.publishError = (error as Error).message
+        }
+      }
+      this.activePublication = undefined
+      this.completedPublicationVersion = publication.version
+      for (let index = this.publicationWaiters.length - 1; index >= 0; index--) {
+        if (this.publicationWaiters[index]!.version > publication.version) continue
+        this.publicationWaiters.splice(index, 1)[0]!.resolve()
+      }
     }
   }
 }

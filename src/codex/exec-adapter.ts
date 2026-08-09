@@ -1,5 +1,6 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process"
 import { normalizeExecEvent, type NormalizedEvent } from "./events"
+import { processIdentity, sameProcessIdentity, type ProcessIdentity } from "./run-lock"
 
 export type CodexExecTerminal = "completed" | "failed" | "interrupted"
 
@@ -24,6 +25,13 @@ export interface ExecRunOptions {
   signal?: AbortSignal
   onEvent?: (event: NormalizedEvent) => void | Promise<void>
   onStderr?: (line: string) => void | Promise<void>
+  /**
+   * POSIX-only durable launch barrier. The child process group waits in a
+   * minimal launcher until this callback has persisted its PID identity.
+   */
+  beforeExec?: (pid: number) => void | Promise<void>
+  /** Test seam for proving PID identity checks without relying on PID reuse. */
+  identifyProcess?: (pid: number) => ProcessIdentity
 }
 
 export interface ExecRunResult {
@@ -105,13 +113,46 @@ function buildArgs(options: ExecRunOptions): string[] {
   return args
 }
 
-function signalProcessGroup(child: ChildProcessWithoutNullStreams, signal: NodeJS.Signals): void {
+function processGroupOwnership(
+  pid: number,
+  identity: ProcessIdentity,
+  identify: (pid: number) => ProcessIdentity = processIdentity,
+): "live" | "absent" | "unproven" {
+  if (process.platform === "win32") return "live"
+  try {
+    process.kill(identity.pid, 0)
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error
+    return processGroupLive(pid) ? "unproven" : "absent"
+  }
+  return identity.pid === pid && sameProcessIdentity(identity, identify(identity.pid)) ? "live" : "unproven"
+}
+
+function signalProcessGroup(
+  child: ChildProcessWithoutNullStreams,
+  identity: ProcessIdentity,
+  signal: NodeJS.Signals,
+  identify?: (pid: number) => ProcessIdentity,
+): void {
   if (!child.pid) return
+  const ownership = processGroupOwnership(child.pid, identity, identify)
+  if (ownership === "absent") return
+  if (ownership === "unproven") throw new Error(`refusing to signal unproven codex exec process group ${child.pid}`)
   try {
     if (process.platform === "win32") child.kill(signal)
     else process.kill(-child.pid, signal)
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error
+  }
+}
+
+function processGroupLive(pid: number): boolean {
+  if (process.platform === "win32") return false
+  try {
+    process.kill(-pid, 0)
+    return true
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code !== "ESRCH"
   }
 }
 
@@ -134,29 +175,88 @@ export function startCodexExec(options: ExecRunOptions): CodexExecHandle {
   void started.promise.catch(() => undefined)
   void exited.promise.catch(() => undefined)
 
-  const child = spawn(options.codexBin, buildArgs(options), {
+  if (options.beforeExec && process.platform === "win32") {
+    throw new Error("durable codex exec launch checkpoints require POSIX")
+  }
+  const useLauncher = Boolean(options.beforeExec)
+  const codexArgs = buildArgs(options)
+  const child = spawn(
+    useLauncher ? "/bin/sh" : options.codexBin,
+    useLauncher
+      ? [
+          "-c",
+          'IFS= read -r cchp_ready || exit 125\n[ "$cchp_ready" = "GO" ] || exit 125\nexec "$@"',
+          "cchp-codex-launcher",
+          options.codexBin,
+          ...codexArgs,
+        ]
+      : codexArgs,
+    {
     cwd: options.cwd,
     env: options.env,
     stdio: ["pipe", "pipe", "pipe"],
     detached: process.platform !== "win32",
-  })
+    },
+  ) as ChildProcessWithoutNullStreams
   child.once("error", (error) => exited.reject(error))
   child.once("exit", (exitCode, signal) => exited.resolve({ exitCode: exitCode ?? (signal ? 128 : 1), signal }))
-
-  let stdinFailure: Error | undefined
-  const stdinTask = new Promise<void>((resolve, reject) => {
-    child.stdin.on("error", (error) => {
-      stdinFailure = error
-      reject(error)
-    })
-    child.stdin.once("finish", resolve)
-    child.stdin.end(`${options.prompt}\n`)
+  const spawned = new Promise<void>((resolveSpawn, rejectSpawn) => {
+    child.once("spawn", resolveSpawn)
+    child.once("error", rejectSpawn)
   })
-  void stdinTask.catch(() => undefined)
+  void spawned.catch(() => undefined)
 
   // Listener installation must precede this check: ENOENT/EACCES are emitted
   // asynchronously even when spawn returns without a PID.
   if (!child.pid) throw new Error("codex exec did not return a process id")
+  const identifyProcess = options.identifyProcess ?? processIdentity
+  const childIdentity = identifyProcess(child.pid)
+  let launcherFailure: Error | undefined
+  const launcherTask = (async (): Promise<void> => {
+    if (!useLauncher) return
+    // Wait until Node has observed the successful spawn. Besides proving the
+    // detached process group exists, this prevents a synchronous checkpoint
+    // rejection from racing child_process' own spawn bookkeeping.
+    await spawned
+    try {
+      await options.beforeExec!(child.pid!)
+    } catch (error) {
+      launcherFailure = error instanceof Error ? error : new Error(String(error))
+      child.stdin.destroy()
+      throw launcherFailure
+    }
+  })()
+  void launcherTask.catch(() => undefined)
+
+  let stdinFailure: Error | undefined
+  const stdinTask = (async (): Promise<void> => {
+    let promptSent = false
+    const inputSettled = new Promise<void>((resolveInput, rejectInput) => {
+      child.stdin.once("error", (error) => {
+        stdinFailure = error
+        rejectInput(error)
+      })
+      child.stdin.once("finish", resolveInput)
+      child.stdin.once("close", () => {
+        if (!promptSent && launcherFailure) resolveInput()
+      })
+    })
+    try {
+      await launcherTask
+      promptSent = true
+      child.stdin.end(`${useLauncher ? "GO\n" : ""}${options.prompt}\n`)
+      await inputSettled
+    } catch (error) {
+      // A failed durable checkpoint must close every pipe before this handle
+      // rejects. Otherwise the launcher can leave stdio work pending and
+      // poison the next child launch in a long-lived agents MCP process.
+      child.stdin.destroy()
+      throw error
+    }
+  })()
+  void stdinTask.catch((error) => {
+    if (!launcherFailure && !stdinFailure) stdinFailure = error instanceof Error ? error : new Error(String(error))
+  })
 
   const events: NormalizedEvent[] = []
   let sessionId: string | undefined
@@ -170,6 +270,17 @@ export function startCodexExec(options: ExecRunOptions): CodexExecHandle {
   let stopTask: Promise<void> | undefined
 
   const waitForExit = async (timeoutMs: number): Promise<boolean> => {
+    if (process.platform !== "win32") {
+      const deadline = Date.now() + timeoutMs
+      while (Date.now() < deadline) {
+        const ownership = processGroupOwnership(child.pid!, childIdentity, identifyProcess)
+        if (ownership === "absent") return true
+        if (ownership === "unproven") throw new Error(`cannot prove codex exec process-group ownership for ${child.pid}`)
+        if (!processGroupLive(child.pid!)) return true
+        await delay(20)
+      }
+      return !processGroupLive(child.pid!)
+    }
     const result = await Promise.race([
       exited.promise.then(() => true, () => true),
       delay(timeoutMs).then(() => false),
@@ -180,11 +291,11 @@ export function startCodexExec(options: ExecRunOptions): CodexExecHandle {
   const stop = (reason: "interrupt" | "timeout" | "protocol" | "restart"): Promise<void> => {
     stopReason ??= reason
     stopTask ??= (async () => {
-      signalProcessGroup(child, "SIGINT")
+      signalProcessGroup(child, childIdentity, "SIGINT", identifyProcess)
       if (await waitForExit(options.interruptGraceMs ?? 1_000)) return
-      signalProcessGroup(child, "SIGTERM")
+      signalProcessGroup(child, childIdentity, "SIGTERM", identifyProcess)
       if (await waitForExit(options.termGraceMs ?? 1_000)) return
-      signalProcessGroup(child, "SIGKILL")
+      signalProcessGroup(child, childIdentity, "SIGKILL", identifyProcess)
       if (!(await waitForExit(options.killGraceMs ?? 5_000))) {
         throw new Error("codex exec process group did not exit after SIGKILL")
       }
@@ -299,8 +410,11 @@ export function startCodexExec(options: ExecRunOptions): CodexExecHandle {
   const completed = (async (): Promise<ExecRunResult> => {
     try {
       const exit = await exited.promise
-      await Promise.all([stdinTask, stdoutTask, stderrTask])
+      const streams = await Promise.allSettled([stdinTask, stdoutTask, stderrTask])
       if (stopTask) await stopTask
+      if (launcherFailure) throw launcherFailure
+      const rejectedStream = streams.find((result): result is PromiseRejectedResult => result.status === "rejected")
+      if (rejectedStream) throw rejectedStream.reason
       if (stopReason === "restart") throw new CodexExecRestartError()
       if (timeoutFailure) throw timeoutFailure
       if (protocolFailure) throw protocolFailure

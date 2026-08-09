@@ -1,6 +1,13 @@
 import { expect, test } from "bun:test"
-import { startProviderBridge, translateResponsesRequest } from "./provider-bridge"
+import {
+  estimateProviderRequestTokens,
+  observeResponseUsage,
+  passthroughResponse,
+  startProviderBridge,
+  translateResponsesRequest,
+} from "./provider-bridge"
 import { parseProviders } from "./providers"
+import type { UsageReservationRef } from "./usage"
 
 test("openai-responses bridge accepts only its loopback token and forwards the original provider key", async () => {
   let observed: { url: string; authorization: string | null; body: unknown } | undefined
@@ -95,6 +102,462 @@ test("cancelling a streamed response cancels the locked upstream reader without 
   } finally {
     await bridge.close()
     await upstream.stop(true)
+  }
+})
+
+test("usage observation preserves client cancellation and releases the reservation", async () => {
+  let upstreamCancelled = false
+  const finished: Array<{ outcome: string; reason?: string }> = []
+  const providers = parseProviders({
+    providerJson: JSON.stringify({
+      relay: {
+        format: "openai-responses",
+        base_url: "https://provider.invalid/v1",
+        models: { primary: { upstream_id: "gpt-5.6-sol", context: 1000 } },
+      },
+    }),
+    model: "relay/primary",
+  })
+  const tasks: Promise<void>[] = []
+  const response = observeResponseUsage(
+    new Response(new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode(
+          'event: response.created\ndata: {"type":"response.created","response":{"id":"resp_cancel_observed","status":"in_progress"}}\n\n',
+        ))
+        controller.enqueue(new TextEncoder().encode(
+          'event: response.output_item.done\ndata: {"type":"response.output_item.done","item":{"type":"message","content":[{"type":"output_text","text":"partial',
+        ))
+      },
+      cancel() {
+        upstreamCancelled = true
+      },
+    }), { headers: { "content-type": "text/event-stream" } }),
+    providers.providers[0]!,
+    "primary",
+    undefined,
+    {
+      reservationId: "reservation-cancelled",
+      writerId: "writer",
+      writerGeneration: 1,
+      requestId: "request-cancelled",
+    },
+    async () => undefined,
+    (_reservation, outcome, reason) => {
+      finished.push({ outcome, ...(reason ? { reason } : {}) })
+    },
+    (task) => { tasks.push(task) },
+  )
+  const reader = response.body!.getReader()
+  expect((await reader.read()).done).toBe(false)
+  await Promise.race([
+    reader.cancel(),
+    Bun.sleep(200).then(() => { throw new Error("client cancellation did not settle") }),
+  ])
+  await Promise.all(tasks)
+  expect(upstreamCancelled).toBe(true)
+  expect(finished).toEqual([{ outcome: "released", reason: "stream_cancelled" }])
+})
+
+test("usage observation applies bounded backpressure when the client does not read", async () => {
+  let upstreamPulls = 0
+  const tasks: Promise<void>[] = []
+  const providers = parseProviders({
+    providerJson: JSON.stringify({
+      relay: { format: "openai-responses", base_url: "https://provider.invalid/v1", models: { primary: { upstream_id: "gpt-5.6-sol" } } },
+    }),
+    model: "relay/primary",
+  })
+  const response = observeResponseUsage(
+    new Response(new ReadableStream<Uint8Array>({
+      pull(controller) {
+        upstreamPulls++
+        controller.enqueue(new TextEncoder().encode(`event: response.created\ndata: {"type":"response.created","sequence":${upstreamPulls}}\n\n`))
+      },
+    }), { headers: { "content-type": "text/event-stream" } }),
+    providers.providers[0]!,
+    "primary",
+    undefined,
+    undefined,
+    async () => undefined,
+    undefined,
+    (task) => { tasks.push(task) },
+  )
+  await Bun.sleep(25)
+  expect(upstreamPulls).toBeLessThan(10)
+  await response.body!.cancel()
+  await Promise.all(tasks)
+})
+
+test("seal settles an unread SSE observer and releases its reservation", async () => {
+  const finished: Array<{ outcome: string; reason?: string }> = []
+  const encoder = new TextEncoder()
+  const upstream = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    fetch() {
+      return new Response(new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(encoder.encode(
+            'event: response.created\ndata: {"type":"response.created","response":{"id":"resp_unread","status":"in_progress"}}\n\n',
+          ))
+        },
+        cancel() {},
+      }), { headers: { "content-type": "text/event-stream" } })
+    },
+  })
+  const providers = parseProviders({
+    providerJson: JSON.stringify({
+      relay: {
+        format: "openai-responses",
+        base_url: `${upstream.url}v1`,
+        models: { primary: { upstream_id: "gpt-5.6-sol", context: 1000 } },
+      },
+    }),
+    model: "relay/primary",
+  })
+  const reservation: UsageReservationRef = {
+    reservationId: "reservation-unread",
+    writerId: "writer",
+    writerGeneration: 1,
+    requestId: "request-unread",
+  }
+  const bridge = startProviderBridge(providers, {
+    onBeforeRequest: () => ({ allowed: true, reservation }),
+    onUsage: async () => undefined,
+    onRequestFinished: (_reservation, outcome, reason) => {
+      finished.push({ outcome, ...(reason ? { reason } : {}) })
+    },
+  })
+  let response: Response | undefined
+  try {
+    response = await fetch(`${bridge.baseUrl}/providers/relay/v1/responses`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${bridge.token}`, "content-type": "application/json" },
+      body: JSON.stringify({ model: "primary", input: "unread", stream: true }),
+    })
+    expect(response.status).toBe(200)
+    await Bun.sleep(25)
+    await Promise.race([
+      bridge.sealAndDrain(),
+      Bun.sleep(500).then(() => { throw new Error("provider seal did not cancel the unread SSE stream") }),
+    ])
+    expect(finished).toEqual([{ outcome: "released", reason: "bridge_sealed" }])
+  } finally {
+    await response?.body?.cancel().catch(() => undefined)
+    await bridge.close()
+    await upstream.stop(true)
+  }
+})
+
+test("cancels an active provider stream by child thread id", async () => {
+  let upstreamCancelled = false
+  let resolveUpstreamCancelled!: () => void
+  const upstreamCancellation = new Promise<void>((resolve) => { resolveUpstreamCancelled = resolve })
+  const finished: Array<{ outcome: string; reason?: string }> = []
+  const upstream = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    fetch() {
+      return new Response(new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode(
+            'event: response.created\ndata: {"type":"response.created","response":{"id":"resp_child","status":"in_progress"}}\n\n',
+          ))
+        },
+        cancel() {
+          upstreamCancelled = true
+          resolveUpstreamCancelled()
+        },
+      }), { headers: { "content-type": "text/event-stream" } })
+    },
+  })
+  const providers = parseProviders({
+    providerJson: JSON.stringify({
+      relay: {
+        format: "openai-responses",
+        base_url: `${upstream.url}v1`,
+        models: { primary: { upstream_id: "gpt-5.6-sol", context: 1000 } },
+      },
+    }),
+    model: "relay/primary",
+  })
+  const reservation: UsageReservationRef = {
+    reservationId: "reservation-child",
+    writerId: "writer",
+    writerGeneration: 1,
+    requestId: "request-child",
+  }
+  const bridge = startProviderBridge(providers, {
+    onBeforeRequest: () => ({ allowed: true, reservation }),
+    onUsage: async () => undefined,
+    onRequestFinished: (_reservation, outcome, reason) => {
+      finished.push({ outcome, ...(reason ? { reason } : {}) })
+    },
+  })
+  let response: Response | undefined
+  try {
+    response = await fetch(`${bridge.baseUrl}/providers/relay/v1/responses`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${bridge.token}`, "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "primary",
+        input: "child request",
+        stream: true,
+        client_metadata: { thread_id: "child-thread", turn_id: "child-turn" },
+      }),
+    })
+    expect(response.status).toBe(200)
+    await Bun.sleep(25)
+    expect(await bridge.cancelThread("another-thread")).toBe(0)
+    expect(await bridge.cancelThread("child-thread")).toBe(1)
+    expect(await bridge.cancelThread("child-thread")).toBe(0)
+    await Promise.race([
+      upstreamCancellation,
+      Bun.sleep(500).then(() => { throw new Error("thread cancellation did not reach the upstream stream") }),
+    ])
+    expect(upstreamCancelled).toBe(true)
+    expect(finished).toEqual([{ outcome: "released", reason: "thread_terminal" }])
+  } finally {
+    await response?.body?.cancel().catch(() => undefined)
+    await bridge.close()
+    await upstream.stop(true)
+  }
+})
+
+test("non-JSON usage observation releases without reading the response body", async () => {
+  const finished: Array<{ outcome: string; reason?: string }> = []
+  const tasks: Promise<void>[] = []
+  const providers = parseProviders({
+    providerJson: JSON.stringify({
+      relay: {
+        format: "openai-responses",
+        base_url: "https://provider.invalid/v1",
+        models: { primary: { upstream_id: "gpt-5.6-sol", context: 1000 } },
+      },
+    }),
+    model: "relay/primary",
+  })
+  const reservation: UsageReservationRef = {
+    reservationId: "reservation-non-json",
+    writerId: "writer",
+    writerGeneration: 1,
+    requestId: "request-non-json",
+  }
+  const response = observeResponseUsage(
+    new Response(new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode("partial response"))
+      },
+    }), { headers: { "content-type": "text/plain" } }),
+    providers.providers[0]!,
+    "primary",
+    undefined,
+    reservation,
+    async () => undefined,
+    (_reservation, outcome, reason) => {
+      finished.push({ outcome, ...(reason ? { reason } : {}) })
+    },
+    (task) => { tasks.push(task) },
+  )
+  await Promise.race([
+    Promise.all(tasks),
+    Bun.sleep(500).then(() => { throw new Error("non-JSON usage observer waited for the response body") }),
+  ])
+  expect(finished).toEqual([{ outcome: "released", reason: "non_json_response" }])
+  await response.body!.cancel()
+})
+
+test("each provider transformation stream propagates downstream backpressure to its upstream", async () => {
+  for (const format of ["openai-responses", "openai-compatible", "anthropic"] as const) {
+    let upstreamPulls = 0
+    let upstreamCancels = 0
+    const encoder = new TextEncoder()
+    const upstream = new Response(new ReadableStream<Uint8Array>({
+      pull(controller) {
+        upstreamPulls++
+        const payload = format === "openai-responses"
+          ? `event: response.output_text.delta\ndata: {"type":"response.output_text.delta","delta":"${upstreamPulls}"}\n\n`
+          : format === "openai-compatible"
+            ? `data: {"choices":[{"delta":{"content":"${upstreamPulls}"}}]}\n\n`
+            : `event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"${upstreamPulls}"}}\n\n`
+        controller.enqueue(encoder.encode(payload))
+      },
+      cancel() {
+        upstreamCancels++
+      },
+    }), { headers: { "content-type": "text/event-stream" } })
+    const providers = parseProviders({
+      providerJson: JSON.stringify({
+        relay: { format, base_url: "https://provider.invalid/v1", models: { primary: { upstream_id: "gpt-5.6-sol" } } },
+      }),
+      model: "relay/primary",
+    })
+    const response = await passthroughResponse(providers.providers[0]!, upstream, "primary")
+    await Bun.sleep(25)
+    const pullsWhilePaused = upstreamPulls
+    expect(pullsWhilePaused).toBeLessThan(5)
+    await Bun.sleep(25)
+    expect(upstreamPulls).toBe(pullsWhilePaused)
+
+    const reader = response.body!.getReader()
+    expect((await reader.read()).done).toBe(false)
+    await Bun.sleep(25)
+    expect(upstreamPulls).toBeGreaterThan(pullsWhilePaused)
+    await reader.cancel("test complete")
+    expect(upstreamCancels).toBe(1)
+  }
+})
+
+test("accounts usage from every non-completed Responses terminal event", async () => {
+  const statuses = ["incomplete", "failed", "cancelled"] as const
+  let request = 0
+  const usage: Array<Record<string, unknown>> = []
+  const finished: Array<{ outcome: string; reason?: string }> = []
+  const realFetch = globalThis.fetch
+  globalThis.fetch = ((input, init) => {
+    if (String(input).startsWith("https://upstream.invalid/")) {
+      const status = statuses[request++]!
+      return Promise.resolve(new Response(
+        `event: response.${status}\ndata: ${JSON.stringify({
+          type: `response.${status}`,
+          response: {
+            id: `resp_${status}`,
+            status,
+            usage: { input_tokens: 7, output_tokens: 3, total_tokens: 10 },
+          },
+        })}\n\n`,
+        { headers: { "content-type": "text/event-stream" } },
+      ))
+    }
+    return realFetch(input, init)
+  }) as typeof globalThis.fetch
+  const providers = parseProviders({
+    providerJson: JSON.stringify({
+      relay: { format: "openai-responses", base_url: "https://upstream.invalid/v1", models: { primary: { upstream_id: "gpt-5.6-sol" } } },
+    }),
+    model: "relay/primary",
+  })
+  const bridge = startProviderBridge(providers, {
+    onBeforeRequest: () => ({
+      allowed: true,
+      reservation: {
+        reservationId: `reservation-${request}`,
+        writerId: "writer",
+        writerGeneration: 1,
+        requestId: `request-${request}`,
+      },
+    }),
+    onUsage: (record) => { usage.push(record as unknown as Record<string, unknown>) },
+    onRequestFinished: (_reservation, outcome, reason) => {
+      finished.push({ outcome, ...(reason ? { reason } : {}) })
+    },
+  })
+  try {
+    for (const status of statuses) {
+      const response = await realFetch(`${bridge.baseUrl}/providers/relay/v1/responses`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${bridge.token}`, "content-type": "application/json" },
+        body: JSON.stringify({ model: "primary", input: status, stream: true }),
+      })
+      await response.text()
+    }
+    await bridge.drain()
+    expect(usage.map((record) => ({ responseId: record.responseId, totalTokens: record.totalTokens }))).toEqual([
+      { responseId: "resp_incomplete", totalTokens: 10 },
+      { responseId: "resp_failed", totalTokens: 10 },
+      { responseId: "resp_cancelled", totalTokens: 10 },
+    ])
+    expect(finished).toEqual(statuses.map(() => ({ outcome: "usage", reason: "usage_observed" })))
+  } finally {
+    globalThis.fetch = realFetch
+    await bridge.close()
+  }
+})
+
+test("Chat and Anthropic adapters stop at their terminal marker", async () => {
+  for (const format of ["openai-compatible", "anthropic"] as const) {
+    let cancelStarted = false
+    const realFetch = globalThis.fetch
+    globalThis.fetch = ((input, init) => {
+      if (String(input).startsWith("https://upstream.invalid/")) {
+        const payload = format === "openai-compatible"
+          ? 'data: {"choices":[],"usage":{"prompt_tokens":2,"completion_tokens":1,"total_tokens":3}}\n\ndata: [DONE]\n\n'
+          : 'event: message_start\ndata: {"type":"message_start","message":{"usage":{"input_tokens":2}}}\n\nevent: message_delta\ndata: {"type":"message_delta","usage":{"output_tokens":1}}\n\nevent: message_stop\ndata: {"type":"message_stop"}\n\n'
+        return Promise.resolve(new Response(new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(new TextEncoder().encode(payload))
+          },
+          cancel() {
+            cancelStarted = true
+            return new Promise<void>(() => undefined)
+          },
+        }), { headers: { "content-type": "text/event-stream" } }))
+      }
+      return realFetch(input, init)
+    }) as typeof globalThis.fetch
+    const providers = parseProviders({
+      providerJson: JSON.stringify({
+        relay: { format, base_url: "https://upstream.invalid/v1", models: { primary: { upstream_id: "gpt-5.6-sol" } } },
+      }),
+      model: "relay/primary",
+    })
+    const bridge = startProviderBridge(providers)
+    try {
+      const response = await realFetch(`${bridge.baseUrl}/providers/relay/v1/responses`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${bridge.token}`, "content-type": "application/json" },
+        body: JSON.stringify({ model: "primary", input: "terminal", stream: true }),
+      })
+      const raw = await Promise.race([
+        response.text(),
+        Bun.sleep(200).then(() => { throw new Error(`${format} bridge waited past the terminal marker`) }),
+      ])
+      expect(raw).toContain("response.completed")
+      expect(cancelStarted).toBe(true)
+    } finally {
+      globalThis.fetch = realFetch
+      await bridge.close()
+    }
+  }
+})
+
+test("Chat and Anthropic adapters cancel a never-ending upstream after a parse failure", async () => {
+  for (const format of ["openai-compatible", "anthropic"] as const) {
+    let cancelled = false
+    const realFetch = globalThis.fetch
+    globalThis.fetch = ((input, init) => {
+      if (String(input).startsWith("https://upstream.invalid/")) {
+        return Promise.resolve(new Response(new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(new TextEncoder().encode("data: {malformed-json}\n\n"))
+          },
+          cancel() {
+            cancelled = true
+          },
+        }), { headers: { "content-type": "text/event-stream" } }))
+      }
+      return realFetch(input, init)
+    }) as typeof globalThis.fetch
+    const providers = parseProviders({
+      providerJson: JSON.stringify({
+        relay: { format, base_url: "https://upstream.invalid/v1", models: { primary: { upstream_id: "gpt-5.6-sol" } } },
+      }),
+      model: "relay/primary",
+    })
+    const bridge = startProviderBridge(providers)
+    try {
+      const response = await realFetch(`${bridge.baseUrl}/providers/relay/v1/responses`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${bridge.token}`, "content-type": "application/json" },
+        body: JSON.stringify({ model: "primary", input: "malformed", stream: true }),
+      })
+      expect(await response.text()).toContain("response.failed")
+      expect(cancelled).toBe(true)
+    } finally {
+      globalThis.fetch = realFetch
+      await bridge.close()
+    }
   }
 })
 
@@ -645,7 +1108,15 @@ test("reports stable provider response usage without exposing the upstream crede
   })
   const bridge = startProviderBridge(providers, {
     token: "loopback-token",
-    onBeforeRequest: () => ({ allowed: true, reservationId: "reservation-stable" }),
+    onBeforeRequest: () => ({
+      allowed: true,
+      reservation: {
+        reservationId: "reservation-stable",
+        writerId: "writer-stable",
+        writerGeneration: 1,
+        requestId: "request-stable",
+      },
+    }),
     onUsage: async (record) => { usage.push(record as unknown as Record<string, unknown>) },
   })
   try {
@@ -669,7 +1140,12 @@ test("reports stable provider response usage without exposing the upstream crede
       reasoningOutputTokens: 400,
       totalTokens: 21_000,
       contextWindow: 372_000,
-      reservationId: "reservation-stable",
+      reservation: {
+        reservationId: "reservation-stable",
+        writerId: "writer-stable",
+        writerGeneration: 1,
+        requestId: "request-stable",
+      },
     }])
     expect(JSON.stringify(usage)).not.toContain("provider-secret")
   } finally {
@@ -681,6 +1157,7 @@ test("reports stable provider response usage without exposing the upstream crede
 test("denies a provider request before upstream dispatch when runtime admission rejects it", async () => {
   let upstreamRequests = 0
   const admissions: Array<Record<string, unknown>> = []
+  const finished: Array<{ reservation: UsageReservationRef; outcome: string; reason?: string }> = []
   const upstream = Bun.serve({
     hostname: "127.0.0.1",
     port: 0,
@@ -703,7 +1180,19 @@ test("denies a provider request before upstream dispatch when runtime admission 
   const bridge = startProviderBridge(providers, {
     onBeforeRequest(request) {
       admissions.push(request as unknown as Record<string, unknown>)
-      return { allowed: false, reason: "projected token budget would exceed the threshold" }
+      return {
+        allowed: false,
+        reason: "projected token budget would exceed the threshold",
+        reservation: {
+          reservationId: "reservation-denied",
+          writerId: "writer-denied",
+          writerGeneration: 2,
+          requestId: "request-denied",
+        },
+      }
+    },
+    onRequestFinished: (reservation, outcome, reason) => {
+      finished.push({ reservation, outcome, ...(reason ? { reason } : {}) })
     },
   })
   try {
@@ -729,16 +1218,43 @@ test("denies a provider request before upstream dispatch when runtime admission 
       threadId: "thread",
       turnId: "turn",
       contextWindow: 372000,
+      estimatedTokens: expect.any(Number),
     }])
     expect(upstreamRequests).toBe(0)
+    expect(finished).toEqual([{
+      reservation: {
+        reservationId: "reservation-denied",
+        writerId: "writer-denied",
+        writerGeneration: 2,
+        requestId: "request-denied",
+      },
+      outcome: "released",
+      reason: "admission_denied",
+    }])
   } finally {
     await bridge.close()
     upstream.stop(true)
   }
 })
 
+test("estimates request-derived usage instead of reserving the whole context window", () => {
+  const estimate = estimateProviderRequestTokens({
+    model: "gpt-5.6-sol",
+    input: "inspect the fixture",
+    max_output_tokens: 2_000,
+    stream: true,
+  }, 372_000)
+  expect(estimate).toBeGreaterThan(2_000)
+  expect(estimate).toBeLessThan(10_000)
+  expect(estimateProviderRequestTokens({
+    model: "gpt-5.6-sol",
+    messages: [{ role: "user", content: "x" }],
+    max_tokens: 10,
+  }, 5)).toBe(5)
+})
+
 test("releases an admitted reservation when upstream returns without terminal usage", async () => {
-  const finished: Array<{ id: string; outcome: string; reason?: string }> = []
+  const finished: Array<{ reservation: UsageReservationRef; outcome: string; reason?: string }> = []
   const upstream = Bun.serve({
     hostname: "127.0.0.1",
     port: 0,
@@ -752,8 +1268,18 @@ test("releases an admitted reservation when upstream returns without terminal us
     model: "relay/primary",
   })
   const bridge = startProviderBridge(providers, {
-    onBeforeRequest: () => ({ allowed: true, reservationId: "reservation-failure" }),
-    onRequestFinished: (id, outcome, reason) => { finished.push({ id, outcome, ...(reason ? { reason } : {}) }) },
+    onBeforeRequest: () => ({
+      allowed: true,
+      reservation: {
+        reservationId: "reservation-failure",
+        writerId: "writer-failure",
+        writerGeneration: 3,
+        requestId: "request-failure",
+      },
+    }),
+    onRequestFinished: (reservation, outcome, reason) => {
+      finished.push({ reservation, outcome, ...(reason ? { reason } : {}) })
+    },
   })
   try {
     const response = await fetch(`${bridge.baseUrl}/providers/relay/v1/responses`, {
@@ -763,7 +1289,16 @@ test("releases an admitted reservation when upstream returns without terminal us
     })
     expect(response.status).toBe(502)
     await bridge.drain()
-    expect(finished).toEqual([{ id: "reservation-failure", outcome: "released", reason: "upstream_status_502" }])
+    expect(finished).toEqual([{
+      reservation: {
+        reservationId: "reservation-failure",
+        writerId: "writer-failure",
+        writerGeneration: 3,
+        requestId: "request-failure",
+      },
+      outcome: "released",
+      reason: "upstream_status_502",
+    }])
   } finally {
     await bridge.close()
     await upstream.stop(true)
@@ -771,7 +1306,7 @@ test("releases an admitted reservation when upstream returns without terminal us
 })
 
 test("releases an admitted reservation when a successful upstream payload cannot be translated", async () => {
-  const finished: Array<{ id: string; outcome: string; reason?: string }> = []
+  const finished: Array<{ reservation: UsageReservationRef; outcome: string; reason?: string }> = []
   const upstream = Bun.serve({
     hostname: "127.0.0.1",
     port: 0,
@@ -785,8 +1320,18 @@ test("releases an admitted reservation when a successful upstream payload cannot
     model: "relay/primary",
   })
   const bridge = startProviderBridge(providers, {
-    onBeforeRequest: () => ({ allowed: true, reservationId: "reservation-malformed" }),
-    onRequestFinished: (id, outcome, reason) => { finished.push({ id, outcome, ...(reason ? { reason } : {}) }) },
+    onBeforeRequest: () => ({
+      allowed: true,
+      reservation: {
+        reservationId: "reservation-malformed",
+        writerId: "writer-malformed",
+        writerGeneration: 4,
+        requestId: "request-malformed",
+      },
+    }),
+    onRequestFinished: (reservation, outcome, reason) => {
+      finished.push({ reservation, outcome, ...(reason ? { reason } : {}) })
+    },
   })
   try {
     const response = await fetch(`${bridge.baseUrl}/providers/relay/v1/responses`, {
@@ -796,7 +1341,16 @@ test("releases an admitted reservation when a successful upstream payload cannot
     })
     expect(response.status).toBe(502)
     expect(await response.json()).toMatchObject({ error: { type: "upstream_response_error" } })
-    expect(finished).toEqual([{ id: "reservation-malformed", outcome: "released", reason: "response_translation_error" }])
+    expect(finished).toEqual([{
+      reservation: {
+        reservationId: "reservation-malformed",
+        writerId: "writer-malformed",
+        writerGeneration: 4,
+        requestId: "request-malformed",
+      },
+      outcome: "released",
+      reason: "response_translation_error",
+    }])
   } finally {
     await bridge.close()
     await upstream.stop(true)
@@ -850,6 +1404,64 @@ test("drains delayed usage observers before the bridge closes", async () => {
     await draining
     expect(observed).toBe(true)
   } finally {
+    await bridge.close()
+    await upstream.stop(true)
+  }
+})
+
+test("seals new provider admission before draining already admitted requests", async () => {
+  let release!: () => void
+  let entered!: () => void
+  const gate = new Promise<void>((resolve) => { release = resolve })
+  const firstEntered = new Promise<void>((resolve) => { entered = resolve })
+  let upstreamRequests = 0
+  const upstream = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    async fetch() {
+      upstreamRequests++
+      entered()
+      await gate
+      return Response.json({
+        id: "resp_sealed",
+        model: "primary",
+        output: [],
+        usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+      })
+    },
+  })
+  const providers = parseProviders({
+    providerJson: JSON.stringify({
+      relay: {
+        format: "openai-responses",
+        base_url: `${upstream.url}v1`,
+        models: { primary: { upstream_id: "gpt-5.6-sol", context: 1000 } },
+      },
+    }),
+    model: "relay/primary",
+  })
+  const bridge = startProviderBridge(providers)
+  const request = () => fetch(`${bridge.baseUrl}/providers/relay/v1/responses`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${bridge.token}`, "content-type": "application/json" },
+    body: JSON.stringify({ model: "primary", input: "inspect" }),
+  })
+  try {
+    const admitted = request()
+    await firstEntered
+    let drained = false
+    const sealing = bridge.sealAndDrain().then(() => { drained = true })
+    const rejected = await request()
+    expect(rejected.status).toBe(409)
+    expect(await rejected.json()).toMatchObject({ error: { type: "provider_admission_closed" } })
+    expect(upstreamRequests).toBe(1)
+    expect(drained).toBe(false)
+    release()
+    expect((await admitted).status).toBe(200)
+    await sealing
+    expect(drained).toBe(true)
+  } finally {
+    release()
     await bridge.close()
     await upstream.stop(true)
   }
