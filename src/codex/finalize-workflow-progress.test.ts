@@ -303,6 +303,93 @@ test("seeds post-cleanup publication evidence from the snapshotted counters", as
   expect(existsSync(root)).toBeFalse()
 })
 
+test("publishes the last supervisor checkpoint after a native runtime crash", async () => {
+  const root = mkdtempSync(join(tmpdir(), "cchp-workflow-crash-checkpoint-"))
+  const codex = join(root, "ctx", "codex")
+  const staging = mkdtempSync(join(tmpdir(), "cchp-workflow-crash-staging-"))
+  mkdirSync(codex, { recursive: true })
+  writeFileSync(join(codex, "run-manifest.json"), JSON.stringify({
+    schemaVersion: 1,
+    runId: "run-crash",
+    task: "engage",
+    state: "ROOT_RUNNING",
+    execution_mode: "native_v2",
+    codexVersion: "codex-cli 0.146.0",
+    rootThreadId: "root",
+    rootTurnId: "turn",
+    usage: {
+      acceptedRaw: false,
+      consumed: 392_592,
+      limit: 2_000_000,
+      fraction: 0.196296,
+      state: "normal",
+      blockingAnomalies: 0,
+      responses: 8,
+      turns: 1,
+      admissionDenials: 0,
+      reservedTokens: 24_000,
+      responsesInFlight: 1,
+    },
+  }))
+  recordProgressPublication({ BOT_WORKDIR: root }, "cchp-bot:progress:engage", {
+    id: 9,
+    action: "updated",
+    htmlUrl: "https://example.invalid/9",
+  }, false)
+  const runtime = writeWorkflowRuntimeSnapshot({
+    BOT_WORKDIR: root,
+    BOT_TASK: "engage",
+    BOT_RUN_ID: "run-crash",
+    GITHUB_RUN_ID: "9004",
+    CCHP_RUNTIME_SNAPSHOT_PATH: join(staging, "runtime-snapshot.json"),
+  })
+  rmSync(root, { recursive: true })
+  const calls: Array<Record<string, unknown>> = []
+  const listComments = Object.assign(() => {}, { tag: "comments" })
+  const octokit = {
+    rest: {
+      issues: {
+        listComments,
+        updateComment: async (args: Record<string, unknown>) => {
+          calls.push(args)
+          return { data: { id: 9, html_url: "https://example.invalid/9" } }
+        },
+      },
+    },
+    paginate: async () => [{ id: 9, body: "old\n<!-- cchp-bot:progress:engage -->", user: { login: "bot[bot]" } }],
+  } as unknown as GitHubClient
+  expect(await finalizeWorkflowProgress({
+    GH_TOKEN: "fixture",
+    GH_REPO: "CCH-HQ/fixture",
+    BOT_REPO: "CCH-HQ/fixture",
+    BOT_LOGIN: "bot[bot]",
+    BOT_TASK: "engage",
+    BOT_ISSUE_NUMBER: "9",
+    BOT_WORKDIR: root,
+    BOT_RUN_ID: "run-crash",
+    GITHUB_RUN_ID: "9004",
+    CCHP_RUNTIME_SNAPSHOT_PATH: runtime.path,
+    CCHP_RUNTIME_SNAPSHOT_SHA256: runtime.sha256,
+    CCHP_PROGRESS_PUBLICATION_PATH: join(staging, "progress-publication.json"),
+    CCHP_WORKFLOW_FINALIZATION_PATH: join(staging, "workflow-finalization.json"),
+    CCHP_WRITE_OUTCOME: "skipped",
+    CCHP_INSTALL_OUTCOME: "success",
+    CCHP_PREPARE_OUTCOME: "success",
+    CCHP_SCAN_OUTCOME: "success",
+    CCHP_CAPABILITY_OUTCOME: "success",
+    CCHP_SUPERVISOR_OUTCOME: "failure",
+    CCHP_RUNTIME_SNAPSHOT_OUTCOME: "success",
+    CCHP_ENVIRONMENT_CLEANUP_OUTCOME: "success",
+  }, octokit)).toBe("published")
+  const body = String(calls[0]!.body)
+  expect(body).toContain("392,592 / 2,000,000 tokens")
+  expect(body).toContain("**Reserved:** 24,000 tokens")
+  expect(body).toContain("**In flight:** 1 responses")
+  expect(body).toContain("**Codex:** `codex-cli 0.146.0`")
+  expect(body).toContain("**Mode:** `native-v2`")
+  expect(body).toContain("**Cleanup:** `success`")
+})
+
 test("updates an existing live sticky after a capability gate failure", async () => {
   const root = mkdtempSync(join(tmpdir(), "cchp-workflow-finalizer-"))
   mkdirSync(join(root, "ctx", "codex"), { recursive: true })

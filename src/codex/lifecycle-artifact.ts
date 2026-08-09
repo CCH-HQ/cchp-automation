@@ -200,6 +200,8 @@ export function writeLifecycleArtifact(env: Env = process.env): string {
   const terminalSha256 = runtimeSnapshot?.terminal.sha256 ?? liveTerminalSnapshot?.sha256 ?? null
   const terminal = parseSupervisorTerminal(terminalRecord)
   const result = resolveWorkflowTerminal(outcomes, terminal)
+  const checkpointRecord = runtimeSnapshot?.checkpoint?.record as unknown as Record<string, unknown> | undefined
+  const evidenceRecord = terminalRecord ?? checkpointRecord
   const marker = progressMarkerKey(env.BOT_TASK || "task")
   const stagedProgressPath = env.CCHP_PROGRESS_PUBLICATION_PATH || (runtimeSnapshotPath
     ? join(dirname(runtimeSnapshotPath), "progress-publication.json")
@@ -273,12 +275,12 @@ export function writeLifecycleArtifact(env: Env = process.env): string {
         result.state,
         resolvedFromSupervisor && Number.isSafeInteger(terminalRecord?.exitCode) ? Number(terminalRecord?.exitCode) : 0,
       ),
-      thread_present: terminalRecord?.rootThreadPresent === true || (typeof terminalRecord?.rootThreadId === "string" && Boolean(terminalRecord.rootThreadId)),
-      turn_present: terminalRecord?.rootTurnPresent === true || (typeof terminalRecord?.rootTurnId === "string" && Boolean(terminalRecord.rootTurnId)),
+      thread_present: evidenceRecord?.rootThreadPresent === true || (typeof evidenceRecord?.rootThreadId === "string" && Boolean(evidenceRecord.rootThreadId)),
+      turn_present: evidenceRecord?.rootTurnPresent === true || (typeof evidenceRecord?.rootTurnId === "string" && Boolean(evidenceRecord.rootTurnId)),
       reason_code: result.reasonCode,
     },
     children: runtimeSnapshot?.children ?? childProjection(workdir!),
-    usage: usageProjection(terminalRecord, result.usage),
+    usage: usageProjection(evidenceRecord, result.usage),
     runtime: {
       codex_version: runtimeSnapshot?.identity.codexVersion ?? (terminalRecord?.runtime as { codexVersion?: string } | undefined)?.codexVersion ?? null,
       execution_mode: runtimeSnapshot?.identity.executionMode ?? (terminalRecord?.runtime as { executionMode?: string } | undefined)?.executionMode ?? null,

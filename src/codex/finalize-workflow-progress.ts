@@ -403,7 +403,19 @@ export async function finalizeWorkflowProgress(
         sha256: runtimeSnapshot.terminal.sha256,
       }
     : readSupervisorTerminalSnapshot(join(workdir!, "ctx", "codex", "terminal.json"), redact)
-  const result = resolveWorkflowTerminal(workflowStepOutcomes(env), terminalSnapshot.terminal)
+  const resolved = resolveWorkflowTerminal(workflowStepOutcomes(env), terminalSnapshot.terminal)
+  const checkpoint = runtimeSnapshot?.checkpoint?.record
+  const checkpointRuntime = runtimeSnapshot?.identity.codexVersion && runtimeSnapshot.identity.executionMode
+    ? {
+        codexVersion: runtimeSnapshot.identity.codexVersion,
+        executionMode: runtimeSnapshot.identity.executionMode,
+      }
+    : undefined
+  const result: ResolvedWorkflowTerminal = {
+    ...resolved,
+    ...(!terminalSnapshot.terminal && checkpoint ? { usage: checkpoint.usage } : {}),
+    ...(resolved.runtime || checkpointRuntime ? { runtime: resolved.runtime ?? checkpointRuntime } : {}),
+  }
   const stagedProgressPath = env.CCHP_PROGRESS_PUBLICATION_PATH || (runtimeSnapshotPath
     ? join(dirname(runtimeSnapshotPath), "progress-publication.json")
     : undefined)

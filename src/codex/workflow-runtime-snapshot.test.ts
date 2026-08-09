@@ -113,6 +113,104 @@ test("captures immutable sanitized runtime evidence before workdir cleanup", () 
     .toMatchObject({ terminal: { ledger: "valid" }, todo: { revision: 9 }, children: { total: 1 } })
 })
 
+test("promotes a terminal run-manifest checkpoint when Bun crashes before terminal write", () => {
+  const { root, codex, staging } = fixture()
+  writeFileSync(join(codex, "run-manifest.json"), JSON.stringify({
+    schemaVersion: 1,
+    runId: "run-crash-terminal",
+    task: "engage",
+    state: "SUCCEEDED",
+    execution_mode: "native_v2",
+    codexVersion: "codex-cli 0.146.0",
+    rootThreadId: "root-sensitive",
+    rootTurnId: "turn-sensitive",
+    rootFinalMessage: "Inspection complete.",
+    usage: {
+      acceptedRaw: false,
+      consumed: 456,
+      limit: 2_000_000,
+      fraction: 0.000228,
+      state: "normal",
+      blockingAnomalies: 0,
+      responses: 3,
+      turns: 1,
+      admissionDenials: 0,
+      reservedTokens: 0,
+      responsesInFlight: 0,
+    },
+  }))
+  const written = writeWorkflowRuntimeSnapshot({
+    BOT_WORKDIR: root,
+    BOT_TASK: "engage",
+    BOT_RUN_ID: "run-crash-terminal",
+    GITHUB_RUN_ID: "200",
+    CCHP_RUNTIME_SNAPSHOT_PATH: join(staging, "runtime-snapshot.json"),
+  })
+  const serialized = readFileSync(written.path, "utf8")
+  expect(serialized).not.toContain("root-sensitive")
+  expect(serialized).not.toContain("turn-sensitive")
+  expect(readWorkflowRuntimeSnapshot(written.path, written.sha256)).toMatchObject({
+    terminal: {
+      ledger: "valid",
+      source: "run_manifest_checkpoint",
+      record: {
+        state: "SUCCEEDED",
+        rootThreadPresent: true,
+        rootTurnPresent: true,
+        runtime: { codexVersion: "codex-cli 0.146.0", executionMode: "native_v2" },
+        usage: { consumed: 456, reservedTokens: 0, responsesInFlight: 0 },
+      },
+    },
+    checkpoint: { ledger: "valid", record: { state: "SUCCEEDED" } },
+  })
+})
+
+test("keeps a nonterminal supervisor checkpoint without promoting it to terminal", () => {
+  const { root, codex, staging } = fixture()
+  writeFileSync(join(codex, "run-manifest.json"), JSON.stringify({
+    schemaVersion: 1,
+    runId: "run-crash-active",
+    task: "engage",
+    state: "ROOT_RUNNING",
+    execution_mode: "explicit_child",
+    codexVersion: "codex-cli 0.146.0",
+    rootThreadId: "root-sensitive",
+    rootTurnId: "turn-sensitive",
+    usage: {
+      acceptedRaw: false,
+      consumed: 392_592,
+      limit: 2_000_000,
+      fraction: 0.196296,
+      state: "normal",
+      blockingAnomalies: 0,
+      responses: 8,
+      turns: 1,
+      admissionDenials: 0,
+      reservedTokens: 24_000,
+      responsesInFlight: 1,
+    },
+  }))
+  const written = writeWorkflowRuntimeSnapshot({
+    BOT_WORKDIR: root,
+    BOT_TASK: "engage",
+    BOT_RUN_ID: "run-crash-active",
+    GITHUB_RUN_ID: "201",
+    CCHP_RUNTIME_SNAPSHOT_PATH: join(staging, "runtime-snapshot.json"),
+  })
+  expect(readWorkflowRuntimeSnapshot(written.path, written.sha256)).toMatchObject({
+    terminal: { ledger: "absent", sha256: null },
+    checkpoint: {
+      ledger: "valid",
+      record: {
+        state: "ROOT_RUNNING",
+        rootThreadPresent: true,
+        rootTurnPresent: true,
+        usage: { consumed: 392_592, reservedTokens: 24_000, responsesInFlight: 1 },
+      },
+    },
+  })
+})
+
 test("rejects snapshot hash and run identity drift", () => {
   const { root, codex, staging } = fixture()
   writeFileSync(join(codex, "terminal.json"), JSON.stringify({

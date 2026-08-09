@@ -5,6 +5,7 @@ import { dirname, join } from "node:path"
 import { progressMarkerKey, trustedBotLogin } from "../publish/sticky"
 import { directoryIdentity, durableCreateFile } from "./durable-file"
 import { redactRuntimeDiagnostic } from "./diagnostic-redaction"
+import { exitCodeFor } from "./exit"
 import { ChildGraph } from "./graph"
 import { openRegularFileSnapshot } from "./file-snapshot"
 import { parseProgressPublication, type ProgressPublicationRecord } from "./progress-publication"
@@ -21,6 +22,10 @@ const SNAPSHOT_MARKER = "cchp_workflow_runtime_snapshot"
 const TERMINAL_STATES = new Set<SupervisorState>([
   "SUCCEEDED", "FAILED", "TIMED_OUT", "CANCELLED", "LOST", "TOKEN_BUDGET_EXCEEDED",
   "NO_PROGRESS_TIMEOUT",
+])
+const SUPERVISOR_STATES = new Set<SupervisorState>([
+  "INIT", "CONFIGURED", "ROOT_STARTING", "ROOT_RUNNING", "ROOT_DRAINING", "FINALIZING",
+  ...TERMINAL_STATES,
 ])
 
 export interface SafeTerminalRecord {
@@ -102,6 +107,12 @@ export interface WorkflowRuntimeSnapshot {
   terminal: {
     ledger: "absent" | "invalid" | "valid"
     sha256: string | null
+    source?: "terminal" | "run_manifest_checkpoint"
+    record?: SafeTerminalRecord
+  }
+  checkpoint?: {
+    ledger: "absent" | "invalid" | "valid"
+    sha256: string | null
     record?: SafeTerminalRecord
   }
   progress: {
@@ -163,10 +174,14 @@ function runtimeIdentity(workdir: string): Pick<WorkflowRuntimeSnapshot["identit
   }
 }
 
-function safeTerminal(value: unknown, env: Env): SafeTerminalRecord | undefined {
+function safeSupervisorRecord(
+  value: unknown,
+  env: Env,
+  allowedStates: ReadonlySet<SupervisorState>,
+): SafeTerminalRecord | undefined {
   if (!value || typeof value !== "object" || Array.isArray(value)) return undefined
   const record = value as Record<string, unknown>
-  if (typeof record.state !== "string" || !TERMINAL_STATES.has(record.state as SupervisorState)) return undefined
+  if (typeof record.state !== "string" || !allowedStates.has(record.state as SupervisorState)) return undefined
   const usage = record.usage && typeof record.usage === "object" && !Array.isArray(record.usage)
     ? record.usage as Record<string, unknown>
     : {}
@@ -217,6 +232,14 @@ function safeTerminal(value: unknown, env: Env): SafeTerminalRecord | undefined 
         : {}),
     },
   }
+}
+
+function safeTerminal(value: unknown, env: Env): SafeTerminalRecord | undefined {
+  return safeSupervisorRecord(value, env, TERMINAL_STATES)
+}
+
+function safeCheckpoint(value: unknown, env: Env): SafeTerminalRecord | undefined {
+  return safeSupervisorRecord(value, env, SUPERVISOR_STATES)
 }
 
 function todoProjection(workdir: string): RuntimeTodoProjection {
@@ -358,9 +381,65 @@ function preparedReviewProjection(workdir: string, env: Env): WorkflowRuntimeSna
   }
 }
 
-function captureTerminal(workdir: string, env: Env): WorkflowRuntimeSnapshot["terminal"] {
-  const path = join(workdir, "ctx", "codex", "terminal.json")
+function captureCheckpoint(workdir: string, env: Env): NonNullable<WorkflowRuntimeSnapshot["checkpoint"]> {
+  const path = join(workdir, "ctx", "codex", "run-manifest.json")
   if (!existsSync(path)) return { ledger: "absent", sha256: null }
+  let snapshot
+  try {
+    snapshot = openRegularFileSnapshot(path)
+  } catch {
+    return { ledger: "invalid", sha256: null }
+  }
+  try {
+    const manifest = JSON.parse(snapshot.bytes.toString("utf8")) as Record<string, unknown>
+    const requestedRunId = env.BOT_RUN_ID
+    const task = env.BOT_TASK || "unknown"
+    const executionMode = manifest.execution_mode === "native_v2" || manifest.execution_mode === "explicit_child"
+      ? manifest.execution_mode
+      : undefined
+    const codexVersion = typeof manifest.codexVersion === "string" && manifest.codexVersion
+      ? manifest.codexVersion
+      : undefined
+    if (
+      manifest.schemaVersion !== 1 || typeof manifest.runId !== "string" || !manifest.runId ||
+      manifest.task !== task || (requestedRunId && manifest.runId !== requestedRunId) ||
+      !executionMode || !codexVersion
+    ) return { ledger: "invalid", sha256: snapshot.sha256 }
+    const state = manifest.state as SupervisorState
+    const record = safeCheckpoint({
+      state,
+      exitCode: exitCodeFor(state, 0),
+      terminalReason: manifest.terminalReason,
+      finalMessage: manifest.rootFinalMessage,
+      runtime: { codexVersion, executionMode },
+      rootThreadId: manifest.rootThreadId,
+      rootTurnId: manifest.rootTurnId,
+      usage: manifest.usage,
+    }, env)
+    return record
+      ? { ledger: "valid", sha256: snapshot.sha256, record }
+      : { ledger: "invalid", sha256: snapshot.sha256 }
+  } catch {
+    return { ledger: "invalid", sha256: snapshot.sha256 }
+  }
+}
+
+function captureTerminal(
+  workdir: string,
+  env: Env,
+  checkpoint: NonNullable<WorkflowRuntimeSnapshot["checkpoint"]>,
+): WorkflowRuntimeSnapshot["terminal"] {
+  const path = join(workdir, "ctx", "codex", "terminal.json")
+  if (!existsSync(path)) {
+    return checkpoint.ledger === "valid" && checkpoint.record && TERMINAL_STATES.has(checkpoint.record.state)
+      ? {
+          ledger: "valid",
+          sha256: checkpoint.sha256,
+          source: "run_manifest_checkpoint",
+          record: checkpoint.record,
+        }
+      : { ledger: "absent", sha256: null }
+  }
   let snapshot
   try {
     snapshot = openRegularFileSnapshot(path)
@@ -370,7 +449,7 @@ function captureTerminal(workdir: string, env: Env): WorkflowRuntimeSnapshot["te
   try {
     const record = safeTerminal(JSON.parse(snapshot.bytes.toString("utf8")), env)
     return record
-      ? { ledger: "valid", sha256: snapshot.sha256, record }
+      ? { ledger: "valid", sha256: snapshot.sha256, source: "terminal", record }
       : { ledger: "invalid", sha256: snapshot.sha256 }
   } catch {
     return { ledger: "invalid", sha256: snapshot.sha256 }
@@ -428,15 +507,32 @@ export function parseWorkflowRuntimeSnapshot(value: unknown, env: Env = {}): Wor
       throw new Error(`runtime snapshot identity ${key} mismatch`)
     }
   }
-  for (const source of [snapshot.terminal, snapshot.progress]) {
+  const checkpoint = snapshot.checkpoint ?? { ledger: "absent" as const, sha256: null }
+  for (const source of [snapshot.terminal, snapshot.progress, checkpoint]) {
     if (!source || !["absent", "invalid", "valid"].includes(source.ledger)) throw new Error("runtime snapshot ledger state is invalid")
     if (source.sha256 !== null && (typeof source.sha256 !== "string" || !/^[a-f0-9]{64}$/.test(source.sha256))) {
       throw new Error("runtime snapshot source hash is invalid")
     }
     if (source.ledger === "valid" && (!source.record || !source.sha256)) throw new Error("runtime snapshot valid source is incomplete")
   }
+  const checkpointRecord = checkpoint.record ? safeCheckpoint(checkpoint.record, {}) : undefined
+  if (checkpoint.ledger === "valid" && !checkpointRecord) throw new Error("runtime snapshot checkpoint record is invalid")
+  if (checkpoint.ledger !== "valid" && checkpoint.record !== undefined) {
+    throw new Error("runtime snapshot invalid checkpoint carries a trusted record")
+  }
   const terminal = snapshot.terminal.record ? safeTerminal(snapshot.terminal.record, {}) : undefined
   if (snapshot.terminal.ledger === "valid" && !terminal) throw new Error("runtime snapshot terminal record is invalid")
+  if (snapshot.terminal.source !== undefined &&
+      snapshot.terminal.source !== "terminal" && snapshot.terminal.source !== "run_manifest_checkpoint") {
+    throw new Error("runtime snapshot terminal source is invalid")
+  }
+  if (snapshot.terminal.source && snapshot.terminal.ledger !== "valid") {
+    throw new Error("runtime snapshot terminal source requires valid evidence")
+  }
+  if (snapshot.terminal.source === "run_manifest_checkpoint" && (
+    checkpoint.ledger !== "valid" || !checkpointRecord || checkpoint.sha256 !== snapshot.terminal.sha256 ||
+    checkpointRecord.state !== terminal?.state
+  )) throw new Error("runtime snapshot terminal checkpoint binding is invalid")
   const progress = snapshot.progress.record
     ? parseProgressPublication(snapshot.progress.record, snapshot.identity.progressMarker)
     : undefined
@@ -518,6 +614,7 @@ export function parseWorkflowRuntimeSnapshot(value: unknown, env: Env = {}): Wor
   return {
     ...snapshot,
     terminal: { ...snapshot.terminal, ...(terminal ? { record: terminal } : {}) },
+    checkpoint: { ...checkpoint, ...(checkpointRecord ? { record: checkpointRecord } : {}) },
     progress: { ...snapshot.progress, ...(progress ? { record: progress } : {}) },
     reviewSummary,
     preparedReview,
@@ -531,6 +628,7 @@ export function writeWorkflowRuntimeSnapshot(env: Env = process.env): { path: st
   if (!path) throw new Error("CCHP_RUNTIME_SNAPSHOT_PATH is required for runtime snapshot")
   const task = env.BOT_TASK || "unknown"
   const marker = progressMarkerKey(task)
+  const checkpoint = captureCheckpoint(workdir, env)
   const snapshot: WorkflowRuntimeSnapshot = {
     schemaVersion: 1,
     marker: SNAPSHOT_MARKER,
@@ -542,7 +640,8 @@ export function writeWorkflowRuntimeSnapshot(env: Env = process.env): { path: st
       progressMarker: marker,
       ...runtimeIdentity(workdir),
     },
-    terminal: captureTerminal(workdir, env),
+    terminal: captureTerminal(workdir, env, checkpoint),
+    checkpoint,
     progress: captureProgress(workdir, marker),
     todo: todoProjection(workdir),
     children: childrenProjection(workdir),
