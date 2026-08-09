@@ -305,6 +305,14 @@ test("production system prompt contains no executable legacy GitHub recipes", ()
   expect(systemPrompt).toContain("prepare-codex-env.sh")
 })
 
+test("production system prompt binds live progress to the Codex plan tool", () => {
+  const systemPrompt = readFileSync(resolve(import.meta.dir, "../../codex/system-prompt.md"), "utf8")
+  expect(systemPrompt).toContain("Before any investigation, delegation, or implementation, call")
+  expect(systemPrompt).toContain("`update_plan`")
+  expect(systemPrompt).not.toContain("`todowrite`")
+  expect(systemPrompt).toContain("Before step 0, call `update_plan`")
+})
+
 test("ci_fix result sticky instructions produce a schema-valid concrete key", () => {
   const systemPrompt = readFileSync(resolve(import.meta.dir, "../../codex/system-prompt.md"), "utf8")
   const example = systemPrompt.match(/sticky_key: `?"([^"]+)"`?/)

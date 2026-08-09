@@ -14,7 +14,7 @@ import type { GitHubClient } from "../github/client"
 import { BRAND_FOOTER_PREFIX, LOGO_HEADING } from "./inline"
 import { hidden, MARKER } from "../types"
 
-/** One task-list entry mirrored from the agent's `todowrite` (structural shape;
+/** One task-list entry mirrored from the agent's `update_plan` (structural shape;
  *  the real objects carry more fields we ignore). */
 export interface Todo {
   content?: unknown

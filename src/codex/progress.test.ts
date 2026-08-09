@@ -22,7 +22,12 @@ test("persists and publishes only the root plan while ignoring child noise and d
   ]
 
   expect(await tracker.applyPlan("child", [{ step: "child task", status: "completed" }])).toBe(false)
+  expect(tracker.hasReceivedPlan).toBe(false)
+  expect(tracker.hasUsablePlan).toBe(false)
   expect(await tracker.applyPlan("root", plan)).toBe(true)
+  expect(tracker.hasReceivedPlan).toBe(true)
+  expect(tracker.hasUsablePlan).toBe(true)
+  expect(tracker.stepCount).toBe(2)
   expect(await tracker.applyPlan("root", plan)).toBe(false)
   expect(published).toHaveLength(1)
   expect(published[0]).toContain("Run: `run_1`")
@@ -37,6 +42,26 @@ test("persists and publishes only the root plan while ignoring child noise and d
       { content: "Apply fix", status: "in_progress" },
     ],
   })
+})
+
+test("distinguishes a missing plan from an explicitly empty plan in heartbeat metadata", async () => {
+  const path = join(mkdtempSync(join(tmpdir(), "progress-plan-state-")), "todo.json")
+  const published: string[] = []
+  const tracker = new ProgressTracker({
+    path,
+    rootThreadId: "root",
+    task: "pr_opened",
+    runId: "run-plan-state",
+    publish: async (body) => { published.push(body) },
+  })
+
+  await tracker.heartbeat({ planState: "awaiting_first_update" })
+  expect(published.at(-1)).toContain("Plan: awaiting first update")
+  expect(await tracker.applyPlan("root", [])).toBe(true)
+  expect(tracker.hasReceivedPlan).toBe(true)
+  expect(tracker.hasUsablePlan).toBe(false)
+  await tracker.heartbeat({ planState: "empty_update" })
+  expect(published.at(-1)).toContain("Plan: empty update received")
 })
 
 test("hydrates todo state without bumping revision or rewriting an unchanged plan", async () => {

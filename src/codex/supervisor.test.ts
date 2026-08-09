@@ -996,11 +996,11 @@ test("restores the original root drain deadline instead of losing an active chil
       rootTurnId: "turn",
       restartAttempts: 0,
       startedAt,
-      wholeRunDeadlineAt: new Date(Date.now() + 1000).toISOString(),
+      wholeRunDeadlineAt: new Date(Date.now() + 10_000).toISOString(),
       lastSemanticProgressAt: startedAt,
-      drainDeadlineAt: new Date(Date.now() + 300).toISOString(),
+      drainDeadlineAt: new Date(Date.now() + 5_000).toISOString(),
     },
-    deadlines: { wholeRunMs: 1000, heartbeatMs: 100, reconcileMs: 10, parentResumeMs: 300, noProgressWarningMs: 500, noProgressTerminalMs: 900 },
+    deadlines: { wholeRunMs: 10_000, heartbeatMs: 100, reconcileMs: 10, parentResumeMs: 5_000, noProgressWarningMs: 5_000, noProgressTerminalMs: 9_000 },
   })
   const running = supervisor.run()
   await Bun.sleep(50)
@@ -1717,7 +1717,55 @@ test("imports root plan updates and publishes heartbeat progress without child i
   const todo = JSON.parse(readFileSync(join(workdir, "ctx", "codex", "todo.json"), "utf8")) as { todos: Array<{ content: string; status: string }> }
   expect(todo.todos).toEqual([{ content: "inspect", status: "in_progress" }])
   expect(published.join("\n")).toContain("inspect")
+  expect(readJsonl(join(workdir, "ctx", "codex", "supervisor.jsonl"))).toEqual(expect.arrayContaining([
+    expect.objectContaining({ event: "FIRST_PLAN_RECEIVED", stepCount: 1 }),
+    expect.objectContaining({ event: "FIRST_USABLE_PLAN_RECEIVED", stepCount: 1 }),
+  ]))
   await supervisor.handleNotification({ method: "turn/completed", params: { threadId: "root", turn: { id: "turn", status: "completed" } } })
+  expect(await run).toMatchObject({ state: "SUCCEEDED" })
+})
+
+test("surfaces a missing canonical plan after root semantic work begins", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "cchp-supervisor-plan-missing-"))
+  const published: string[] = []
+  let supervisor!: Supervisor
+  const fake = {
+    start: async () => ({ userAgent: "fake" }),
+    request: async (method: string) => {
+      if (method === "thread/start") return { thread: { id: "root" } }
+      if (method === "turn/start") return { turn: { id: "turn" } }
+      return {}
+    },
+    stop: async () => 0,
+  } as unknown as CodexAppServer
+  supervisor = new Supervisor({
+    appServer: fake,
+    codexHome: join(workdir, "codex-home"),
+    repoDir: workdir,
+    workdir,
+    task: "manual",
+    runId: "run-plan-missing",
+    prompt: "status",
+    model: "gpt-5.6-sol",
+    modelProvider: "cchp",
+    totalTokenBudget: 1_000,
+    publishProgress: async (body) => { published.push(body) },
+    deadlines: { wholeRunMs: 10_000, heartbeatMs: 10, reconcileMs: 1_000, noProgressWarningMs: 2_000, noProgressTerminalMs: 8_000 },
+  })
+  const run = supervisor.run()
+  await Bun.sleep(10)
+  await supervisor.handleNotification({
+    method: "item/completed",
+    params: { threadId: "root", item: { id: "message", type: "agentMessage", text: "Working" } },
+  })
+  await eventually(() => published.some((body) => body.includes("Canonical plan missing after semantic work began")))
+  const events = readJsonl(join(workdir, "ctx", "codex", "supervisor.jsonl"))
+  expect(events.filter((row) => row.event === "PLAN_MISSING_WARNING")).toHaveLength(1)
+  expect(published.join("\n")).toContain("Plan: awaiting first update")
+  await supervisor.handleNotification({
+    method: "turn/completed",
+    params: { threadId: "root", turn: { id: "turn", status: "completed" } },
+  })
   expect(await run).toMatchObject({ state: "SUCCEEDED" })
 })
 

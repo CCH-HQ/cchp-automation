@@ -421,6 +421,7 @@ export class Supervisor {
   private lastResumeError?: string
   private restartTask?: Promise<void>
   private runTask?: Promise<SupervisorResult>
+  private planMissingWarningEmitted = false
 
   private graphThreadId(threadId: string): string {
     return this.explicitSessionToChild.get(threadId) ?? threadId
@@ -613,9 +614,24 @@ export class Supervisor {
   private async watchdog(): Promise<void> {
     if (this.settled || this.finalizationAttempt || this.finalizing) return
     const check = this.deadline.check()
-    const warning = check.state === "warning" || check.state === "stale"
-      ? `No semantic progress for ${Math.floor(check.semanticAgeMs / 1000)}s`
-      : undefined
+    const semanticWorkBegan = this.lastSemanticProgressAt !== this.startedAt || this.usage.budget.consumed > 0
+    const planMissing = semanticWorkBegan && !this.progress.hasUsablePlan
+    if (planMissing && !this.planMissingWarningEmitted) {
+      this.planMissingWarningEmitted = true
+      this.append({
+        event: "PLAN_MISSING_WARNING",
+        receivedPlan: this.progress.hasReceivedPlan,
+        stepCount: this.progress.stepCount,
+        consumedTokens: this.usage.budget.consumed,
+      })
+    }
+    const warnings = [
+      check.state === "warning" || check.state === "stale"
+        ? `No semantic progress for ${Math.floor(check.semanticAgeMs / 1000)}s`
+        : undefined,
+      planMissing ? "Canonical plan missing after semantic work began" : undefined,
+    ].filter((value): value is string => Boolean(value))
+    const warning = warnings.length ? warnings.join("; ") : undefined
     if (check.state === "warning") this.append({ event: "NO_PROGRESS_WARNING", semanticAgeMs: check.semanticAgeMs })
     if (check.state === "terminal") {
       await this.abort("NO_PROGRESS_TIMEOUT", "NO_PROGRESS_TIMEOUT", 124)
@@ -626,6 +642,9 @@ export class Supervisor {
       childStates: this.childStateCounts(),
       usage: this.usage.budget,
       semanticAgeMs: check.semanticAgeMs,
+      ...(!this.progress.hasUsablePlan
+        ? { planState: this.progress.hasReceivedPlan ? "empty_update" as const : "awaiting_first_update" as const }
+        : {}),
       ...(warning ? { warning } : {}),
     }, controller.signal).then(() => "completed" as const)
     let timeout: ReturnType<typeof setTimeout> | undefined
@@ -1463,6 +1482,8 @@ export class Supervisor {
     }
     let rootSemantic = false
     if (event.kind === "plan") {
+      const hadReceivedPlan = this.progress.hasReceivedPlan
+      const hadUsablePlan = this.progress.hasUsablePlan
       const rawPlan = Array.isArray(event.params.plan)
         ? event.params.plan
         : Array.isArray(record(event.params.plan).steps)
@@ -1475,6 +1496,12 @@ export class Supervisor {
         return step && status ? [{ step, status }] : []
       })
       rootSemantic = await this.progress.applyPlan(event.threadId ?? "", plan)
+      if (!hadReceivedPlan && this.progress.hasReceivedPlan) {
+        this.append({ event: "FIRST_PLAN_RECEIVED", stepCount: this.progress.stepCount })
+      }
+      if (!hadUsablePlan && this.progress.hasUsablePlan) {
+        this.append({ event: "FIRST_USABLE_PLAN_RECEIVED", stepCount: this.progress.stepCount })
+      }
     } else {
       const childSemantic = Boolean(event.threadId && event.threadId !== this.rootThreadId && this.graph.edge(event.threadId))
       rootSemantic = Boolean(event.semantic && (event.threadId === this.rootThreadId || childSemantic))
