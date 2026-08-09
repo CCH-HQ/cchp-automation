@@ -275,7 +275,7 @@ if command -v setsid >/dev/null 2>&1; then
   wait "$leader_pid"
   descendant_pid="$(<"$descendant_path")"
   run_cleanup "$workdir"
-  for _ in {1..20}; do kill -0 "$descendant_pid" 2>/dev/null || break; sleep 0.05; done
+  for _ in {1..100}; do kill -0 "$descendant_pid" 2>/dev/null || break; sleep 0.05; done
   ! kill -0 "$descendant_pid" 2>/dev/null
   [[ ! -e "$process_file" ]]
 fi
