@@ -51,14 +51,14 @@ export function processIdentity(pid = process.pid): ProcessIdentity {
   return { pid, bootId: bootId(), startTicks }
 }
 
-function sameIdentity(left: ProcessIdentity, right: ProcessIdentity): boolean {
+export function sameProcessIdentity(left: ProcessIdentity, right: ProcessIdentity): boolean {
   return left.pid === right.pid && left.bootId === right.bootId && left.startTicks === right.startTicks
 }
 
 function sameFence(left: RunFence, right: RunFence): boolean {
   return left.writerId === right.writerId
     && left.generation === right.generation
-    && sameIdentity(left.owner, right.owner)
+    && sameProcessIdentity(left.owner, right.owner)
 }
 
 function lockPath(workdir: string): string {
@@ -113,7 +113,7 @@ function ownerLive(owner: ProcessIdentity): boolean {
   } catch (error) {
     return (error as NodeJS.ErrnoException).code !== "ESRCH"
   }
-  return sameIdentity(owner, processIdentity(owner.pid))
+  return sameProcessIdentity(owner, processIdentity(owner.pid))
 }
 
 export function acquireRunLease(workdir: string, runId?: string): RunLease {
@@ -159,7 +159,7 @@ export function acquireRunLease(workdir: string, runId?: string): RunLease {
         if (released) throw new Error("run lease is released")
         const current = readOwner(path)
         const global = readFence(fencePath(workdir))
-        if (!global || !sameFence(current, fence) || !sameFence(global, fence) || !sameIdentity(current.owner, processIdentity())) {
+        if (!global || !sameFence(current, fence) || !sameFence(global, fence) || !sameProcessIdentity(current.owner, processIdentity())) {
           throw new Error("run lease fencing token is no longer owned")
         }
       },

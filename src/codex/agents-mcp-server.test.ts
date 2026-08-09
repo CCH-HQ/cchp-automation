@@ -2,9 +2,96 @@ import { expect, test } from "bun:test"
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { createAgentsServer } from "./agents-mcp-server"
+import { createAgentsServer, serializeAgentsResponse } from "./agents-mcp-server"
+import { initializeCollaborationAdmission } from "./collaboration-admission"
+
+test("serializes every explicit child attempt without exposing prompts", () => {
+  const parsed = JSON.parse(serializeAgentsResponse("wait_agent", [{
+    runId: "run",
+    parentRunId: "run",
+    childId: "child",
+    parentId: "root",
+    spawnItemId: "explicit:child",
+    generation: 1,
+    role: "explorer",
+    state: "completed",
+    sessionId: "session",
+    deadlineAt: new Date().toISOString(),
+    sandbox: "read-only",
+    tokenScope: "child",
+    resultPath: "/tmp/child.json",
+    output: "CHILD_QUEUED_OK",
+    attempts: [
+      { attempt: 1, sessionId: "session", state: "completed", terminal: "completed", startedAt: "a", completedAt: "b", output: "CHILD_INITIAL_OK" },
+      { attempt: 2, sessionId: "session", state: "completed", terminal: "completed", startedAt: "c", completedAt: "d", output: "CHILD_QUEUED_OK" },
+    ],
+  }])) as Record<string, unknown>
+  const serialized = JSON.stringify(parsed)
+  expect(serialized).toContain("CHILD_INITIAL_OK")
+  expect(serialized).toContain("CHILD_QUEUED_OK")
+  expect(serialized).not.toContain("prompt")
+})
+
+test("redacts current and historical explicit child diagnostics before returning them to the root", () => {
+  const secret = "bridge-secret-123"
+  const serialized = serializeAgentsResponse("wait_agent", [{
+    runId: "run",
+    parentRunId: "run",
+    childId: "child",
+    parentId: "root",
+    spawnItemId: "explicit:child",
+    generation: 1,
+    role: "explorer",
+    state: "completed",
+    sessionId: "session",
+    deadlineAt: new Date().toISOString(),
+    sandbox: "read-only",
+    tokenScope: "child",
+    resultPath: "/tmp/child.json",
+    output: `completed without echoing ${secret}`,
+    error: `Authorization: Bearer ${secret}`,
+    attempts: [
+      {
+        attempt: 1,
+        sessionId: "session",
+        state: "failed",
+        terminal: "failed",
+        startedAt: "a",
+        completedAt: "b",
+        error: `token=${secret} prompt=inspect`,
+      },
+      {
+        attempt: 2,
+        sessionId: "session",
+        state: "completed",
+        terminal: "completed",
+        startedAt: "c",
+        completedAt: "d",
+        output: "recovered",
+      },
+    ],
+  }], "terminal", [secret])
+  expect(serialized).not.toContain(secret)
+  expect(serialized).not.toContain("Bearer")
+  expect(serialized).not.toContain("prompt=inspect")
+  expect(serialized).not.toContain("result_path")
+  expect(serialized).not.toContain("/tmp/child.json")
+  expect(serialized).toContain("[REDACTED]")
+  expect(serialized).toContain("recovered")
+})
 
 const fakeCodex = join(import.meta.dir, "../../scripts/fixtures/fake-codex-exec.ts")
+const RECORD_HMAC_KEY = "1".repeat(64)
+
+function admissionEnv(workdir: string, runId: string): Record<string, string> {
+  const identity = { runId, writerId: `writer-${runId}`, generation: 1 }
+  initializeCollaborationAdmission(workdir, identity)
+  return {
+    CCHP_RUN_WRITER_ID: identity.writerId,
+    CCHP_RUN_WRITER_GENERATION: String(identity.generation),
+    CCHP_PROCESS_RECORD_HMAC_KEY: RECORD_HMAC_KEY,
+  }
+}
 
 test("explicit agents MCP exposes the native v2 vocabulary and isolates leaf config", async () => {
   const workdir = mkdtempSync(join(tmpdir(), "cchp-agents-mcp-"))
@@ -59,6 +146,7 @@ test("explicit agents MCP exposes the native v2 vocabulary and isolates leaf con
     BOT_TASK: "pr_opened",
     BOT_WORKDIR: workdir,
     BOT_RUN_ID: "run-1",
+    ...admissionEnv(workdir, "run-1"),
     REPO_DIR: repoDir,
     CODEX_HOME: rootHome,
     CODEX_BIN: "codex",
@@ -75,7 +163,6 @@ test("explicit agents MCP exposes the native v2 vocabulary and isolates leaf con
       "followup_task",
       "wait_agent",
       "interrupt_agent",
-      "close_agent",
       "list_agents",
     ])
     const spawn = created.tools.find((tool) => tool.name === "spawn_agent")!
@@ -124,6 +211,7 @@ test("launches an explicit child without GitHub, provider, App, SEE or HeroUI cr
     BOT_TASK: "manual",
     BOT_WORKDIR: workdir,
     BOT_RUN_ID: "run-env",
+    ...admissionEnv(workdir, "run-env"),
     REPO_DIR: repoDir,
     CODEX_HOME: rootHome,
     CODEX_BIN: fakeCodex,
@@ -166,6 +254,7 @@ test("launches an explicit child without GitHub, provider, App, SEE or HeroUI cr
       "GH_TOKEN", "CCHP_GH_TOKEN_FILE", "CCHP_BOT_PROVIDER_KEYS", "CCHP_BOT_PROVIDERS",
       "CCHP_PK_GPT_CCHP", "CCHP_APP_CLIENT_ID", "CCHP_APP_PRIVATE_KEY", "SEE_API_KEY",
       "HEROUI_AUTH_TOKEN", "UNRELATED_SECRET",
+      "CCHP_PROCESS_RECORD_HMAC_KEY",
     ]) expect(invocation.envKeys).not.toContain(forbidden)
   } finally {
     await created.adapter.shutdown()
@@ -181,6 +270,7 @@ test("fails closed for an unsupported explicit child role", async () => {
   writeFileSync(join(rootHome, "config.toml"), 'model = "root-model"\nreview_model = "review-model"\n[features]\nmulti_agent = false\n')
   const created = createAgentsServer({
     BOT_TASK: "manual", BOT_WORKDIR: workdir, BOT_RUN_ID: "run-role", REPO_DIR: repoDir, CODEX_HOME: rootHome,
+    ...admissionEnv(workdir, "run-role"),
     CODEX_BIN: fakeCodex, PATH: process.env.PATH,
   })
   try {
@@ -204,6 +294,25 @@ test("fails closed for a missing or unsupported BOT_TASK", () => {
     .toThrow("unsupported BOT_TASK: unknown")
 })
 
+test("fails closed when the controller record key is missing", () => {
+  const workdir = mkdtempSync(join(tmpdir(), "cchp-agents-mcp-hmac-"))
+  const rootHome = join(workdir, "root-codex-home")
+  const repoDir = join(workdir, "repo")
+  mkdirSync(rootHome, { recursive: true })
+  mkdirSync(repoDir)
+  writeFileSync(join(rootHome, "config.toml"), 'model = "root-model"\nreview_model = "review-model"\n')
+  const admission = admissionEnv(workdir, "run-hmac")
+  delete admission.CCHP_PROCESS_RECORD_HMAC_KEY
+  expect(() => createAgentsServer({
+    BOT_TASK: "manual",
+    BOT_WORKDIR: workdir,
+    BOT_RUN_ID: "run-hmac",
+    REPO_DIR: repoDir,
+    CODEX_HOME: rootHome,
+    ...admission,
+  })).toThrow("process record HMAC key")
+})
+
 test("requires pass_kind only for pr_opened review delegation", async () => {
   const workdir = mkdtempSync(join(tmpdir(), "cchp-agents-mcp-schema-"))
   const rootHome = join(workdir, "root-codex-home")
@@ -211,8 +320,8 @@ test("requires pass_kind only for pr_opened review delegation", async () => {
   mkdirSync(rootHome, { recursive: true })
   mkdirSync(repoDir)
   writeFileSync(join(rootHome, "config.toml"), 'model = "root-model"\nreview_model = "review-model"\n[features]\nmulti_agent = false\n')
-  const review = createAgentsServer({ BOT_TASK: "pr_opened", BOT_WORKDIR: workdir, BOT_RUN_ID: "review", REPO_DIR: repoDir, CODEX_HOME: rootHome })
-  const ordinary = createAgentsServer({ BOT_TASK: "manual", BOT_WORKDIR: workdir, BOT_RUN_ID: "manual", REPO_DIR: repoDir, CODEX_HOME: rootHome })
+  const review = createAgentsServer({ BOT_TASK: "pr_opened", BOT_WORKDIR: workdir, BOT_RUN_ID: "review", REPO_DIR: repoDir, CODEX_HOME: rootHome, ...admissionEnv(workdir, "review") })
+  const ordinary = createAgentsServer({ BOT_TASK: "manual", BOT_WORKDIR: workdir, BOT_RUN_ID: "manual", REPO_DIR: repoDir, CODEX_HOME: rootHome, ...admissionEnv(workdir, "manual") })
   try {
     expect(review.tools.find((tool) => tool.name === "spawn_agent")!.inputSchema.required)
       .toEqual(["task_name", "message", "pass_kind"])

@@ -86,31 +86,45 @@ if [[ "${BOT_SKIP_AGENT_TOOLCHAIN:-0}" != "1" ]]; then
 fi
 
 install_see_cli() {
-  local version="${BOT_SEE_VERSION:-v1.2.0}" os arch asset base tmp expected actual
+  local version="${BOT_SEE_VERSION:-v1.2.0}" os arch asset base tmp expected actual target_dir target_tmp binary_sha
+  [[ "$version" == "v1.2.0" ]] || { warn "see-cli version is not pinned: $version"; return 0; }
   os="$(uname -s)"; arch="$(uname -m)"
   case "$os" in Linux) os="Linux" ;; Darwin) os="Darwin" ;; *) warn "see-cli unsupported OS $os"; return 0 ;; esac
   case "$arch" in x86_64|amd64) arch="x86_64" ;; arm64|aarch64) arch="arm64" ;; *) warn "see-cli unsupported arch $arch"; return 0 ;; esac
   asset="see_${os}_${arch}.tar.gz"
+  case "$asset" in
+    see_Linux_x86_64.tar.gz) expected="ef0ff8e41579a828db303585e6711bf599619b3e0929b15e7616ed446647db90" ;;
+    see_Linux_arm64.tar.gz) expected="52a6370c01d3a406edc2d9f164a8c1b74b6676fb2e0630b3d75f10e3dfb695ca" ;;
+    see_Darwin_x86_64.tar.gz) expected="054d5ba6e215d91d5ca283c9a8dad51f6cfc39417ef6102dc5407c6cfa011f1e" ;;
+    see_Darwin_arm64.tar.gz) expected="379ad0b404634a72af26c89a4f8052623e9fa6dbd9b4fe8575c3fe976ffe608b" ;;
+    *) warn "see-cli asset is not pinned: $asset"; return 0 ;;
+  esac
   base="https://github.com/sdotee/cli/releases/download/${version}"
-  mkdir -p "${HOME}/.local/lib/see-cli" "${HOME}/.local/bin"
-  if [[ ! -x "${HOME}/.local/lib/see-cli/see" ]]; then
-    tmp="$(mktemp -d)"
-    trap 'rm -rf -- "$tmp"' RETURN
-    curl -fsSL -o "${tmp}/${asset}" "${base}/${asset}" || { warn "see-cli download failed"; return 0; }
-    curl -fsSL -o "${tmp}/checksums.txt" "${base}/checksums.txt" || { warn "see-cli checksum download failed"; return 0; }
-    expected="$(awk -v asset="$asset" '$2 == asset { print $1 }' "${tmp}/checksums.txt")"
-    actual="$(sha256sum "${tmp}/${asset}" | awk '{print $1}')"
-    [[ -n "$expected" && "$expected" == "$actual" ]] || { warn "see-cli checksum verification failed"; return 0; }
-    tar -xzf "${tmp}/${asset}" -C "${tmp}" || { warn "see-cli extraction failed"; return 0; }
-    install -m 0755 "${tmp}/see" "${HOME}/.local/lib/see-cli/see" || { warn "see-cli install failed"; return 0; }
-  fi
-  printf '%s\n' '#!/bin/sh' 'set -eu' 'bin="${SEE_CLI_BIN:-$HOME/.local/lib/see-cli/see}"' 'exec "$bin" "$@"' > "${HOME}/.local/bin/see-cli"
-  chmod 0755 "${HOME}/.local/bin/see-cli"
+  target_dir="${BOT_WORKDIR}/ctx/tools/see"
+  mkdir -p "$target_dir"
+  chmod 700 "$target_dir"
+  rm -f -- "${target_dir}/see" "${target_dir}/provenance.json"
+  tmp="$(mktemp -d "${BOT_WORKDIR}/ctx/tools/.see-install.XXXXXX")"
+  target_tmp=""
+  trap 'rm -rf -- "$tmp"; [[ -z "${target_tmp:-}" ]] || rm -f -- "$target_tmp"' RETURN
+  curl -fsSL -o "${tmp}/${asset}" "${base}/${asset}" || { warn "see-cli download failed"; return 0; }
+  actual="$(sha256sum "${tmp}/${asset}" | awk '{print $1}')"
+  [[ "$expected" == "$actual" ]] || { warn "see-cli checksum verification failed"; return 0; }
+  tar -xzf "${tmp}/${asset}" -C "${tmp}" || { warn "see-cli extraction failed"; return 0; }
+  [[ -f "${tmp}/see" && ! -L "${tmp}/see" ]] || { warn "see-cli archive did not contain a regular binary"; return 0; }
+  target_tmp="$(mktemp "${target_dir}/.see.XXXXXX")"
+  install -m 0755 "${tmp}/see" "$target_tmp" || { warn "see-cli install failed"; return 0; }
+  mv -f -- "$target_tmp" "${target_dir}/see"
+  binary_sha="$(sha256sum "${target_dir}/see" | awk '{print $1}')"
+  jq -n --arg version "$version" --arg asset "$asset" --arg assetSha256 "$expected" --arg binarySha256 "$binary_sha" \
+    '{schemaVersion: 1, version: $version, asset: $asset, assetSha256: $assetSha256, binarySha256: $binarySha256}' \
+    > "${target_dir}/provenance.json"
+  chmod 600 "${target_dir}/provenance.json"
 }
 
 if [[ "${BOT_SKIP_SEE:-0}" != "1" ]]; then
-  if ! command -v see-cli >/dev/null 2>&1; then install_see_cli || true; fi
-  command -v see-cli >/dev/null 2>&1 || warn "see-cli is not installed; image upload remains unavailable"
+  install_see_cli || true
+  [[ -x "${BOT_WORKDIR}/ctx/tools/see/see" ]] || warn "see-cli is not installed; image upload remains unavailable"
 fi
 if [[ "${BOT_SKIP_ATARAXY:-0}" != "1" ]]; then
   command -v sem >/dev/null 2>&1 || warn "sem CLI unavailable"

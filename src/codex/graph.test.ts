@@ -59,3 +59,48 @@ test("ignores only a torn final row and fails closed on durable corruption", () 
   writeFileSync(corrupt, `${JSON.stringify({ event: "edge_opened", parentId: "root", childId: "a", spawnItemId: "s", state: "open", openedAt: "now" })}\nnot-json\n`)
   expect(() => new ChildGraph(corrupt)).toThrow("invalid JSONL row 2")
 })
+
+test("rejects an explicit unknown transport instead of treating it as native", () => {
+  const row = JSON.stringify({
+    event: "edge_opened",
+    parentId: "root",
+    childId: "child",
+    spawnItemId: "spawn",
+    transport: "corrupt_transport",
+    openedAt: "now",
+  })
+  expect(() => ChildGraph.fromSnapshot(`${row}\n`)).toThrow("invalid transport")
+})
+
+test("rejects duplicate open rows whose transport or generation drifts", () => {
+  const first = JSON.stringify({
+    event: "edge_opened",
+    parentId: "root",
+    childId: "child",
+    spawnItemId: "spawn",
+    transport: "native_v2",
+    generation: 1,
+    openedAt: "now",
+  })
+  const transportDrift = JSON.stringify({
+    event: "edge_opened",
+    parentId: "root",
+    childId: "child",
+    spawnItemId: "spawn",
+    transport: "explicit_child",
+    generation: 1,
+    openedAt: "later",
+  })
+  const generationDrift = JSON.stringify({
+    event: "edge_opened",
+    parentId: "root",
+    childId: "child",
+    spawnItemId: "spawn",
+    transport: "native_v2",
+    generation: 2,
+    openedAt: "later",
+  })
+
+  expect(() => ChildGraph.fromSnapshot(`${first}\n${transportDrift}\n`)).toThrow("conflicting replay transport")
+  expect(() => ChildGraph.fromSnapshot(`${first}\n${generationDrift}\n`)).toThrow("conflicting replay generation")
+})

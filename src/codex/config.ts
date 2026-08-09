@@ -317,6 +317,7 @@ export function prepareCodexHome(input: PrepareCodexHomeInput): PreparedCodexHom
     '"CCHP_GITHUB_BROKER_SOCKET" = "exclude"',
     '"CCHP_GITHUB_BROKER_TOKEN" = "exclude"',
     '"CCHP_GITHUB_BROKER_FINALIZER" = "exclude"',
+    '"CCHP_PROCESS_RECORD_HMAC_KEY" = "exclude"',
     '"SEE_API_KEY" = "exclude"',
     '"HEROUI_AUTH_TOKEN" = "exclude"',
     "",
@@ -400,6 +401,9 @@ export function prepareCodexHome(input: PrepareCodexHomeInput): PreparedCodexHom
           "CCHP_EXPLICIT_AGENT_DEPTH",
           "CCHP_EXPLICIT_MAX_ACTIVE",
           "CCHP_EXPLICIT_CHILD_TIMEOUT_MS",
+          "CCHP_RUN_WRITER_ID",
+          "CCHP_RUN_WRITER_GENERATION",
+          "CCHP_PROCESS_RECORD_HMAC_KEY",
         ].map(toml).join(", ") +
         "]",
       "required = true",

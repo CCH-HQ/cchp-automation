@@ -56,12 +56,20 @@ if (value.schema_version !== 2 || value.status !== "passed" || value.run_id !== 
 }
 const workspace = value.workspace_write
 const network = workspace?.external_network
+const observations = network?.observations
+const pairedNetworkValid = network?.reason !== "host-reachable-sandbox-refused" || (
+  observations?.host_before?.result === "reachable" && observations.host_before.reason === "http-response" && observations.host_before.target === "https://example.com" &&
+  observations?.host_after?.result === "reachable" && observations.host_after.reason === "http-response" && observations.host_after.target === "https://example.com" &&
+  observations?.sandbox?.result === "indeterminate" && observations.sandbox.reason === "unclassified-error" && observations.sandbox.target === "https://example.com" &&
+  typeof observations.sandbox.detail === "string" && /\bConnectionRefused\b/.test(observations.sandbox.detail)
+)
 if (!workspace || workspace.status !== "passed" || workspace.thread_completed !== true ||
     workspace.apply_patch !== "passed" || workspace.ordinary_repo_write !== "passed" ||
     workspace.app_server_long_lived_secrets_absent !== "passed" || workspace.shell_capabilities_excluded !== "passed" ||
     workspace.shell_snapshot_directory_absent !== "passed" ||
     !network || network.result !== "policy-blocked" ||
-    !["proxy-structured-denial", "os-connect-denied"].includes(network.reason) ||
+    !["proxy-structured-denial", "os-connect-denied", "host-reachable-sandbox-refused"].includes(network.reason) ||
+    !pairedNetworkValid ||
     network.probe_target !== "https://example.com" || network.configured_enforcement !== "direct" ||
     workspace.git_metadata_protected !== "passed" || workspace.agents_metadata_protected !== "passed" ||
     workspace.configured_enforcement !== "direct") {

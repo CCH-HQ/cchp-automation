@@ -19,6 +19,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { CallToolRequestSchema, ListToolsRequestSchema, type CallToolResult, type Tool } from "@modelcontextprotocol/sdk/types.js"
 import { brokerRequest } from "./github-broker"
 import { assertNoForbiddenMaterial } from "../security/secret-material"
+import { openRegularFileSnapshot } from "../codex/file-snapshot"
 
 export const SEE_MAX_UPLOAD_BYTES = 10 * 1024 * 1024
 
@@ -35,6 +36,7 @@ export interface SeeServerOptions {
   keyFile?: string
   apiKey?: string
   seeBin?: string
+  seeSha256?: string
   broker?: { socketPath: string; token: string }
   maxBytes?: number
   env?: Record<string, string | undefined>
@@ -230,6 +232,12 @@ export function createSeeServer(options: SeeServerOptions): { server: Server; to
       return validateResult(result, path)
     }
     if (!options.seeBin) throw new Error("SEE CLI is unavailable")
+    if (options.seeSha256) {
+      const binary = openRegularFileSnapshot(options.seeBin)
+      if (binary.nlink !== 1 || binary.sha256 !== options.seeSha256) {
+        throw new Error("SEE CLI provenance verification failed")
+      }
+    }
     const prepared = prepareUpload(path, options)
     try {
       const argv = [options.seeBin, "file", "upload", "--json", "--file", prepared.snapshotPath]

@@ -6,7 +6,12 @@ import type { CodexAppServer } from "./app-server"
 import { resolveRuntimeRecovery } from "./runtime"
 import { buildCodexEnvironment, fatalSandboxError, Supervisor } from "./supervisor"
 import type { ExplicitChildLifecycle, ExplicitChildSnapshot } from "./explicit-lifecycle"
+import { ChildGraph } from "./graph"
 import { ProvenanceLedger } from "./provenance"
+import { ReviewAdmissionLedger } from "./review-admission"
+import { reviewContinuationClientMessageId } from "./run-manifest"
+
+process.env.CCHP_PROCESS_RECORD_HMAC_KEY = "1".repeat(64)
 
 async function eventually(predicate: () => boolean, timeoutMs = 2_000): Promise<void> {
   const deadline = Date.now() + timeoutMs
@@ -148,6 +153,7 @@ test("persists a successful app-server root lifecycle and runs finalizer once", 
     model: "gpt-5.6-sol",
     modelProvider: "cchp",
     totalTokenBudget: 1000,
+    executionMode: "native_v2",
     finalizer: (context) => {
       finalized++
       return { valid: true, run_id: context.runId, idempotency_key: context.idempotencyKey, provenance_sha256: context.preterminalProvenanceSha256 }
@@ -167,6 +173,107 @@ test("persists a successful app-server root lifecycle and runs finalizer once", 
     finalizerAttestation: { valid: true, run_id: "run-1", idempotency_key: expect.any(String) },
     finalizerIdempotencyKey: expect.stringMatching(/^[0-9a-f]{64}$/),
   })
+})
+
+test("drains an in-flight heartbeat before publishing the final summary", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "cchp-supervisor-heartbeat-drain-"))
+  let supervisor!: Supervisor
+  let releaseHeartbeat!: () => void
+  let heartbeatStarted!: () => void
+  const heartbeatGate = new Promise<void>((resolve) => { releaseHeartbeat = resolve })
+  const heartbeatObserved = new Promise<void>((resolve) => { heartbeatStarted = resolve })
+  let publications = 0
+  let finalized = 0
+  const fake = {
+    start: async () => ({ userAgent: "fake" }),
+    request: async (method: string) => {
+      if (method === "thread/start") return { thread: { id: "root" } }
+      if (method === "turn/start") return { turn: { id: "turn" } }
+      return {}
+    },
+    stop: async () => 0,
+  } as unknown as CodexAppServer
+  supervisor = new Supervisor({
+    appServer: fake,
+    codexHome: join(workdir, "codex-home"),
+    repoDir: workdir,
+    workdir,
+    task: "manual",
+    runId: "run-heartbeat-drain",
+    prompt: "status",
+    model: "gpt-5.6-sol",
+    modelProvider: "cchp",
+    totalTokenBudget: 1_000,
+    publishProgress: async () => {
+      publications++
+      heartbeatStarted()
+      await heartbeatGate
+    },
+    finalizer: (context) => {
+      finalized++
+      return { valid: true, run_id: context.runId, idempotency_key: context.idempotencyKey, provenance_sha256: context.preterminalProvenanceSha256 }
+    },
+    deadlines: { wholeRunMs: 10_000, heartbeatMs: 5, noProgressWarningMs: 2_000, noProgressTerminalMs: 8_000 },
+  })
+
+  const run = supervisor.run()
+  await heartbeatObserved
+  const completion = supervisor.handleNotification({
+    method: "turn/completed",
+    params: { threadId: "root", turn: { id: "turn", status: "completed" } },
+  })
+  await Bun.sleep(20)
+  expect(finalized).toBe(0)
+  releaseHeartbeat()
+  await completion
+  expect(await run).toMatchObject({ state: "SUCCEEDED", exitCode: 0 })
+  expect(finalized).toBe(1)
+  const publicationCount = publications
+  await Bun.sleep(20)
+  expect(publications).toBe(publicationCount)
+})
+
+test("bounds a stalled progress publication and still enforces the semantic deadline", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "cchp-supervisor-heartbeat-timeout-"))
+  const fake = {
+    start: async () => ({ userAgent: "fake" }),
+    request: async (method: string) => {
+      if (method === "thread/start") return { thread: { id: "root" } }
+      if (method === "turn/start") return { turn: { id: "turn" } }
+      return {}
+    },
+    stop: async () => 0,
+  } as unknown as CodexAppServer
+  let aborted = 0
+  const supervisor = new Supervisor({
+    appServer: fake,
+    codexHome: join(workdir, "codex-home"),
+    repoDir: workdir,
+    workdir,
+    task: "manual",
+    runId: "run-heartbeat-timeout",
+    prompt: "status",
+    model: "gpt-5.6-sol",
+    modelProvider: "cchp",
+    totalTokenBudget: 1_000,
+    publishProgress: async (_body, signal) => await new Promise<void>((resolve) => {
+      signal?.addEventListener("abort", () => { aborted++; resolve() }, { once: true })
+    }),
+    deadlines: {
+      wholeRunMs: 1_000,
+      heartbeatMs: 5,
+      progressPublishMs: 10,
+      noProgressWarningMs: 1,
+      noProgressTerminalMs: 25,
+    },
+  })
+  const started = Date.now()
+  expect(await supervisor.run()).toMatchObject({ state: "NO_PROGRESS_TIMEOUT", exitCode: 124 })
+  expect(Date.now() - started).toBeLessThan(300)
+  expect(aborted).toBeGreaterThan(0)
+  expect(readJsonl(join(workdir, "ctx", "codex", "supervisor.jsonl")).some((row) =>
+    row.event === "progress_publish_timeout",
+  )).toBe(true)
 })
 
 test("freezes durable state after terminal settlement despite late runtime callbacks", async () => {
@@ -225,7 +332,12 @@ test("freezes durable state after terminal settlement despite late runtime callb
     reasoningOutputTokens: 0,
     totalTokens: 11,
   })).toMatchObject({ acceptedRaw: false, consumed: 0 })
-  await supervisor.releaseProviderReservation("late-reservation", "late_cleanup")
+  await supervisor.releaseProviderReservation({
+    reservationId: "late-reservation",
+    writerId: "late-writer",
+    writerGeneration: 1,
+    requestId: "late-request",
+  }, "late_cleanup")
   await supervisor.handleNotification({
     method: "rawResponse/completed",
     params: {
@@ -420,6 +532,64 @@ test("ignores an unexpected app-server exit during FINALIZING and commits one co
   expect(readJsonl(join(workdir, "ctx", "codex", "supervisor.jsonl")).filter((row) => row.event === "terminal")).toHaveLength(1)
 })
 
+test("preserves a whole-run timeout that begins while the external finalizer is still running", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "cchp-supervisor-finalizer-timeout-"))
+  let supervisor!: Supervisor
+  let releaseFinalizer!: () => void
+  let enteredFinalizer!: () => void
+  const finalizerGate = new Promise<void>((resolve) => { releaseFinalizer = resolve })
+  const finalizerEntered = new Promise<void>((resolve) => { enteredFinalizer = resolve })
+  const never = new Promise<never>(() => undefined)
+  const fake = {
+    start: async () => ({ userAgent: "fake" }),
+    request: async (method: string) => {
+      if (method === "thread/start") return { thread: { id: "root" } }
+      if (method === "turn/start") {
+        queueMicrotask(() => void supervisor.handleNotification({
+          method: "turn/completed",
+          params: { threadId: "root", turn: { id: "turn", status: "completed" } },
+        }))
+        return { turn: { id: "turn" } }
+      }
+      if (method === "turn/interrupt") return never
+      return {}
+    },
+    stop: async () => 0,
+  } as unknown as CodexAppServer
+  supervisor = new Supervisor({
+    appServer: fake,
+    codexHome: join(workdir, "codex-home"), repoDir: workdir, workdir,
+    task: "manual", runId: "run-finalizer-timeout", prompt: "status",
+    model: "gpt-5.6-sol", modelProvider: "cchp", totalTokenBudget: 1000,
+    finalizer: async (context) => {
+      enteredFinalizer()
+      await finalizerGate
+      return { valid: true, run_id: context.runId, idempotency_key: context.idempotencyKey, provenance_sha256: context.preterminalProvenanceSha256 }
+    },
+    deadlines: {
+      wholeRunMs: 40,
+      interruptGraceMs: 150,
+      heartbeatMs: 100,
+      reconcileMs: 5,
+      noProgressWarningMs: 1_000,
+      noProgressTerminalMs: 2_000,
+      parentResumeMs: 500,
+    },
+  })
+
+  const running = supervisor.run()
+  await finalizerEntered
+  await eventually(() => supervisor.currentState === "TIMED_OUT", 500)
+  releaseFinalizer()
+  expect(await running).toMatchObject({ state: "TIMED_OUT", exitCode: 124, terminalReason: "whole run deadline exceeded" })
+  expect(supervisor.currentState).toBe("TIMED_OUT")
+  expect(JSON.parse(readFileSync(join(workdir, "ctx", "codex", "terminal.json"), "utf8"))).toMatchObject({
+    state: "TIMED_OUT",
+    exitCode: 124,
+  })
+  expect(JSON.parse(readFileSync(join(workdir, "ctx", "codex", "run-manifest.json"), "utf8"))).toMatchObject({ state: "TIMED_OUT" })
+})
+
 test("drains provider usage observers before committing a successful terminal state", async () => {
   const workdir = mkdtempSync(join(tmpdir(), "cchp-supervisor-usage-drain-"))
   let supervisor!: Supervisor
@@ -458,7 +628,7 @@ test("drains provider usage observers before committing a successful terminal st
     model: "gpt-5.6-sol",
     modelProvider: "cchp",
     totalTokenBudget: 1000,
-    drainUsage: async () => { drains++; await gate },
+    sealProviderAndDrain: async () => { drains++; await gate },
     finalizer: (context) => {
       finalized++
       return { valid: true, run_id: context.runId, idempotency_key: context.idempotencyKey, provenance_sha256: context.preterminalProvenanceSha256 }
@@ -488,7 +658,67 @@ test("drains provider usage observers before committing a successful terminal st
   expect(starts).toBe(1)
 })
 
-test("returns to child draining when a native child appears during provider usage drain", async () => {
+test("rechecks pending usage after the external finalizer and rejects late provider admission", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "cchp-supervisor-finalizer-usage-"))
+  let supervisor!: Supervisor
+  let release!: () => void
+  let entered!: () => void
+  const gate = new Promise<void>((resolve) => { release = resolve })
+  const finalizerEntered = new Promise<void>((resolve) => { entered = resolve })
+  const fake = {
+    start: async () => ({ userAgent: "fake" }),
+    request: async (method: string) => {
+      if (method === "thread/start") return { thread: { id: "root" } }
+      if (method === "turn/start") {
+        queueMicrotask(() => void supervisor.handleNotification({
+          method: "turn/completed",
+          params: { threadId: "root", turn: { id: "turn", status: "completed" } },
+        }))
+        return { turn: { id: "turn" } }
+      }
+      return {}
+    },
+    stop: async () => 0,
+  } as unknown as CodexAppServer
+  supervisor = new Supervisor({
+    appServer: fake,
+    codexHome: join(workdir, "codex-home"), repoDir: workdir, workdir,
+    task: "manual", runId: "run-finalizer-usage", prompt: "status", model: "gpt-5.6-sol", modelProvider: "cchp",
+    totalTokenBudget: 1_000_000,
+    executionMode: "native_v2",
+    sealProviderAndDrain: async () => {},
+    finalizer: async (context) => {
+      entered()
+      await gate
+      return { valid: true, run_id: context.runId, idempotency_key: context.idempotencyKey, provenance_sha256: context.preterminalProvenanceSha256 }
+    },
+    deadlines: { wholeRunMs: 2_000, heartbeatMs: 100, reconcileMs: 1, parentResumeMs: 500 },
+  })
+  const running = supervisor.run()
+  await finalizerEntered
+  expect(await supervisor.authorizeProviderRequest({ providerId: "p", model: "m" })).toMatchObject({
+    allowed: false,
+    reason: "provider admission is sealed for finalization",
+  })
+  await supervisor.recordProviderUsage({
+    providerId: "p",
+    model: "m",
+    responseId: "late-response",
+    inputTokens: 1,
+    cachedInputTokens: 0,
+    cacheWriteInputTokens: 0,
+    outputTokens: 1,
+    reasoningOutputTokens: 0,
+    totalTokens: 2,
+  })
+  release()
+  expect(await running).toMatchObject({
+    state: "FAILED",
+    terminalReason: "raw response attribution missing for 1 provider completion(s)",
+  })
+})
+
+test("fails closed when native child admission races the provider finalization barrier", async () => {
   const workdir = mkdtempSync(join(tmpdir(), "cchp-supervisor-late-native-child-"))
   let supervisor!: Supervisor
   let release!: () => void
@@ -496,6 +726,7 @@ test("returns to child draining when a native child appears during provider usag
   const gate = new Promise<void>((resolve) => { release = resolve })
   const drainEntered = new Promise<void>((resolve) => { entered = resolve })
   let finalized = 0
+  let publications = 0
   const fake = {
     start: async () => ({ userAgent: "fake" }),
     request: async (method: string, params?: Record<string, unknown>) => {
@@ -513,12 +744,13 @@ test("returns to child draining when a native child appears during provider usag
     appServer: fake, codexHome: join(workdir, "codex-home"), repoDir: workdir, workdir,
     task: "manual", runId: "run-late-native-child", prompt: "status", model: "gpt-5.6-sol", modelProvider: "cchp",
     totalTokenBudget: 1000, executionMode: "native_v2",
-    drainUsage: async () => { entered(); await gate },
+    publishProgress: async () => { publications++ },
+    sealProviderAndDrain: async () => { entered(); await gate },
     finalizer: (context) => {
       finalized++
       return { valid: true, run_id: context.runId, idempotency_key: context.idempotencyKey, provenance_sha256: context.preterminalProvenanceSha256 }
     },
-    deadlines: { wholeRunMs: 2000, heartbeatMs: 100, reconcileMs: 10, parentResumeMs: 1000 },
+    deadlines: { wholeRunMs: 2000, heartbeatMs: 5, reconcileMs: 10, parentResumeMs: 1000 },
   })
   const running = supervisor.run()
   await Bun.sleep(5)
@@ -537,22 +769,13 @@ test("returns to child draining when a native child appears during provider usag
   } })
   release()
   await rootCompletion
-  await Bun.sleep(20)
-  expect(supervisor.currentState).toBe("ROOT_DRAINING")
+  expect(await running).toMatchObject({
+    state: "FAILED",
+    exitCode: 1,
+    terminalReason: "collaboration arrived after finalization admission fence",
+  })
   expect(finalized).toBe(0)
-  await supervisor.handleNotification({ method: "item/completed", params: {
-    threadId: "root",
-    item: {
-      id: "spawn-late",
-      type: "collabAgentToolCall",
-      tool: "spawn_agent",
-      senderThreadId: "root",
-      receiverThreadIds: ["child-late"],
-      agentsStates: { "child-late": { status: "completed" } },
-    },
-  } })
-  expect(await running).toMatchObject({ state: "SUCCEEDED", exitCode: 0 })
-  expect(finalized).toBe(1)
+  expect(publications).toBe(0)
 })
 
 test("writes the same 124 timeout result to memory, terminal artifact, and manifest", async () => {
@@ -809,6 +1032,637 @@ test("fails when finalizer attestation is missing or drifts from the current run
   }
 })
 
+test("allows metadata-only pr_opened completion without review admissions or a review finalizer", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "cchp-supervisor-metadata-only-review-"))
+  let supervisor!: Supervisor
+  const fake = {
+    start: async () => ({ userAgent: "fake" }),
+    request: async (method: string) => {
+      if (method === "thread/start") return { thread: { id: "root" } }
+      if (method === "turn/start") {
+        queueMicrotask(() => void supervisor.handleNotification({
+          method: "turn/completed",
+          params: { threadId: "root", turn: { id: "turn", status: "completed" } },
+        }))
+        return { turn: { id: "turn" } }
+      }
+      return {}
+    },
+    stop: async () => 0,
+  } as unknown as CodexAppServer
+  supervisor = new Supervisor({
+    appServer: fake,
+    codexHome: join(workdir, "codex-home"), repoDir: workdir, workdir,
+    task: "pr_opened", runId: "run-metadata-only", prompt: "metadata-only",
+    model: "gpt-5.6-sol", modelProvider: "cchp", totalTokenBudget: 1_000,
+    executionMode: "explicit_child",
+    reviewRequired: false,
+    deadlines: { wholeRunMs: 5_000, heartbeatMs: 100, noProgressWarningMs: 1_000, noProgressTerminalMs: 4_000 },
+  })
+
+  expect(await supervisor.run()).toMatchObject({ state: "SUCCEEDED", exitCode: 0 })
+  expect(existsSync(join(workdir, "ctx", "codex", "review-admission.jsonl"))).toBeFalse()
+})
+
+test("runs one durable same-thread continuation before failing a full review with zero admissions", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "cchp-supervisor-full-review-required-"))
+  let supervisor!: Supervisor
+  const turnStarts: Array<Record<string, unknown>> = []
+  const fake = {
+    start: async () => ({ userAgent: "fake" }),
+    request: async (method: string, params?: Record<string, unknown>) => {
+      if (method === "thread/start") return { thread: { id: "root" } }
+      if (method === "turn/start") {
+        turnStarts.push(params ?? {})
+        const turnId = turnStarts.length === 1 ? "initial-turn" : "continuation-turn"
+        if (turnStarts.length === 2) {
+          expect(params?.threadId).toBe("root")
+          expect(params?.clientUserMessageId).toMatch(/^cchp-review-continuation-[0-9a-f]{64}$/)
+          expect(JSON.stringify(params?.input)).toContain("Do not fabricate")
+          setTimeout(() => void supervisor.handleNotification({
+            method: "turn/completed",
+            params: { threadId: "root", turn: { id: "initial-turn", status: "completed" } },
+          }), 0)
+          setTimeout(() => void supervisor.handleNotification({
+            method: "turn/completed",
+            params: { threadId: "root", turn: { id: turnId, status: "completed" } },
+          }), 5)
+        } else {
+          queueMicrotask(() => void supervisor.handleNotification({
+            method: "turn/completed",
+            params: { threadId: "root", turn: { id: turnId, status: "completed" } },
+          }))
+        }
+        return { turn: { id: turnId } }
+      }
+      if (method === "thread/read") return { thread: { id: "root", turns: [
+        { id: "initial-turn", status: "completed", items: [] },
+        ...(turnStarts.length > 1 ? [{
+          id: "continuation-turn",
+          status: "completed",
+          items: [{ type: "userMessage", clientId: turnStarts[1]?.clientUserMessageId }],
+        }] : []),
+      ] } }
+      return {}
+    },
+    stop: async () => 0,
+  } as unknown as CodexAppServer
+  supervisor = new Supervisor({
+    appServer: fake,
+    codexHome: join(workdir, "codex-home"), repoDir: workdir, workdir,
+    task: "pr_opened", runId: "run-full-review", prompt: "review",
+    model: "gpt-5.6-sol", modelProvider: "cchp", totalTokenBudget: 1_000,
+    executionMode: "explicit_child",
+    reviewRequired: true,
+    deadlines: { wholeRunMs: 5_000, heartbeatMs: 100, reconcileMs: 10, noProgressWarningMs: 1_000, noProgressTerminalMs: 4_000 },
+  })
+
+  expect(await supervisor.run()).toMatchObject({
+    state: "FAILED",
+    exitCode: 1,
+    terminalReason: "review finalization requires at least one admitted child task",
+  })
+  expect(turnStarts).toHaveLength(2)
+  expect(turnStarts[0]?.threadId).toBe("root")
+  expect(turnStarts[1]?.threadId).toBe("root")
+  expect(JSON.parse(readFileSync(join(workdir, "ctx", "codex", "run-manifest.json"), "utf8"))).toMatchObject({
+    state: "FAILED",
+    rootTurnId: "continuation-turn",
+    reviewContinuation: {
+      phase: "completed",
+      initialTurnId: "initial-turn",
+      continuationTurnId: "continuation-turn",
+    },
+  })
+  expect(readJsonl(join(workdir, "ctx", "codex", "supervisor.jsonl"))).toContainEqual(expect.objectContaining({
+    event: "stale_root_turn_completion",
+    receivedTurnId: "initial-turn",
+    rootTurnId: "continuation-turn",
+  }))
+})
+
+test("finalizes normally when the zero-admission continuation produces a real native child result", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "cchp-supervisor-review-continuation-admission-"))
+  let supervisor!: Supervisor
+  let turnStarts = 0
+  let continuationCompleted = false
+  const reviewPrompt = 'CCHP_REVIEW_TASK_V1 {"task_id":"continuation-review-task","pass_kind":"correctness"}\nInspect the trusted diff and report findings.'
+  const collaboration = (status: "running" | "completed") => ({
+    method: "item/completed",
+    params: {
+      threadId: "root",
+      item: {
+        id: "continuation-spawn",
+        type: "collabAgentToolCall",
+        tool: "spawn_agent",
+        senderThreadId: "root",
+        receiverThreadIds: ["review-child"],
+        agentType: "reviewer",
+        prompt: reviewPrompt,
+        agentsStates: { "review-child": { status } },
+      },
+    },
+  })
+  const fake = {
+    start: async () => ({ userAgent: "fake" }),
+    request: async (method: string, params?: Record<string, unknown>) => {
+      if (method === "thread/start") return { thread: { id: "root", sessionId: "session" } }
+      if (method === "turn/start") {
+        turnStarts++
+        const turnId = turnStarts === 1 ? "initial-turn" : "continuation-turn"
+        if (turnStarts === 1) {
+          queueMicrotask(() => void supervisor.handleNotification({
+            method: "turn/completed",
+            params: { threadId: "root", turn: { id: turnId, status: "completed" } },
+          }))
+        } else {
+          expect(params?.threadId).toBe("root")
+          setTimeout(() => void supervisor.handleNotification(collaboration("running")), 0)
+          setTimeout(() => void supervisor.handleNotification(collaboration("completed")), 5)
+          setTimeout(() => {
+            continuationCompleted = true
+            void supervisor.handleNotification({
+              method: "turn/completed",
+              params: { threadId: "root", turn: { id: turnId, status: "completed" } },
+            })
+          }, 10)
+        }
+        return { turn: { id: turnId } }
+      }
+      if (method === "thread/read" && params?.threadId === "review-child") {
+        return { thread: {
+          id: "review-child",
+          parentThreadId: "root",
+          sessionId: "session",
+          turns: [{
+            id: "review-child-turn",
+            status: "completed",
+            items: [{ id: "review-child-message", type: "agentMessage", text: "No findings." }],
+          }],
+        } }
+      }
+      if (method === "thread/read") return { thread: {
+        id: "root",
+        sessionId: "session",
+        turns: [
+          { id: "initial-turn", status: "completed", items: [] },
+          ...(turnStarts > 1 ? [{
+            id: "continuation-turn",
+            status: continuationCompleted ? "completed" : "inProgress",
+            items: [{ type: "userMessage", clientId: params?.clientUserMessageId }],
+          }] : []),
+        ],
+      } }
+      return {}
+    },
+    stop: async () => 0,
+  } as unknown as CodexAppServer
+  supervisor = new Supervisor({
+    appServer: fake,
+    codexHome: join(workdir, "codex-home"), repoDir: workdir, workdir,
+    task: "pr_opened", runId: "run-continuation-admission", prompt: "review",
+    model: "gpt-5.6-sol", modelProvider: "cchp", totalTokenBudget: 100_000,
+    executionMode: "native_v2", reviewRequired: true,
+    finalizer: (context) => ({
+      valid: true,
+      run_id: context.runId,
+      idempotency_key: context.idempotencyKey,
+      provenance_sha256: context.preterminalProvenanceSha256,
+    }),
+    deadlines: { wholeRunMs: 5_000, heartbeatMs: 100, reconcileMs: 10, parentResumeMs: 1_000 },
+  })
+
+  expect(await supervisor.run()).toMatchObject({ state: "SUCCEEDED", rootTurnId: "continuation-turn" })
+  expect(turnStarts).toBe(2)
+  expect(readJsonl(join(workdir, "ctx", "codex", "review-admission.jsonl"))).toContainEqual(expect.objectContaining({
+    event: "review_terminal",
+    taskId: "continuation-review-task",
+    state: "completed",
+  }))
+})
+
+test("reconciles a completed continuation when its turn completion notification is missing", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "cchp-supervisor-review-continuation-reconciled-"))
+  let supervisor!: Supervisor
+  let turnStarts = 0
+  let continuationStarted = false
+  let continuationClientId: unknown
+  const fake = {
+    start: async () => ({ userAgent: "fake" }),
+    request: async (method: string, params?: Record<string, unknown>) => {
+      if (method === "thread/start") return { thread: { id: "root" } }
+      if (method === "turn/start") {
+        turnStarts++
+        if (turnStarts === 1) {
+          queueMicrotask(() => void supervisor.handleNotification({
+            method: "turn/completed",
+            params: { threadId: "root", turn: { id: "initial-turn", status: "completed" } },
+          }))
+          return { turn: { id: "initial-turn" } }
+        }
+        continuationStarted = true
+        continuationClientId = params?.clientUserMessageId
+        return { turn: { id: "continuation-turn" } }
+      }
+      if (method === "thread/read") return { thread: { id: "root", turns: [
+        { id: "initial-turn", status: "completed", items: [] },
+        ...(continuationStarted ? [{
+          id: "continuation-turn",
+          status: "completed",
+          items: [{ type: "userMessage", clientId: continuationClientId }],
+        }] : []),
+      ] } }
+      return {}
+    },
+    stop: async () => 0,
+  } as unknown as CodexAppServer
+  supervisor = new Supervisor({
+    appServer: fake,
+    codexHome: join(workdir, "codex-home"), repoDir: workdir, workdir,
+    task: "pr_opened", runId: "run-continuation-reconciled", prompt: "review",
+    model: "gpt-5.6-sol", modelProvider: "cchp", totalTokenBudget: 1_000,
+    executionMode: "explicit_child", reviewRequired: true,
+    deadlines: { wholeRunMs: 5_000, heartbeatMs: 100, reconcileMs: 5, parentResumeMs: 1_000 },
+  })
+
+  expect(await supervisor.run()).toMatchObject({
+    state: "FAILED",
+    terminalReason: "review finalization requires at least one admitted child task",
+  })
+  expect(turnStarts).toBe(2)
+  expect(JSON.parse(readFileSync(join(workdir, "ctx", "codex", "run-manifest.json"), "utf8"))).toMatchObject({
+    state: "FAILED",
+    reviewContinuation: { phase: "completed", continuationTurnId: "continuation-turn" },
+  })
+  expect(readJsonl(join(workdir, "ctx", "codex", "supervisor.jsonl"))).toContainEqual(expect.objectContaining({
+    event: "review_continuation_completed",
+    source: "thread/read reconciliation",
+  }))
+})
+
+test("does not let a late continuation response overwrite a whole-run timeout", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "cchp-supervisor-review-continuation-timeout-"))
+  let supervisor!: Supervisor
+  let turnStarts = 0
+  const fake = {
+    start: async () => ({ userAgent: "fake" }),
+    request: async (method: string) => {
+      if (method === "thread/start") return { thread: { id: "root" } }
+      if (method === "turn/start") {
+        turnStarts++
+        if (turnStarts === 1) {
+          queueMicrotask(() => void supervisor.handleNotification({
+            method: "turn/completed",
+            params: { threadId: "root", turn: { id: "initial-turn", status: "completed" } },
+          }))
+          return { turn: { id: "initial-turn" } }
+        }
+        await Bun.sleep(80)
+        return { turn: { id: "continuation-turn" } }
+      }
+      if (method === "thread/read") return { thread: { id: "root", turns: [{ id: "initial-turn", status: "completed" }] } }
+      return {}
+    },
+    stop: async () => 0,
+  } as unknown as CodexAppServer
+  supervisor = new Supervisor({
+    appServer: fake,
+    codexHome: join(workdir, "codex-home"), repoDir: workdir, workdir,
+    task: "pr_opened", runId: "run-continuation-timeout", prompt: "review",
+    model: "gpt-5.6-sol", modelProvider: "cchp", totalTokenBudget: 1_000,
+    executionMode: "explicit_child", reviewRequired: true,
+    deadlines: {
+      wholeRunMs: 30,
+      interruptGraceMs: 5,
+      heartbeatMs: 100,
+      reconcileMs: 5,
+      parentResumeMs: 1_000,
+    },
+  })
+
+  expect(await supervisor.run()).toMatchObject({ state: "TIMED_OUT", terminalReason: "whole run deadline exceeded" })
+  await Bun.sleep(100)
+  expect(supervisor.currentState).toBe("TIMED_OUT")
+  expect(JSON.parse(readFileSync(join(workdir, "ctx", "codex", "run-manifest.json"), "utf8"))).toMatchObject({
+    state: "TIMED_OUT",
+    rootTurnId: "initial-turn",
+    reviewContinuation: { phase: "dispatching", initialTurnId: "initial-turn" },
+  })
+})
+
+test("does not run the zero-admission continuation after any real review admission", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "cchp-supervisor-existing-review-admission-"))
+  const ledger = new ReviewAdmissionLedger(join(workdir, "ctx", "codex", "review-admission.jsonl"), "run-existing-admission")
+  ledger.admit({
+    taskId: "existing-review-task",
+    role: "reviewer",
+    passKind: "correctness",
+    mode: "explicit_child",
+    prompt: 'CCHP_REVIEW_TASK_V1 {"task_id":"existing-review-task","pass_kind":"correctness"}\nInspect the diff.',
+  })
+  let supervisor!: Supervisor
+  let turnStarts = 0
+  const fake = {
+    start: async () => ({ userAgent: "fake" }),
+    request: async (method: string) => {
+      if (method === "thread/start") return { thread: { id: "root" } }
+      if (method === "turn/start") {
+        turnStarts++
+        queueMicrotask(() => void supervisor.handleNotification({
+          method: "turn/completed",
+          params: { threadId: "root", turn: { id: "initial-turn", status: "completed" } },
+        }))
+        return { turn: { id: "initial-turn" } }
+      }
+      if (method === "thread/read") return { thread: { id: "root", turns: [{ id: "initial-turn", status: "completed" }] } }
+      return {}
+    },
+    stop: async () => 0,
+  } as unknown as CodexAppServer
+  supervisor = new Supervisor({
+    appServer: fake,
+    codexHome: join(workdir, "codex-home"), repoDir: workdir, workdir,
+    task: "pr_opened", runId: "run-existing-admission", prompt: "review",
+    model: "gpt-5.6-sol", modelProvider: "cchp", totalTokenBudget: 1_000,
+    executionMode: "explicit_child", reviewRequired: true,
+    deadlines: { wholeRunMs: 5_000, heartbeatMs: 100, reconcileMs: 10, noProgressWarningMs: 1_000, noProgressTerminalMs: 4_000 },
+  })
+
+  expect(await supervisor.run()).toMatchObject({
+    state: "FAILED",
+    terminalReason: "review finalization blocked by child tasks: existing-review-task:admitted",
+  })
+  expect(turnStarts).toBe(1)
+  expect(JSON.parse(readFileSync(join(workdir, "ctx", "codex", "run-manifest.json"), "utf8")).reviewContinuation)
+    .toBeUndefined()
+})
+
+test("resumes a prepared zero-admission continuation and dispatches it exactly once", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "cchp-supervisor-review-continuation-prepared-"))
+  let supervisor!: Supervisor
+  let turnStarts = 0
+  const clientUserMessageId = reviewContinuationClientMessageId(
+    "run-continuation-prepared",
+    "root",
+    "initial-turn",
+  )
+  const fake = {
+    start: async () => ({ userAgent: "fake" }),
+    request: async (method: string, params?: Record<string, unknown>) => {
+      if (method === "thread/resume") return { thread: { id: "root" } }
+      if (method === "thread/read") return { thread: { id: "root", turns: [
+        { id: "initial-turn", status: "completed", items: [] },
+        ...(turnStarts ? [{
+          id: "continuation-turn",
+          status: "completed",
+          items: [{ type: "userMessage", clientId: clientUserMessageId }],
+        }] : []),
+      ] } }
+      if (method === "turn/start") {
+        turnStarts++
+        expect(params?.threadId).toBe("root")
+        expect(params?.clientUserMessageId).toBe(clientUserMessageId)
+        queueMicrotask(() => void supervisor.handleNotification({
+          method: "turn/completed",
+          params: { threadId: "root", turn: { id: "continuation-turn", status: "completed" } },
+        }))
+        return { turn: { id: "continuation-turn" } }
+      }
+      return {}
+    },
+    stop: async () => 0,
+  } as unknown as CodexAppServer
+  const startedAt = new Date(Date.now() - 1_000).toISOString()
+  supervisor = new Supervisor({
+    appServer: fake,
+    codexHome: join(workdir, "codex-home"), repoDir: workdir, workdir,
+    task: "pr_opened", runId: "run-continuation-prepared", prompt: "review",
+    model: "gpt-5.6-sol", modelProvider: "cchp", totalTokenBudget: 1_000,
+    executionMode: "explicit_child", reviewRequired: true,
+    resume: {
+      state: "ROOT_DRAINING",
+      executionMode: "explicit_child",
+      rootThreadId: "root",
+      rootTurnId: "initial-turn",
+      restartAttempts: 1,
+      startedAt,
+      wholeRunDeadlineAt: new Date(Date.now() + 5_000).toISOString(),
+      lastSemanticProgressAt: startedAt,
+      drainDeadlineAt: new Date(Date.now() + 2_000).toISOString(),
+      reviewContinuation: {
+        schemaVersion: 1,
+        clientUserMessageId,
+        phase: "prepared",
+        initialTurnId: "initial-turn",
+      },
+    },
+    deadlines: { wholeRunMs: 5_000, heartbeatMs: 100, reconcileMs: 10, parentResumeMs: 2_000 },
+  })
+
+  expect(await supervisor.run()).toMatchObject({
+    state: "FAILED",
+    terminalReason: "review finalization requires at least one admitted child task",
+  })
+  expect(turnStarts).toBe(1)
+})
+
+test("recovers an accepted dispatching continuation by client message id without replay", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "cchp-supervisor-review-continuation-dispatching-"))
+  const clientUserMessageId = reviewContinuationClientMessageId(
+    "run-continuation-dispatching",
+    "root",
+    "initial-turn",
+  )
+  let turnStarts = 0
+  const fake = {
+    start: async () => ({ userAgent: "fake" }),
+    request: async (method: string, params?: Record<string, unknown>) => {
+      if (method === "thread/resume") return { thread: { id: params?.threadId } }
+      if (method === "thread/read") return { thread: { id: "root", turns: [
+        { id: "initial-turn", status: "completed", items: [] },
+        {
+          id: "continuation-turn",
+          status: "inProgress",
+          items: [{ type: "userMessage", clientId: clientUserMessageId }],
+        },
+      ] } }
+      if (method === "turn/start") turnStarts++
+      return {}
+    },
+    stop: async () => 0,
+  } as unknown as CodexAppServer
+  const startedAt = new Date(Date.now() - 1_000).toISOString()
+  const supervisor = new Supervisor({
+    appServer: fake,
+    codexHome: join(workdir, "codex-home"), repoDir: workdir, workdir,
+    task: "pr_opened", runId: "run-continuation-dispatching", prompt: "review",
+    model: "gpt-5.6-sol", modelProvider: "cchp", totalTokenBudget: 1_000,
+    executionMode: "explicit_child", reviewRequired: true,
+    resume: {
+      state: "ROOT_DRAINING",
+      executionMode: "explicit_child",
+      rootThreadId: "root",
+      rootTurnId: "initial-turn",
+      restartAttempts: 1,
+      startedAt,
+      wholeRunDeadlineAt: new Date(Date.now() + 5_000).toISOString(),
+      lastSemanticProgressAt: startedAt,
+      drainDeadlineAt: new Date(Date.now() + 2_000).toISOString(),
+      reviewContinuation: {
+        schemaVersion: 1,
+        clientUserMessageId,
+        phase: "dispatching",
+        initialTurnId: "initial-turn",
+      },
+    },
+    deadlines: { wholeRunMs: 5_000, heartbeatMs: 100, reconcileMs: 10, parentResumeMs: 2_000 },
+  })
+  const running = supervisor.run()
+  await eventually(() => supervisor.currentState === "ROOT_RUNNING")
+  expect(turnStarts).toBe(0)
+  await supervisor.handleNotification({
+    method: "turn/completed",
+    params: { threadId: "root", turn: { id: "continuation-turn", status: "completed" } },
+  })
+  expect(await running).toMatchObject({
+    state: "FAILED",
+    terminalReason: "review finalization requires at least one admitted child task",
+  })
+  expect(turnStarts).toBe(0)
+})
+
+test("fails LOST instead of replaying an ambiguous dispatching continuation", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "cchp-supervisor-review-continuation-missing-"))
+  let turnStarts = 0
+  const fake = {
+    start: async () => ({ userAgent: "fake" }),
+    request: async (method: string, params?: Record<string, unknown>) => {
+      if (method === "thread/resume") return { thread: { id: params?.threadId } }
+      if (method === "thread/read") return { thread: { id: "root", turns: [{ id: "initial-turn", status: "completed", items: [] }] } }
+      if (method === "turn/start") turnStarts++
+      return {}
+    },
+    stop: async () => 0,
+  } as unknown as CodexAppServer
+  const startedAt = new Date(Date.now() - 1_000).toISOString()
+  const supervisor = new Supervisor({
+    appServer: fake,
+    codexHome: join(workdir, "codex-home"), repoDir: workdir, workdir,
+    task: "pr_opened", runId: "run-continuation-missing", prompt: "review",
+    model: "gpt-5.6-sol", modelProvider: "cchp", totalTokenBudget: 1_000,
+    executionMode: "explicit_child", reviewRequired: true,
+    resume: {
+      state: "ROOT_DRAINING",
+      executionMode: "explicit_child",
+      rootThreadId: "root",
+      rootTurnId: "initial-turn",
+      restartAttempts: 1,
+      startedAt,
+      wholeRunDeadlineAt: new Date(Date.now() + 5_000).toISOString(),
+      lastSemanticProgressAt: startedAt,
+      drainDeadlineAt: new Date(Date.now() + 2_000).toISOString(),
+      reviewContinuation: {
+        schemaVersion: 1,
+        clientUserMessageId: reviewContinuationClientMessageId(
+          "run-continuation-missing",
+          "root",
+          "initial-turn",
+        ),
+        phase: "dispatching",
+        initialTurnId: "initial-turn",
+      },
+    },
+    deadlines: { wholeRunMs: 5_000, heartbeatMs: 100, reconcileMs: 10, parentResumeMs: 2_000 },
+  })
+
+  expect(await supervisor.run()).toMatchObject({
+    state: "LOST",
+    terminalReason: expect.stringContaining("refusing ambiguous replay"),
+  })
+  expect(turnStarts).toBe(0)
+})
+
+test("rejects native collaboration events before graph mutation in explicit child mode", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "cchp-supervisor-explicit-native-crossing-"))
+  let supervisor!: Supervisor
+  const empty: ExplicitChildSnapshot = { active: [], terminal: [], stale: [] }
+  const fake = {
+    start: async () => ({ userAgent: "fake" }),
+    request: async (method: string) => {
+      if (method === "thread/start") return { thread: { id: "root" } }
+      if (method === "turn/start") return { turn: { id: "turn" } }
+      return {}
+    },
+    stop: async () => 0,
+  } as unknown as CodexAppServer
+  supervisor = new Supervisor({
+    appServer: fake, codexHome: join(workdir, "codex-home"), repoDir: workdir, workdir,
+    task: "manual", runId: "run-explicit-native-crossing", prompt: "status", model: "gpt-5.6-sol", modelProvider: "cchp",
+    totalTokenBudget: 1_000, executionMode: "explicit_child",
+    explicitChildren: { reconcile: () => empty, interruptActive: async () => undefined },
+    deadlines: { wholeRunMs: 5_000, heartbeatMs: 1_000, reconcileMs: 1_000 },
+  })
+  const running = supervisor.run()
+  await Bun.sleep(10)
+  await supervisor.handleNotification({ method: "item/completed", params: {
+    threadId: "root",
+    item: {
+      id: "spawn-native",
+      type: "collabAgentToolCall",
+      tool: "spawn_agent",
+      senderThreadId: "root",
+      receiverThreadIds: ["native-child"],
+      agentsStates: { "native-child": { status: "running" } },
+    },
+  } })
+  expect(await running).toMatchObject({
+    state: "FAILED",
+    terminalReason: "native collaboration event is forbidden in explicit child mode",
+  })
+  const graphPath = join(workdir, "ctx", "codex", "graph.jsonl")
+  expect(existsSync(graphPath) ? readJsonl(graphPath) : []).toEqual([])
+})
+
+test("settles LOST and preserves cleanup failure when an explicit child cannot be stopped", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "cchp-supervisor-explicit-cleanup-failure-"))
+  let supervisor!: Supervisor
+  const empty: ExplicitChildSnapshot = { active: [], terminal: [], stale: [] }
+  const fake = {
+    start: async () => ({ userAgent: "fake" }),
+    request: async (method: string) => {
+      if (method === "thread/start") return { thread: { id: "root" } }
+      if (method === "turn/start") {
+        queueMicrotask(() => void supervisor.handleNotification({
+          method: "turn/completed",
+          params: { threadId: "root", turn: { id: "turn", status: "failed" } },
+        }))
+        return { turn: { id: "turn" } }
+      }
+      return {}
+    },
+    stop: async () => 0,
+  } as unknown as CodexAppServer
+  supervisor = new Supervisor({
+    appServer: fake, codexHome: join(workdir, "codex-home"), repoDir: workdir, workdir,
+    task: "manual", runId: "run-explicit-cleanup-failure", prompt: "status", model: "gpt-5.6-sol", modelProvider: "cchp",
+    totalTokenBudget: 1_000, executionMode: "explicit_child",
+    explicitChildren: {
+      reconcile: () => empty,
+      interruptActive: async () => { throw new Error("process group ownership drift") },
+    },
+    deadlines: { wholeRunMs: 5_000, heartbeatMs: 1_000, reconcileMs: 1_000 },
+  })
+  expect(await supervisor.run()).toMatchObject({
+    state: "LOST",
+    exitCode: 1,
+    terminalReason: expect.stringContaining("terminal cleanup failed: process group ownership drift"),
+  })
+  expect(readJsonl(join(workdir, "ctx", "codex", "supervisor.jsonl"))).toEqual(expect.arrayContaining([
+    expect.objectContaining({ event: "explicit_child_interrupt_error" }),
+    expect.objectContaining({ event: "terminal_cleanup_failed" }),
+  ]))
+})
+
 test("imports root plan updates and publishes heartbeat progress without child interference", async () => {
   const workdir = mkdtempSync(join(tmpdir(), "cchp-supervisor-progress-"))
   const published: string[] = []
@@ -952,6 +1806,82 @@ test("drains active explicit children before finalizing the completed root", asy
     expect.objectContaining({ event: "edge_closed", childId: "child-1", terminalState: "completed" }),
     expect.objectContaining({ event: "parent_resume_delivered", childId: "child-1" }),
   ]))
+})
+
+test("maps explicit Codex session usage to the logical child graph edge", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "cchp-supervisor-explicit-session-"))
+  let supervisor!: Supervisor
+  let phase: "pending" | "terminal" = "pending"
+  const lifecycle: ExplicitChildLifecycle = {
+    reconcile: () => phase === "pending"
+      ? { active: [], terminal: [], stale: [] }
+      : {
+          active: [],
+          terminal: [{
+            childId: "task-name", sessionId: "thread-uuid", parentId: "root", spawnItemId: "spawn-1",
+            generation: 1, state: "completed", updatedAt: new Date().toISOString(),
+          } as never],
+          stale: [],
+        },
+    interruptActive: async () => undefined,
+  }
+  const fake = {
+    start: async () => ({ userAgent: "fake" }),
+    request: async (method: string) => {
+      if (method === "thread/start") return { thread: { id: "root" } }
+      if (method === "turn/start") return { turn: { id: "turn" } }
+      return {}
+    },
+    stop: async () => 0,
+  } as unknown as CodexAppServer
+  supervisor = new Supervisor({
+    appServer: fake, codexHome: join(workdir, "codex-home"), repoDir: workdir, workdir,
+    task: "manual", runId: "run-explicit-session", prompt: "status", model: "gpt-5.6-sol", modelProvider: "cchp",
+    totalTokenBudget: 1_000, executionMode: "explicit_child", explicitChildren: lifecycle,
+    deadlines: { wholeRunMs: 2_000, heartbeatMs: 100, reconcileMs: 10, parentResumeMs: 500 },
+  })
+  const usage = {
+    responseId: "response-1", threadId: "thread-uuid", turnId: "child-turn", providerId: "provider", model: "model",
+    inputTokens: 60, cachedInputTokens: 0, cacheWriteInputTokens: 0, outputTokens: 40, reasoningOutputTokens: 0, totalTokens: 100,
+  }
+  expect(await supervisor.recordProviderUsage(usage)).toMatchObject({ acceptedRaw: false, consumed: 0 })
+  const run = supervisor.run()
+  await Bun.sleep(10)
+  phase = "terminal"
+  await supervisor.handleNotification({ method: "turn/completed", params: { threadId: "root", turn: { id: "turn", status: "completed" } } })
+  expect(await run).toMatchObject({ state: "SUCCEEDED" })
+  expect(supervisor.currentUsage).toMatchObject({ consumed: 100, blockingAnomalies: 0 })
+})
+
+test("treats an explicit interrupted child as closed work, matching native semantics", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "cchp-supervisor-explicit-interrupted-"))
+  const lifecycle: ExplicitChildLifecycle = {
+    reconcile: () => ({
+      active: [],
+      terminal: [{ childId: "child-1", parentId: "root", spawnItemId: "spawn-1", generation: 1, state: "interrupted" } as never],
+      stale: [],
+    }),
+    interruptActive: async () => undefined,
+  }
+  const fake = {
+    start: async () => ({ userAgent: "fake" }),
+    request: async (method: string) => {
+      if (method === "thread/start") return { thread: { id: "root" } }
+      if (method === "turn/start") return { turn: { id: "turn" } }
+      return {}
+    },
+    stop: async () => 0,
+  } as unknown as CodexAppServer
+  const supervisor = new Supervisor({
+    appServer: fake, codexHome: join(workdir, "codex-home"), repoDir: workdir, workdir,
+    task: "manual", runId: "run-explicit-interrupted", prompt: "status", model: "gpt-5.6-sol", modelProvider: "cchp",
+    totalTokenBudget: 1_000, executionMode: "explicit_child", explicitChildren: lifecycle,
+    deadlines: { wholeRunMs: 2_000, heartbeatMs: 100, reconcileMs: 10, parentResumeMs: 500 },
+  })
+  const run = supervisor.run()
+  await Bun.sleep(10)
+  await supervisor.handleNotification({ method: "turn/completed", params: { threadId: "root", turn: { id: "turn", status: "completed" } } })
+  expect(await run).toMatchObject({ state: "SUCCEEDED" })
 })
 
 test("fails and interrupts when explicit child artifacts are terminal failures or outlive drain", async () => {
@@ -1133,6 +2063,88 @@ test("restarts the app-server and resumes the existing root thread after one cra
   expect(await run).toMatchObject({ state: "SUCCEEDED", rootThreadId: "root", rootTurnId: "turn" })
 })
 
+test("does not resume explicit graph ids as native Codex threads", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "cchp-supervisor-explicit-resume-filter-"))
+  const codexDir = join(workdir, "ctx", "codex")
+  mkdirSync(codexDir, { recursive: true })
+  const graph = new ChildGraph(join(codexDir, "graph.jsonl"))
+  graph.open("root", "explicit-task", "explicit:explicit-task", "explicit_child")
+  const resumed: string[] = []
+  const fake = {
+    start: async () => ({ userAgent: "fake" }),
+    request: async (method: string, params?: Record<string, unknown>) => {
+      if (method === "thread/resume") {
+        resumed.push(String(params?.threadId))
+        return { thread: { id: params?.threadId } }
+      }
+      if (method === "thread/read") return { thread: { id: "root", turns: [{ id: "turn", status: "completed" }] } }
+      return {}
+    },
+    stop: async () => 0,
+  } as unknown as CodexAppServer
+  const explicitChildren: ExplicitChildLifecycle = {
+    reconcile: () => ({
+      active: [],
+      terminal: [{
+        childId: "explicit-task", parentId: "root", spawnItemId: "explicit:explicit-task",
+        generation: 1, sessionId: "explicit-session", state: "completed",
+      } as never],
+      stale: [],
+    }),
+    interruptActive: async () => undefined,
+  }
+  const supervisor = new Supervisor({
+    appServer: fake, codexHome: join(workdir, "codex-home"), repoDir: workdir, workdir,
+    task: "manual", runId: "run-explicit-filter", prompt: "wait", model: "gpt-5.6-sol", modelProvider: "cchp",
+    totalTokenBudget: 1_000, executionMode: "explicit_child", explicitChildren,
+    resume: { state: "ROOT_DRAINING", rootThreadId: "root", rootTurnId: "turn", restartAttempts: 0 },
+    deadlines: { wholeRunMs: 2_000, heartbeatMs: 100, reconcileMs: 10, parentResumeMs: 500 },
+  })
+  expect(await supervisor.run()).toMatchObject({ state: "SUCCEEDED" })
+  expect(resumed).toEqual(["root"])
+})
+
+test("restarts immediately when app-server exits during root child draining", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "cchp-supervisor-drain-exit-"))
+  let starts = 0
+  const resumed: string[] = []
+  const fake = {
+    start: async () => { starts++; return { userAgent: "fake" } },
+    request: async (method: string, params?: Record<string, unknown>) => {
+      if (method === "thread/start") return { thread: { id: "root" } }
+      if (method === "turn/start") return { turn: { id: "turn" } }
+      if (method === "thread/resume") {
+        resumed.push(String(params?.threadId))
+        return { thread: { id: params?.threadId } }
+      }
+      if (method === "thread/read" && params?.threadId === "child") {
+        return { thread: { id: "child", parentThreadId: "root", turns: [{ id: "child-turn", status: starts >= 2 ? "completed" : "inProgress" }] } }
+      }
+      if (method === "thread/read") return { thread: { id: "root", turns: [{ id: "turn", status: "completed" }] } }
+      return {}
+    },
+    stop: async () => 0,
+  } as unknown as CodexAppServer
+  const supervisor = new Supervisor({
+    appServer: fake, codexHome: join(workdir, "codex-home"), repoDir: workdir, workdir,
+    task: "manual", runId: "run-drain-exit", prompt: "wait", model: "gpt-5.6-sol", modelProvider: "cchp",
+    totalTokenBudget: 1_000,
+    deadlines: { wholeRunMs: 2_000, heartbeatMs: 100, reconcileMs: 20, parentResumeMs: 500 },
+  })
+  const run = supervisor.run()
+  await Bun.sleep(10)
+  await supervisor.handleNotification({ method: "item/completed", params: {
+    threadId: "root",
+    item: { id: "spawn", type: "collabAgentToolCall", tool: "spawn_agent", senderThreadId: "root", receiverThreadIds: ["child"], agentsStates: { child: { status: "running" } } },
+  } })
+  await supervisor.handleNotification({ method: "turn/completed", params: { threadId: "root", turn: { id: "turn", status: "completed" } } })
+  expect(supervisor.currentState).toBe("ROOT_DRAINING")
+  await supervisor.handleAppServerExit({ expected: false, reason: "process_exit", exitCode: 23, signalCode: null })
+  expect(await run).toMatchObject({ state: "SUCCEEDED" })
+  expect(starts).toBe(2)
+  expect(resumed).toEqual(expect.arrayContaining(["root", "child"]))
+})
+
 test("settles LOST without restarting when the app-server restart budget is exhausted", async () => {
   const workdir = mkdtempSync(join(tmpdir(), "cchp-supervisor-exit-budget-"))
   const requests: string[] = []
@@ -1203,6 +2215,7 @@ test("resumes one durable run without duplicating graph, usage, TODO, or provena
     model: "gpt-5.6-sol",
     modelProvider: "cchp",
     totalTokenBudget: 1000,
+    executionMode: "native_v2",
     deadlines: { wholeRunMs: 10_000, heartbeatMs: 100, reconcileMs: 5_000, noProgressWarningMs: 2_000, noProgressTerminalMs: 8_000 },
   } as const
   const first = new Supervisor({
@@ -1230,6 +2243,8 @@ test("resumes one durable run without duplicating graph, usage, TODO, or provena
   } as const
   const usage = {
     responseId: "resp-1",
+    threadId: "root",
+    turnId: "turn",
     providerId: "gpt-cchp",
     model: "gpt-5.6-sol",
     inputTokens: 70,
@@ -1258,6 +2273,7 @@ test("resumes one durable run without duplicating graph, usage, TODO, or provena
     { BOT_RUN_ID: "run-process-resume" },
     workdir,
     "manual",
+    "native_v2",
     () => "must-not-be-used",
   )
   expect(recovery).toMatchObject({
@@ -1432,7 +2448,7 @@ test("attributes native raw response usage to the owning root and child turns wi
   expect(readJsonl(join(workdir, "ctx", "codex", "usage.jsonl")).filter((row) => row.kind === "raw_completion_usage")).toHaveLength(2)
 })
 
-test("fails closed instead of double billing distinct terminal responses for one Codex turn", async () => {
+test("bills distinct provider responses in one Codex tool-loop turn exactly once", async () => {
   const workdir = mkdtempSync(join(tmpdir(), "cchp-supervisor-native-tool-loop-"))
   const fake = { stop: async () => 0 } as unknown as CodexAppServer
   const options = {
@@ -1459,11 +2475,13 @@ test("fails closed instead of double billing distinct terminal responses for one
   expect(await supervisor.recordProviderUsage({ ...usage, responseId: "response-1" }))
     .toMatchObject({ acceptedRaw: true, consumed: 15, blockingAnomalies: 0 })
   expect(await supervisor.recordProviderUsage({ ...usage, responseId: "response-2" }))
-    .toMatchObject({ acceptedRaw: false, consumed: 15, blockingAnomalies: 1 })
-  expect(readJsonl(join(workdir, "ctx", "codex", "usage.jsonl")).filter((row) => row.kind === "raw_completion_usage")).toHaveLength(1)
+    .toMatchObject({ acceptedRaw: true, consumed: 30, blockingAnomalies: 0 })
+  expect(await supervisor.recordProviderUsage({ ...usage, responseId: "response-2" }))
+    .toMatchObject({ acceptedRaw: false, consumed: 30, blockingAnomalies: 0 })
+  expect(readJsonl(join(workdir, "ctx", "codex", "usage.jsonl")).filter((row) => row.kind === "raw_completion_usage")).toHaveLength(2)
 
   const restored = new Supervisor(options)
-  expect(restored.currentUsage).toMatchObject({ consumed: 15, responses: 1, turns: 1, blockingAnomalies: 1 })
+  expect(restored.currentUsage).toMatchObject({ consumed: 30, responses: 2, turns: 1, blockingAnomalies: 0 })
 })
 
 test("waits for the native child graph before billing early provider and raw observations", async () => {
@@ -1639,14 +2657,16 @@ test("binds a native review completion to a durable result artifact from thread/
   expect(supervisor.currentState).toBe("ROOT_RUNNING")
 })
 
-test("accepts non-spawn collaboration events that reference an existing child without mutating the graph", async () => {
+test("accepts non-spawn collaboration events and cancels a terminal child's provider stream", async () => {
   const workdir = mkdtempSync(join(tmpdir(), "cchp-supervisor-native-nonspawn-"))
   const appServer = { start: async () => ({ userAgent: "fake" }), request: async () => ({}), stop: async () => 0 } as unknown as CodexAppServer
+  const cancelledThreads: string[] = []
   const supervisor = new Supervisor({
     appServer,
     codexHome: join(workdir, "codex-home"), repoDir: workdir, workdir,
     task: "manual", runId: "run-native-nonspawn", prompt: "status",
     model: "gpt-5.6-sol", modelProvider: "cchp", totalTokenBudget: 10_000,
+    cancelProviderThread: async (threadId) => { cancelledThreads.push(threadId) },
     resume: { state: "ROOT_RUNNING", rootThreadId: "root", rootTurnId: "root-turn", restartAttempts: 0 },
   })
   await supervisor.handleNotification({ method: "item/completed", params: { threadId: "root", item: {
@@ -1658,6 +2678,12 @@ test("accepts non-spawn collaboration events that reference an existing child wi
     receiverThreadIds: ["child-1"], agentsStates: { "child-1": { status: "completed" } },
   } } })
   expect(supervisor.currentState).toBe("ROOT_RUNNING")
+  expect(cancelledThreads).toEqual(["child-1"])
+  expect(readJsonl(join(workdir, "ctx", "codex", "graph.jsonl")).at(-1)).toMatchObject({
+    event: "edge_closed",
+    childId: "child-1",
+    terminalState: "completed",
+  })
   expect(JSON.parse(readFileSync(join(workdir, "ctx", "codex", "run-manifest.json"), "utf8"))).toMatchObject({ state: "ROOT_RUNNING" })
 })
 
@@ -2011,19 +3037,70 @@ test("releases a duplicate pending provider observation's extra reservation", as
   })
   const firstAdmission = await supervisor.authorizeProviderRequest({ providerId: "provider", model: "model", contextWindow: 10 })
   const secondAdmission = await supervisor.authorizeProviderRequest({ providerId: "provider", model: "model", contextWindow: 10 })
-  expect(firstAdmission.reservationId).toBeDefined()
-  expect(secondAdmission.reservationId).toBeDefined()
+  expect(firstAdmission.reservation).toBeDefined()
+  expect(secondAdmission.reservation).toBeDefined()
   const observed = {
     providerId: "provider", model: "model", responseId: "pending-response",
     inputTokens: 8, cachedInputTokens: 0, cacheWriteInputTokens: 0,
     outputTokens: 3, reasoningOutputTokens: 0, totalTokens: 11,
   }
-  await supervisor.recordProviderUsage({ ...observed, reservationId: firstAdmission.reservationId })
-  await supervisor.recordProviderUsage({ ...observed, reservationId: secondAdmission.reservationId })
+  await supervisor.recordProviderUsage({ ...observed, reservation: firstAdmission.reservation })
+  await supervisor.recordProviderUsage({ ...observed, reservation: secondAdmission.reservation })
 
   const rows = readJsonl(join(workdir, "ctx", "codex", "usage.jsonl"))
-  expect(rows.filter((row) => row.kind === "reservation_released" && row.reservationId === secondAdmission.reservationId)).toHaveLength(1)
-  expect(rows.filter((row) => row.kind === "reservation_released" && row.reservationId === firstAdmission.reservationId)).toHaveLength(0)
+  expect(rows.filter((row) => row.kind === "reservation_released" && row.reservationId === secondAdmission.reservation?.reservationId)).toHaveLength(1)
+  expect(rows.filter((row) => row.kind === "reservation_released" && row.reservationId === firstAdmission.reservation?.reservationId)).toHaveLength(0)
+})
+
+test("fences delayed provider callbacks from a prior writer generation", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "cchp-supervisor-reservation-generation-"))
+  const fake = { stop: async () => 0 } as unknown as CodexAppServer
+  const base = {
+    appServer: fake,
+    codexHome: join(workdir, "codex-home"), repoDir: workdir, workdir,
+    task: "manual", runId: "run-reservation-generation", prompt: "status",
+    model: "gpt-5.6-sol", modelProvider: "cchp", totalTokenBudget: 1_000,
+    executionMode: "native_v2" as const,
+    resume: { state: "ROOT_RUNNING" as const, rootThreadId: "root", rootTurnId: "turn", restartAttempts: 0 },
+  }
+  const first = new Supervisor({
+    ...base,
+    writerFence: { writerId: "writer", generation: 1 },
+  })
+  const staleAdmission = await first.authorizeProviderRequest({
+    providerId: "provider", model: "model", threadId: "root", turnId: "turn-stale", contextWindow: 10,
+  })
+  expect(staleAdmission.reservation).toBeDefined()
+
+  const resumed = new Supervisor({
+    ...base,
+    writerFence: { writerId: "writer", generation: 2 },
+  })
+  expect(resumed.currentUsage).toMatchObject({ consumed: 10 })
+  const currentAdmission = await resumed.authorizeProviderRequest({
+    providerId: "provider", model: "model", threadId: "root", turnId: "turn-current", contextWindow: 20,
+  })
+  expect(currentAdmission.reservation).toBeDefined()
+
+  await resumed.releaseProviderReservation(staleAdmission.reservation!, "delayed_generation_one_release")
+  await resumed.recordProviderUsage({
+    providerId: "provider", model: "model", responseId: "generation-one-response",
+    threadId: "root", turnId: "turn-stale", reservation: staleAdmission.reservation,
+    inputTokens: 4, cachedInputTokens: 0, cacheWriteInputTokens: 0,
+    outputTokens: 2, reasoningOutputTokens: 0, totalTokens: 6,
+  })
+  expect(resumed.currentUsage).toMatchObject({ consumed: 6 })
+
+  const nextAdmission = await resumed.authorizeProviderRequest({
+    providerId: "provider", model: "model", threadId: "root", turnId: "turn-current", contextWindow: 5,
+  })
+  expect(nextAdmission).toMatchObject({ allowed: true })
+  expect(nextAdmission.reservation).toBeDefined()
+  const rows = readJsonl(join(workdir, "ctx", "codex", "usage.jsonl"))
+  expect(rows.filter((row) => row.kind === "reservation_recovered" && row.reservationId === staleAdmission.reservation?.reservationId)).toHaveLength(1)
+  expect(rows.filter((row) => row.kind === "reservation_released" && row.reservationId === currentAdmission.reservation?.reservationId)).toHaveLength(0)
+  expect(rows.filter((row) => row.kind === "reservation_released" && row.reservationId === nextAdmission.reservation?.reservationId)).toHaveLength(0)
+  expect(rows.filter((row) => row.kind === "raw_completion_usage" && row.responseId === "generation-one-response")).toHaveLength(1)
 })
 
 test("fails closed when raw and provider terminal usage disagree in either arrival order", async () => {
@@ -2153,6 +3230,41 @@ test("denies the next provider request before a projected token-budget overshoot
   expect(readJsonl(join(workdir, "ctx", "codex", "supervisor.jsonl")).some((row) =>
     row.event === "provider_request_admission" && row.allowed === false && row.reason === "projected_budget",
   )).toBe(true)
+})
+
+test("backpressures projected admission while another provider request still owns a reservation", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "cchp-supervisor-admission-backpressure-"))
+  let stops = 0
+  const fake = { stop: async () => { stops++; return 0 } } as unknown as CodexAppServer
+  const supervisor = new Supervisor({
+    appServer: fake,
+    codexHome: join(workdir, "codex-home"), repoDir: workdir, workdir,
+    task: "ci_fix", runId: "run-admission-backpressure", prompt: "fix",
+    model: "gpt-5.6-sol", modelProvider: "cchp", totalTokenBudget: 1_000,
+    tokenAdmissionFraction: 0.85,
+    executionMode: "native_v2",
+    resume: { state: "ROOT_RUNNING", rootThreadId: "root", rootTurnId: "turn", restartAttempts: 0 },
+  })
+  const first = await supervisor.authorizeProviderRequest({
+    providerId: "provider", model: "model", threadId: "root", turnId: "turn", contextWindow: 600,
+  })
+  expect(first.reservation).toBeDefined()
+
+  let settled = false
+  const queued = supervisor.authorizeProviderRequest({
+    providerId: "provider", model: "model", threadId: "root", turnId: "turn", contextWindow: 300,
+  }).finally(() => { settled = true })
+  await Bun.sleep(10)
+  expect(settled).toBeFalse()
+  expect(supervisor.currentState).toBe("ROOT_RUNNING")
+
+  await supervisor.releaseProviderReservation(first.reservation!, "first_request_completed")
+  expect(await queued).toMatchObject({ allowed: true, reservation: expect.any(Object) })
+  expect(supervisor.currentState).toBe("ROOT_RUNNING")
+  expect(stops).toBe(0)
+  expect(readJsonl(join(workdir, "ctx", "codex", "supervisor.jsonl")).some((row) =>
+    row.event === "provider_request_backpressured" && row.reservedTokens === 600,
+  )).toBeTrue()
 })
 
 test("whole-run timeout stops app-server even when turn interrupt never settles", async () => {

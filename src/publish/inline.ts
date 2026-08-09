@@ -22,6 +22,7 @@
 // trusted patch file off disk. This module takes the trusted patch as input and
 // performs the Octokit publication + dedup.
 import { splitRepo } from "../context"
+import { trustedBotLogin } from "./sticky"
 import type { GitHubClient } from "../github/client"
 import { findByMarker, fingerprint, hidden, MARKER } from "../types"
 
@@ -35,6 +36,7 @@ export const FINGERPRINT_RE = /^[0-9a-f]{64}$/
 const FINGERPRINT_MARKER_RE = /<!-- cchp-review-fingerprint:([0-9a-f]{64}) -->/g
 const ACTION_ID_RE = /^[a-z0-9][a-z0-9._-]{0,63}$/
 const STICKY_KEY_RE = /^[a-z0-9][a-z0-9:._-]{0,63}$/
+const PUBLICATION_MARKER_RE = /^[A-Za-z0-9][A-Za-z0-9:._-]{0,255}$/
 const COLLAPSE_THRESHOLD = 1200
 
 // ── branding ─────────────────────────────────────────────────────────────────
@@ -349,10 +351,17 @@ export interface RejectedFinding {
   reason: string
 }
 
+export interface PublishedReviewBatch {
+  reviewId: number
+  commitId: string
+  state: string
+  commentIds: number[]
+}
+
 /** Result of a batch publication. `rejected` lists items that failed anchor/
  *  shape validation and were NOT posted (present only when non-empty). */
 export type BatchOutcome =
-  | { status: "posted"; url: string; posted: number; skipped: number; rejected?: RejectedFinding[] }
+  | { status: "posted"; url: string; posted: number; skipped: number; publication: PublishedReviewBatch; rejected?: RejectedFinding[] }
   | { status: "already-posted"; total: number; rejected?: RejectedFinding[] }
   | { status: "rejected"; rejected: RejectedFinding[] }
 
@@ -362,7 +371,11 @@ export interface PostBatchOpts {
   patch: string | PatchIndex
   comments: InlineComment[]
   summary?: string
+  /** Trusted server-generated recovery marker, appended after sanitizing the caller summary. */
+  publicationMarker?: string
   history?: HistoryEntry[]
+  canonicalOwnerLogin?: string
+  beforeMutation?: () => void | Promise<void>
 }
 
 /** Publish many confirmed findings as ONE Pull Request Review (`event: COMMENT`,
@@ -397,7 +410,16 @@ export async function postReviewBatch(octokit: GitHubClient, repo: string, opts:
       continue
     }
     const fp = normalizeFingerprint(c.fingerprint)
-    if (seen.has(fp) || localSeen.has(fp)) {
+    const body = `${stripFingerprintMarkers(c.body).trim()}\n\n${hidden(MARKER.fingerprint(fp))}`
+    const exactCanonical = opts.canonicalOwnerLogin
+      ? history.some((entry) =>
+          entry.kind === "inline" && entry.user === opts.canonicalOwnerLogin &&
+          entry.commit_id === headSha && entry.fingerprints.includes(fp) &&
+          entry.body === body && entry.path === c.path && entry.line === c.line &&
+          (entry.side ?? "RIGHT") === side && entry.start_line === c.start_line &&
+          entry.start_side === c.start_side)
+      : seen.has(fp)
+    if (exactCanonical || localSeen.has(fp)) {
       skipped++
       continue
     }
@@ -406,7 +428,7 @@ export async function postReviewBatch(octokit: GitHubClient, repo: string, opts:
       path: c.path,
       line: c.line,
       side,
-      body: `${stripFingerprintMarkers(c.body).trim()}\n\n${hidden(MARKER.fingerprint(fp))}`,
+      body,
     }
     if (c.start_line != null) {
       entry.start_line = c.start_line
@@ -421,6 +443,13 @@ export async function postReviewBatch(octokit: GitHubClient, repo: string, opts:
   }
   const { owner, name } = splitRepo(repo)
   const summary = sanitizeText(opts.summary ?? "")
+  if (opts.publicationMarker && !PUBLICATION_MARKER_RE.test(opts.publicationMarker)) {
+    throw new Error("publication marker contains unsupported characters")
+  }
+  const reviewBody = [summary, opts.publicationMarker ? hidden(opts.publicationMarker) : ""]
+    .filter(Boolean)
+    .join("\n\n")
+  await opts.beforeMutation?.()
   const { data } = await octokit.rest.pulls.createReview({
     owner,
     repo: name,
@@ -428,9 +457,44 @@ export async function postReviewBatch(octokit: GitHubClient, repo: string, opts:
     commit_id: headSha,
     event: "COMMENT",
     comments: payload,
-    ...(summary ? { body: summary } : {}),
+    ...(reviewBody ? { body: reviewBody } : {}),
   })
-  return { status: "posted", url: data.html_url, posted: payload.length, skipped, ...rej }
+  if (!Number.isSafeInteger(data.id) || data.id <= 0) {
+    throw new Error("GitHub createReview response is missing a valid review identity")
+  }
+  if (data.commit_id !== headSha || typeof data.state !== "string" || !data.state) {
+    throw new Error("GitHub createReview response binding is invalid")
+  }
+  const createdComments = await octokit.paginate(octokit.rest.pulls.listCommentsForReview, {
+    owner,
+    repo: name,
+    pull_number: prNumber,
+    review_id: data.id,
+    per_page: 100,
+  })
+  const commentIds = createdComments.map((comment) => {
+    if (
+      !Number.isSafeInteger(comment.id) || comment.id <= 0 ||
+      comment.pull_request_review_id !== data.id || comment.commit_id !== headSha
+    ) throw new Error("GitHub review-comment response binding is invalid")
+    return comment.id
+  })
+  if (commentIds.length !== payload.length || new Set(commentIds).size !== commentIds.length) {
+    throw new Error("GitHub review-comment identity set is incomplete or duplicated")
+  }
+  return {
+    status: "posted",
+    url: data.html_url,
+    posted: payload.length,
+    skipped,
+    publication: {
+      reviewId: data.id,
+      commitId: data.commit_id,
+      state: data.state,
+      commentIds,
+    },
+    ...rej,
+  }
 }
 
 // ── structured conversation comments (pr-agent-style server-side templates) ──
@@ -515,12 +579,14 @@ export async function postStructuredComment(
   repo: string,
   issueNumber: number,
   input: PostStructuredInput,
+  ownerLogin: string | undefined = trustedBotLogin(),
 ): Promise<StructuredOutcome> {
   const { owner, name } = splitRepo(repo)
   const body = renderStructured(input)
   let markerKey = ""
   if (input.sticky_key != null) {
     if (!STICKY_KEY_RE.test(input.sticky_key)) throw new Error("invalid sticky_key")
+    if (!ownerLogin) throw new Error("trusted bot login is required for sticky publication")
     markerKey = MARKER.sticky(input.sticky_key)
     const comments = await octokit.paginate(octokit.rest.issues.listComments, {
       owner,
@@ -531,7 +597,7 @@ export async function postStructuredComment(
     // Same sticky probe as `sticky.ts` (types.ts `findByMarker`, the canonical
     // "sticky upsert probe"); the source MCP server used a full-marker `.includes`,
     // identical for well-formed keys.
-    const existing = findByMarker(comments, markerKey)
+    const existing = findByMarker(comments.filter((comment) => comment.user?.login === ownerLogin), markerKey)
     if (existing) {
       const { data } = await octokit.rest.issues.updateComment({
         owner,
@@ -560,9 +626,19 @@ export async function updateStructuredComment(
   repo: string,
   commentId: number,
   input: StructuredInput,
+  ownerLogin: string | undefined = trustedBotLogin(),
 ): Promise<StructuredOutcome> {
   if (!Number.isInteger(commentId) || commentId < 1) throw new Error("comment_id must be a positive integer")
+  if (!ownerLogin) throw new Error("trusted bot login is required for structured comment updates")
   const { owner, name } = splitRepo(repo)
+  const { data: existing } = await octokit.rest.issues.getComment({
+    owner,
+    repo: name,
+    comment_id: commentId,
+  })
+  if (existing.user?.login !== ownerLogin) {
+    throw new Error(`refusing to update comment ${commentId} because it is not owned by the trusted bot`)
+  }
   const body = renderStructured(input)
   const { data } = await octokit.rest.issues.updateComment({
     owner,

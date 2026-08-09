@@ -12,7 +12,7 @@
 import { splitRepo } from "../context"
 import type { GitHubClient } from "../github/client"
 import { BRAND_FOOTER_PREFIX, LOGO_HEADING } from "./inline"
-import { findByMarker, hidden, MARKER } from "../types"
+import { hidden, MARKER } from "../types"
 
 /** One task-list entry mirrored from the agent's `todowrite` (structural shape;
  *  the real objects carry more fields we ignore). */
@@ -118,12 +118,22 @@ export interface StickyResult {
  *  creates a new one. `markerKey` is the bare key (e.g. `MARKER.progress(task)`
  *  or `MARKER.sticky("cifix")`); `hidden()` wraps it into `<!-- key -->` so the
  *  next Run finds it. Single-`\n` separator, matching the progress plugin. */
+export function trustedBotLogin(env: Record<string, string | undefined> = process.env): string | undefined {
+  const explicit = env.BOT_GIT_NAME || env.BOT_LOGIN
+  if (explicit) return explicit
+  return env.BOT_SLUG ? `${env.BOT_SLUG}[bot]` : undefined
+}
+
+type StickyComment = { id: number; body?: string | null; user?: { login?: string | null } | null; html_url?: string }
+
 export function upsertSticky(
   octokit: GitHubClient,
   repo: string,
   issueNumber: number,
   markerKey: string,
   body: string,
+  signal?: AbortSignal,
+  ownerLogin?: string,
 ): Promise<StickyResult>
 export function upsertSticky(
   octokit: GitHubClient,
@@ -132,6 +142,8 @@ export function upsertSticky(
   markerKey: string,
   body: string,
   beforeMutation: () => Promise<boolean>,
+  signal?: AbortSignal,
+  ownerLogin?: string,
 ): Promise<StickyResult | undefined>
 export async function upsertSticky(
   octokit: GitHubClient,
@@ -139,8 +151,16 @@ export async function upsertSticky(
   issueNumber: number,
   markerKey: string,
   body: string,
-  beforeMutation?: () => Promise<boolean>,
+  beforeMutationOrSignal?: (() => Promise<boolean>) | AbortSignal,
+  signalOrOwner?: AbortSignal | string,
+  ownerLogin?: string,
 ): Promise<StickyResult | undefined> {
+  const beforeMutation = typeof beforeMutationOrSignal === "function" ? beforeMutationOrSignal : undefined
+  const requestSignal = typeof beforeMutationOrSignal === "function"
+    ? (typeof signalOrOwner === "string" ? undefined : signalOrOwner)
+    : (typeof beforeMutationOrSignal === "undefined" ? (typeof signalOrOwner === "string" ? undefined : signalOrOwner) : beforeMutationOrSignal)
+  const effectiveOwnerLogin = typeof signalOrOwner === "string" ? signalOrOwner : ownerLogin ?? trustedBotLogin()
+  if (!effectiveOwnerLogin) throw new Error("trusted bot login is required for sticky publication")
   const { owner, name } = splitRepo(repo)
   const full = `${body}\n${hidden(markerKey)}`
   const comments = await octokit.paginate(octokit.rest.issues.listComments, {
@@ -148,23 +168,44 @@ export async function upsertSticky(
     repo: name,
     issue_number: issueNumber,
     per_page: 100,
-  })
-  const existing = findByMarker(comments, markerKey)
+    ...(requestSignal ? { request: { signal: requestSignal } } : {}),
+  }) as unknown as StickyComment[]
+  const marker = hidden(markerKey)
+  const owned = comments.filter((comment) =>
+    (comment.body ?? "").includes(marker) && comment.user?.login === effectiveOwnerLogin)
+  const primary = owned[0]
+  const duplicates = owned.slice(1)
   if (beforeMutation && !await beforeMutation()) return undefined
-  if (existing) {
+  let result: StickyResult
+  if (primary) {
     const { data } = await octokit.rest.issues.updateComment({
       owner,
       repo: name,
-      comment_id: existing.id,
+      comment_id: primary.id,
       body: full,
+      ...(requestSignal ? { request: { signal: requestSignal } } : {}),
     })
-    return { action: "updated", id: data.id, htmlUrl: data.html_url }
+    result = { action: "updated", id: data.id, htmlUrl: data.html_url }
+  } else {
+    const { data } = await octokit.rest.issues.createComment({
+      owner,
+      repo: name,
+      issue_number: issueNumber,
+      body: full,
+      ...(requestSignal ? { request: { signal: requestSignal } } : {}),
+    })
+    result = { action: "created", id: data.id, htmlUrl: data.html_url }
   }
-  const { data } = await octokit.rest.issues.createComment({
-    owner,
-    repo: name,
-    issue_number: issueNumber,
-    body: full,
-  })
-  return { action: "created", id: data.id, htmlUrl: data.html_url }
+  for (const duplicate of duplicates) {
+    if (beforeMutation && !await beforeMutation()) {
+      throw new Error("sticky publication target changed during duplicate cleanup")
+    }
+    await octokit.rest.issues.deleteComment({
+      owner,
+      repo: name,
+      comment_id: duplicate.id,
+      ...(requestSignal ? { request: { signal: requestSignal } } : {}),
+    })
+  }
+  return result
 }

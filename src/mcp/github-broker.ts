@@ -107,6 +107,7 @@ const ISSUE_READ = new Set([
   "rest.issues.get",
   "rest.issues.listComments",
 ])
+const COMMENT_READ = new Set(["rest.issues.getComment"])
 const SEARCH_READ = new Set(["rest.search.issuesAndPullRequests"])
 const ACTOR_READ = new Set([
   "rest.repos.getCollaboratorPermissionLevel",
@@ -156,7 +157,7 @@ const RELEASE_REST = new Set([
 ])
 
 const TASK_REST: Record<Task, ReadonlySet<string>> = {
-  engage: union(PR_READ, ISSUE_READ, SEARCH_READ, ACTOR_READ, COMMENT_MUTATIONS, MODERATION_MUTATIONS, PULL_REQUEST_MUTATIONS, ROADMAP_REST),
+  engage: union(PR_READ, ISSUE_READ, COMMENT_READ, SEARCH_READ, ACTOR_READ, COMMENT_MUTATIONS, MODERATION_MUTATIONS, PULL_REQUEST_MUTATIONS, ROADMAP_REST),
   pr_opened: union(PR_OPENED_READ, PR_OPENED_MUTATIONS, PR_OPENED_TRIAGE, SEARCH_READ, ISSUE_READ, ACTOR_READ, new Set([
     "rest.issues.deleteComment", "rest.pulls.deleteReviewComment", "rest.reactions.listForIssueComment",
   ])),
@@ -164,11 +165,11 @@ const TASK_REST: Record<Task, ReadonlySet<string>> = {
     "rest.issues.listComments",
     "rest.issues.getLabel", "rest.issues.createLabel", "rest.issues.addLabels",
   ]), MERGE_MUTATIONS),
-  ci_fix: union(PR_READ, ISSUE_READ, SEARCH_READ, ACTOR_READ, WORKFLOW_READ, COMMENT_MUTATIONS, CHECK_MUTATIONS, WORKFLOW_MUTATIONS, PULL_REQUEST_MUTATIONS),
+  ci_fix: union(PR_READ, ISSUE_READ, COMMENT_READ, SEARCH_READ, ACTOR_READ, WORKFLOW_READ, COMMENT_MUTATIONS, CHECK_MUTATIONS, WORKFLOW_MUTATIONS, PULL_REQUEST_MUTATIONS),
   release_notes: union(ISSUE_READ, SEARCH_READ, new Set(["rest.issues.update"]), RELEASE_REST, ROADMAP_REST),
   roadmap_item: union(PR_READ, ISSUE_READ, SEARCH_READ, new Set(["rest.issues.update"]), ROADMAP_REST),
   roadmap_sync: union(PR_READ, ISSUE_READ, SEARCH_READ, new Set(["rest.issues.update"]), ROADMAP_REST),
-  reaction_execute: union(ISSUE_READ, SEARCH_READ, ACTOR_READ, new Set(["rest.issues.updateComment"]), PULL_REQUEST_MUTATIONS),
+  reaction_execute: union(ISSUE_READ, COMMENT_READ, SEARCH_READ, ACTOR_READ, new Set(["rest.issues.updateComment"]), PULL_REQUEST_MUTATIONS),
   manual: new Set(),
   dispatch: new Set(),
 }
@@ -378,7 +379,7 @@ function authorizeRest(
     }
   }
 
-  if (operation === "rest.issues.updateComment") {
+  if (operation === "rest.issues.getComment" || operation === "rest.issues.updateComment") {
     const commentId = positiveInteger(args.comment_id)
     if (!commentId || !state.commentIds.has(commentId)) throw new Error("broker comment id was not trusted or discovered")
   }
@@ -938,7 +939,7 @@ function rememberResult(options: GitHubBrokerOptions, state: BrokerAuthorization
       rememberReturnedGraphqlId(state.roadmapFieldIds, result, "updateProjectV2Field", "projectV2Field")
     }
   }
-  if (["rest.issues.listComments", "rest.issues.createComment", "rest.issues.updateComment"].includes(operation)) {
+  if (["rest.issues.listComments", "rest.issues.getComment", "rest.issues.createComment", "rest.issues.updateComment"].includes(operation)) {
     rememberComment(state.commentIds, state.commentNodeIds, result)
   }
   if (operation === "rest.pulls.listReviewComments") rememberComment(state.reviewCommentIds, state.commentNodeIds, result)

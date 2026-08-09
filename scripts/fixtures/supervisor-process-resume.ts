@@ -26,6 +26,7 @@ const options = {
   model: "gpt-5.6-sol",
   modelProvider: "cchp",
   totalTokenBudget: 1_000,
+  executionMode: "native_v2",
   deadlines: {
     wholeRunMs: 10_000,
     heartbeatMs: 1_000,
@@ -60,6 +61,8 @@ const plan = {
 
 const usage = {
   responseId: "resp-1",
+  threadId: rootThreadId,
+  turnId: rootTurnId,
   providerId: "gpt-cchp",
   model: "gpt-5.6-sol",
   inputTokens: 70,
@@ -112,7 +115,7 @@ if (phase === "seed") {
   process.exit(0)
 }
 
-const recovery = resolveRuntimeRecovery({ BOT_RUN_ID: runId }, workdir, "manual", () => "must-not-be-used")
+const recovery = resolveRuntimeRecovery({ BOT_RUN_ID: runId }, workdir, "manual", "native_v2", () => "must-not-be-used")
 if (!recovery.resume) throw new Error("expected a nonterminal durable run")
 const requests: Array<{ method: string; params?: Record<string, unknown> }> = []
 const fake = {

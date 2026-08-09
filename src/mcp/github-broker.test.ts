@@ -67,6 +67,7 @@ function fakeClient(options: FakeClientOptions = {}) {
           return { data: { number: args.issue_number, node_id: `ISSUE_${args.issue_number}`, pull_request: undefined } }
         },
         listComments: async (args: Record<string, unknown>) => { calls.push({ operation: "issues.listComments", args }); return [{ id: 91, node_id: "IC_91" }] },
+        getComment: async (args: Record<string, unknown>) => { calls.push({ operation: "issues.getComment", args }); return { data: { id: args.comment_id, node_id: `IC_${args.comment_id}`, user: { login: "cchp-bot[bot]" } } } },
         createComment: async (args: Record<string, unknown>) => { calls.push({ operation: "issues.createComment", args }); return { data: { id: 2 } } },
         updateComment: async (args: Record<string, unknown>) => { calls.push({ operation: "issues.updateComment", args }); return { data: { id: args.comment_id } } },
         listMilestones: async (args: Record<string, unknown>) => {
@@ -429,9 +430,12 @@ test("targeted operations fail closed when the broker has no trusted target bind
 
 test("comment updates require a trusted or previously discovered comment id", async () => {
   await withBroker(async (client) => {
+    await expect(client.rest.issues.getComment({ owner: "CCH-HQ", repo: "fixture", comment_id: 999 })).rejects.toThrow("comment")
     await expect(client.rest.issues.updateComment({ owner: "CCH-HQ", repo: "fixture", comment_id: 999, body: "x" })).rejects.toThrow("comment")
     await client.rest.issues.listComments({ owner: "CCH-HQ", repo: "fixture", issue_number: 9 })
+    await expect(client.rest.issues.getComment({ owner: "CCH-HQ", repo: "fixture", comment_id: 91 })).resolves.toMatchObject({ data: { id: 91 } })
     await expect(client.rest.issues.updateComment({ owner: "CCH-HQ", repo: "fixture", comment_id: 91, body: "x" })).resolves.toMatchObject({ data: { id: 91 } })
+    await expect(client.rest.issues.getComment({ owner: "CCH-HQ", repo: "fixture", comment_id: 77 })).resolves.toMatchObject({ data: { id: 77 } })
     await expect(client.rest.issues.updateComment({ owner: "CCH-HQ", repo: "fixture", comment_id: 77, body: "x" })).resolves.toMatchObject({ data: { id: 77 } })
   }, { task: "engage", target: 9, targetKind: "issue", trustedCommentId: 77 })
 })
@@ -656,7 +660,7 @@ test("requires a complete finalizer attestation before publication", async () =>
   })
 })
 
-test("marker replacement after authorization fails closed before publication", async () => {
+test("marker replacement while snapshotting fails closed before publication", async () => {
   let replaced = false
   await withBroker(async (client, marker) => {
     writeFileSync(marker, JSON.stringify(finalizedMarker()))
@@ -665,7 +669,7 @@ test("marker replacement after authorization fails closed before publication", a
       repo: "fixture",
       issue_number: 42,
       body: "review",
-    })).rejects.toThrow("finalization marker changed")
+    })).rejects.toThrow("finalization marker")
     expect(replaced).toBe(true)
     expect(JSON.parse(readFileSync(marker, "utf8"))).toEqual({ valid: false })
   }, {

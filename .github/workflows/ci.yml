@@ -55,6 +55,7 @@ jobs:
           bash external-scan.test.sh
           bash prepare-codex-env.test.sh
           bash run-codex.test.sh
+          bash cleanup.test.sh
           bash install-codex.test.sh
           bash codex-capability-smoke-wrapper.test.sh
           bash verify-capability-gate.test.sh
@@ -65,12 +66,14 @@ jobs:
 
   codex-contract:
     name: Codex 0.146.0 native + explicit contract
-    # The production direct sandbox needs the ARC runner's mount/network
-    # namespace capabilities. Never execute fork-owned code on that runner.
+    # Keep the protocol/capability contract on a hosted runner so an unavailable
+    # ARC pool cannot leave the required CI check queued for a day. The actual
+    # reusable workflow remains pinned to the protected self-hosted runner in
+    # `.github/workflows/run.yml`; this job validates the portable engine seam.
     if: >-
       github.event_name != 'pull_request' ||
       github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: [self-hosted, linux, x64, cch-hq-dind]
+    runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - name: Checkout
@@ -118,7 +121,14 @@ jobs:
             if (artifact.schema_version !== 2 || artifact.run_id !== process.env.CCHP_ARTIFACT_RUN_ID || artifact.status !== "passed" || artifact.collaborationMode !== mode) throw new Error(`invalid capability artifact ${name}`)
             const workspace = artifact.workspace_write
             const network = workspace?.external_network
-            if (!workspace || workspace.status !== "passed" || workspace.thread_completed !== true || workspace.apply_patch !== "passed" || workspace.ordinary_repo_write !== "passed" || workspace.app_server_long_lived_secrets_absent !== "passed" || workspace.shell_capabilities_excluded !== "passed" || workspace.shell_snapshot_directory_absent !== "passed" || !network || network.result !== "policy-blocked" || !["proxy-structured-denial", "os-connect-denied"].includes(network.reason) || network.probe_target !== "https://example.com" || network.configured_enforcement !== "direct" || workspace.git_metadata_protected !== "passed" || workspace.agents_metadata_protected !== "passed" || workspace.configured_enforcement !== "direct") throw new Error(`invalid workspace-write capability artifact ${name}`)
+            const observations = network?.observations
+            const pairedNetworkValid = network?.reason !== "host-reachable-sandbox-refused" || (
+              observations?.host_before?.result === "reachable" && observations.host_before.reason === "http-response" && observations.host_before.target === "https://example.com" &&
+              observations?.host_after?.result === "reachable" && observations.host_after.reason === "http-response" && observations.host_after.target === "https://example.com" &&
+              observations?.sandbox?.result === "indeterminate" && observations.sandbox.reason === "unclassified-error" && observations.sandbox.target === "https://example.com" &&
+              typeof observations.sandbox.detail === "string" && /\bConnectionRefused\b/.test(observations.sandbox.detail)
+            )
+            if (!workspace || workspace.status !== "passed" || workspace.thread_completed !== true || workspace.apply_patch !== "passed" || workspace.ordinary_repo_write !== "passed" || workspace.app_server_long_lived_secrets_absent !== "passed" || workspace.shell_capabilities_excluded !== "passed" || workspace.shell_snapshot_directory_absent !== "passed" || !network || network.result !== "policy-blocked" || !["proxy-structured-denial", "os-connect-denied", "host-reachable-sandbox-refused"].includes(network.reason) || !pairedNetworkValid || network.probe_target !== "https://example.com" || network.configured_enforcement !== "direct" || workspace.git_metadata_protected !== "passed" || workspace.agents_metadata_protected !== "passed" || workspace.configured_enforcement !== "direct") throw new Error(`invalid workspace-write capability artifact ${name}`)
           }
           NODE
 
@@ -188,11 +198,11 @@ jobs:
           const directory = process.env.CCHP_ACCEPTANCE_ARTIFACT_DIR
           const matrix = fs.statSync(`${directory}/matrix.txt`)
           if (!matrix.isFile() || matrix.size === 0) throw new Error("missing pre-cutover acceptance matrix")
-          for (const name of ["tests.txt", "typecheck.txt", "prepare-codex-env.txt", "run-codex.txt"]) {
+          for (const name of ["tests.txt", "typecheck.txt", "prepare-codex-env.txt", "run-codex.txt", "cleanup.txt"]) {
             const stat = fs.statSync(`${directory}/${name}`)
             if (!stat.isFile() || stat.size === 0) throw new Error(`missing pre-cutover evidence ${name}`)
           }
-          if (!summary.phases || JSON.stringify(summary.phases) !== JSON.stringify({ tests: "passed", typecheck: "passed", prepare_codex_env: "passed", run_codex: "passed" })) throw new Error("pre-cutover phases are incomplete")
+          if (!summary.phases || JSON.stringify(summary.phases) !== JSON.stringify({ tests: "passed", typecheck: "passed", prepare_codex_env: "passed", run_codex: "passed", cleanup: "passed" })) throw new Error("pre-cutover phases are incomplete")
           NODE
 
       - name: Upload pre-cutover evidence
@@ -213,12 +223,8 @@ jobs:
         with:
           persist-credentials: false
 
-      # `run.yml` uses the called workflow identity from the job context rather
-      # than the caller-associated github context.
       - name: Lint workflows
         uses: raven-actions/actionlint@3d39aea434753780c3b3d4a1a31c854b4dbf49d7 # v2.2.0
-        with:
-          flags: -ignore property.*workflow_(repository|sha).*not.*defined
 
   zizmor:
     name: zizmor

@@ -118,6 +118,22 @@ test("rejects forbidden credential bytes from an otherwise allowed upload", asyn
   await expect(created.uploadFile(value.file)).rejects.toThrow("credential material")
 })
 
+test("rejects a run-scoped SEE binary whose content no longer matches provenance", async () => {
+  const value = fixture()
+  const seeBin = join(value.root, "work", "ctx", "tools", "see")
+  mkdirSync(dirname(seeBin), { recursive: true })
+  writeFileSync(seeBin, "tampered", { mode: 0o700 })
+  const created = createSeeServer({
+    repoDir: value.repoDir,
+    botWorkdir: join(value.root, "work"),
+    apiKey: "memory-only-key",
+    seeBin,
+    seeSha256: "ab".repeat(32),
+    run: async () => { throw new Error("must not run an unverified SEE binary") },
+  })
+  await expect(created.uploadFile(value.file)).rejects.toThrow("provenance verification failed")
+})
+
 test("uploads an immutable private snapshot when the original pathname is replaced", async () => {
   const value = fixture()
   let snapshot = ""

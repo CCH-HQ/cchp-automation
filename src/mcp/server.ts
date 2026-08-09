@@ -70,7 +70,7 @@ import {
 } from "../publish/meta"
 import { mergePr } from "../publish/merge"
 import { autoApproveDisabled, type ReviewComment, submitReview } from "../publish/review"
-import { upsertSticky } from "../publish/sticky"
+import { trustedBotLogin, upsertSticky } from "../publish/sticky"
 import { makeBrokerGitHubClient } from "./github-broker"
 import {
   DISCUSSION_ADD_COMMENT,
@@ -682,7 +682,15 @@ export function buildTools(deps: ServerDeps): ToolEntry[] {
       handler: async (a) => {
         const key = reqStr(a, "sticky_key")
         if (!STICKY_KEY_RE.test(key)) throw new Error("invalid sticky_key")
-        const res = await upsertSticky(octokit, repo, reqInt(a, "issue_number"), MARKER.sticky(key), reqStr(a, "body"))
+        const res = await upsertSticky(
+          octokit,
+          repo,
+          reqInt(a, "issue_number"),
+          MARKER.sticky(key),
+          reqStr(a, "body"),
+          undefined,
+          trustedBotLogin(env),
+        )
         return JSON.stringify(res)
       },
     },
@@ -717,7 +725,7 @@ export function buildTools(deps: ServerDeps): ToolEntry[] {
             ? { title: "Code Review Result", summary: finalized.report }
             : structuredInput(a)),
           sticky_key: prOpened ? "review-summary" : optStr(a, "sticky_key"),
-        })
+        }, trustedBotLogin(env))
         return JSON.stringify(res)
       },
     },
@@ -727,7 +735,13 @@ export function buildTools(deps: ServerDeps): ToolEntry[] {
       inputSchema: schema({ comment_id: intProp("Existing comment id to overwrite"), ...STRUCTURED_PROPS }, ["comment_id", "summary"]),
       handler: async (a) => {
         finalizedReview()
-        const res = await updateStructuredComment(octokit, repo, reqInt(a, "comment_id"), structuredInput(a))
+        const res = await updateStructuredComment(
+          octokit,
+          repo,
+          reqInt(a, "comment_id"),
+          structuredInput(a),
+          trustedBotLogin(env),
+        )
         return JSON.stringify(res)
       },
     },
@@ -825,7 +839,7 @@ export function buildTools(deps: ServerDeps): ToolEntry[] {
         const id = await createCheckRun(octokit, repo, {
           name: CHECK_RUN_NAME,
           headSha: reqEnv(env, "BOT_HEAD_SHA"),
-          externalId: reqEnv(env, "BOT_RUN_ID"),
+          externalId: env.CCHP_WORKFLOW_RUN_ID ?? reqEnv(env, "BOT_RUN_ID"),
         })
         currentCheckRunId = id
         return JSON.stringify({ check_run_id: id })

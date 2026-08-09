@@ -6,7 +6,33 @@ log() { printf '\033[1;34m[run-codex]\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m[run-codex][warn]\033[0m %s\n' "$*" >&2; }
 
 : "${BOT_WORKDIR:?}" "${ENGINE_DIR:?}" "${REPO_DIR:?}" "${BOT_PROMPT_FILE:?}"
+source "${ENGINE_DIR}/scripts/process-group.sh"
 mkdir -p "${BOT_WORKDIR}/ctx/review" "${BOT_WORKDIR}/ctx/codex"
+if [[ -z "${CCHP_PROCESS_RECORD_HMAC_KEY:-}" ]]; then
+  if [[ "${GITHUB_ACTIONS:-}" == "true" ]]; then
+    warn "CCHP_PROCESS_RECORD_HMAC_KEY is required in GitHub Actions"
+    exit 2
+  fi
+  process_record_key_file="${BOT_WORKDIR}/ctx/codex/process-record-hmac.key"
+  if [[ ! -e "$process_record_key_file" ]]; then
+    umask 077
+    process_record_key="$(openssl rand -hex 32)"
+    (set -o noclobber; printf '%s\n' "$process_record_key" > "$process_record_key_file") || {
+      warn "failed to create the local process-record HMAC key"
+      exit 2
+    }
+  fi
+  [[ -f "$process_record_key_file" && ! -L "$process_record_key_file" ]] || {
+    warn "local process-record HMAC key is not a regular file"
+    exit 2
+  }
+  read -r CCHP_PROCESS_RECORD_HMAC_KEY < "$process_record_key_file"
+fi
+[[ "$CCHP_PROCESS_RECORD_HMAC_KEY" =~ ^[a-f0-9]{64}$ ]] || {
+  warn "CCHP_PROCESS_RECORD_HMAC_KEY must be 32-byte lowercase hex"
+  exit 2
+}
+export CCHP_PROCESS_RECORD_HMAC_KEY
 run_manifest="${BOT_WORKDIR}/ctx/codex/run-manifest.json"
 terminal_manifest="${BOT_WORKDIR}/ctx/codex/terminal.json"
 if [[ -z "${BOT_RUN_ID:-}" && -f "$run_manifest" ]]; then
@@ -21,7 +47,7 @@ export BOT_PATCH_FILE="${BOT_PATCH_FILE:-${BOT_WORKDIR}/ctx/pr-diff.patch}"
 export BOT_TRUSTED_REVIEW_MANIFEST="${BOT_TRUSTED_REVIEW_MANIFEST:-${BOT_WORKDIR}/ctx/review-manifest.json}"
 export BOT_REVIEW_ARTIFACT_DIR="${BOT_REVIEW_ARTIFACT_DIR:-${BOT_WORKDIR}/ctx/review}"
 export BOT_REVIEW_FINALIZED_MARKER="${BOT_REVIEW_FINALIZED_MARKER:-${BOT_WORKDIR}/ctx/review-finalized.json}"
-export CCHP_CODEX_PID_FILE="${BOT_WORKDIR}/.codex-app-server.pid"
+export CCHP_CODEX_PID_FILE="${CCHP_CODEX_PID_FILE:-${BOT_WORKDIR}/.codex-app-server.pid}"
 
 app_client_id="${CCHP_APP_CLIENT_ID:-}"
 app_private_key="${CCHP_APP_PRIVATE_KEY:-}"
@@ -33,7 +59,16 @@ unset CCHP_APP_CLIENT_ID CCHP_APP_PRIVATE_KEY GH_TOKEN CCHP_GH_TOKEN_FILE HEROUI
 
 export BOT_HAVE_FFF="$(command -v fff-mcp >/dev/null 2>&1 && echo 1 || echo 0)"
 export BOT_HAVE_SERENA="$(command -v serena >/dev/null 2>&1 && echo 1 || echo 0)"
-export BOT_HAVE_SEE="$([[ -x "${HOME}/.local/lib/see-cli/see" && -n "$see_api_key" ]] && echo 1 || echo 0)"
+export SEE_CLI_BIN="${SEE_CLI_BIN:-${BOT_WORKDIR}/ctx/tools/see/see}"
+see_provenance="${BOT_WORKDIR}/ctx/tools/see/provenance.json"
+SEE_CLI_SHA256=""
+if [[ -f "$SEE_CLI_BIN" && ! -L "$SEE_CLI_BIN" && -f "$see_provenance" && ! -L "$see_provenance" ]]; then
+  SEE_CLI_SHA256="$(jq -er 'select(.schemaVersion == 1) | .binarySha256 | select(test("^[a-f0-9]{64}$"))' "$see_provenance" 2>/dev/null || true)"
+  actual_see_sha="$(sha256sum "$SEE_CLI_BIN" | awk '{print $1}')"
+  [[ -n "$SEE_CLI_SHA256" && "$SEE_CLI_SHA256" == "$actual_see_sha" ]] || SEE_CLI_SHA256=""
+fi
+export SEE_CLI_SHA256
+export BOT_HAVE_SEE="$([[ -n "$SEE_CLI_SHA256" && -x "$SEE_CLI_BIN" && -n "$see_api_key" ]] && echo 1 || echo 0)"
 export BOT_SYSTEM_PROMPT="${BOT_SYSTEM_PROMPT:-${ENGINE_DIR}/codex/system-prompt.md}"
 
 is_resumable_manifest() {
@@ -47,34 +82,17 @@ is_resumable_manifest() {
 }
 
 stop_stale_codex() {
-  local pid_file="${CCHP_CODEX_PID_FILE}" pid pgid cmdline expected_start expected_boot stat_suffix
+  local pid_file="${CCHP_CODEX_PID_FILE}"
   [[ -f "$pid_file" ]] || return 0
-  pid="$(jq -er '.pid | numbers' "$pid_file" 2>/dev/null || true)"
-  pgid="$(jq -er '.pgid | numbers' "$pid_file" 2>/dev/null || true)"
-  expected_start="$(jq -er '.startTicks | strings' "$pid_file" 2>/dev/null || true)"
-  expected_boot="$(jq -er '.bootId | strings' "$pid_file" 2>/dev/null || true)"
-  [[ "$pid" =~ ^[1-9][0-9]*$ ]] || { warn "ignoring invalid Codex PID file"; return 0; }
-  [[ "$pgid" =~ ^[1-9][0-9]*$ && -n "$expected_start" && -n "$expected_boot" ]] || { warn "ignoring legacy or incomplete Codex process record"; return 0; }
-  [[ -r "/proc/${pid}/cmdline" ]] || return 0
-  stat_suffix="$(<"/proc/${pid}/stat")"
-  stat_suffix="${stat_suffix##*) }"
-  read -r -a stat_fields <<< "$stat_suffix"
-  [[ "${stat_fields[19]:-}" == "$expected_start" && "$(<"/proc/sys/kernel/random/boot_id")" == "$expected_boot" ]] || {
-    warn "refusing to stop PID ${pid}: process identity does not match the Codex record"
-    return 0
+  if ! cchp_load_process_record "$pid_file"; then
+    warn "refusing resume because the Codex process record is invalid or not owned by this workflow run"
+    return 2
+  fi
+  warn "stopping stale Codex app-server process group ${CCHP_PROCESS_PGID} before resume"
+  cchp_stop_process_group 20 20 20 0.1 || {
+    warn "stale Codex process group did not reach a verified terminal state"
+    return 2
   }
-  cmdline="$(tr '\0' ' ' < "/proc/${pid}/cmdline")"
-  [[ "$cmdline" == *"app-server"* ]] || { warn "refusing to stop stale PID ${pid}: not a Codex app-server"; return 0; }
-  warn "stopping stale Codex app-server process group ${pgid} before resume"
-  kill -INT -- "-${pgid}" 2>/dev/null || kill -INT "$pid" 2>/dev/null || true
-  for _ in $(seq 1 20); do kill -0 "$pid" 2>/dev/null || break; sleep 0.1; done
-  if kill -0 "$pid" 2>/dev/null; then
-    kill -TERM -- "-${pgid}" 2>/dev/null || kill -TERM "$pid" 2>/dev/null || true
-    for _ in $(seq 1 20); do kill -0 "$pid" 2>/dev/null || break; sleep 0.1; done
-  fi
-  if kill -0 "$pid" 2>/dev/null; then
-    kill -KILL -- "-${pgid}" 2>/dev/null || kill -KILL "$pid" 2>/dev/null || true
-  fi
 }
 
 max_restarts="${CCHP_RUNTIME_RESTARTS:-1}"

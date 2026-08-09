@@ -8,8 +8,11 @@ import { ExplicitChildAdapter, type ChildHandle } from "./child-adapter"
 import { isReviewPassKind, REVIEW_PASS_KINDS, ReviewAdmissionLedger } from "./review-admission"
 import { assembleReferenceContext } from "./references"
 import { buildCodexEnvironment } from "./supervisor"
+import { validateRecordHmacKey } from "./authenticated-record"
 import { READ_ONLY_FFF_TOOLS, READ_ONLY_SERENA_TOOLS } from "./config"
 import { TASKS, type Task } from "../types"
+import { redactRuntimeDiagnostic } from "./diagnostic-redaction"
+import { withCollaborationAdmission } from "./collaboration-admission"
 
 type Args = Record<string, unknown>
 
@@ -23,7 +26,18 @@ function schema(properties: Record<string, object>, required: string[]): Tool["i
   return { type: "object", properties, required }
 }
 
-function response(operation: string, agents: ChildHandle[], delivery?: string): string {
+export function serializeAgentsResponse(
+  operation: string,
+  agents: ChildHandle[],
+  delivery?: string,
+  secrets: readonly string[] = [],
+): string {
+  const redact = (value: string | undefined): string | undefined => value === undefined
+    ? undefined
+    : redactRuntimeDiagnostic(value, secrets)
+  const publicError = (value: string | undefined): string | undefined => value === undefined
+    ? undefined
+    : "explicit child failed; diagnostics retained in the protected child artifact"
   return JSON.stringify({
     schema_version: 1,
     operation,
@@ -37,9 +51,18 @@ function response(operation: string, agents: ChildHandle[], delivery?: string): 
       state: agent.state,
       session_id: agent.sessionId,
       deadline_at: agent.deadlineAt,
-      result_path: agent.resultPath,
-      output: agent.output,
-      error: agent.error,
+      output: redact(agent.output),
+      error: publicError(agent.error),
+      attempts: agent.attempts.map((attempt) => ({
+        attempt: attempt.attempt,
+        sessionId: attempt.sessionId,
+        state: attempt.state,
+        terminal: attempt.terminal,
+        startedAt: attempt.startedAt,
+        completedAt: attempt.completedAt,
+        ...(attempt.output !== undefined ? { output: redact(attempt.output) } : {}),
+        ...(attempt.error !== undefined ? { error: publicError(attempt.error) } : {}),
+      })),
     })),
     ...(delivery ? { delivery } : {}),
   })
@@ -118,12 +141,26 @@ export function createAgentsServer(env: Record<string, string | undefined> = pro
   const repoDir = env.REPO_DIR
   const rootHome = env.CODEX_HOME
   if (!workdir || !repoDir || !rootHome) throw new Error("BOT_WORKDIR, REPO_DIR, and CODEX_HOME are required")
+  const runId = env.BOT_RUN_ID
+  const writerId = env.CCHP_RUN_WRITER_ID
+  const generation = Number(env.CCHP_RUN_WRITER_GENERATION)
+  if (!runId || !writerId || !Number.isSafeInteger(generation) || generation < 1) {
+    throw new Error("explicit agents MCP requires a valid collaboration admission identity")
+  }
+  const recordHmacKey = validateRecordHmacKey(env.CCHP_PROCESS_RECORD_HMAC_KEY)
+  const admissionIdentity = { runId, writerId, generation }
+  const responseSecrets = Object.entries(env)
+    .filter(([name, value]) => Boolean(value) && (name === "CCHP_PROCESS_RECORD_HMAC_KEY" || /(?:token|secret|password|credential|private[-_]?key|api[-_]?key)/i.test(name)))
+    .map(([, value]) => value!)
+  const serialize = (operation: string, agents: ChildHandle[], delivery?: string): string =>
+    serializeAgentsResponse(operation, agents, delivery, responseSecrets)
   const childHome = childCodexHome(rootHome, workdir)
   const rootConfig = readFileSync(join(rootHome, "config.toml"), "utf8")
   const childEnv = buildCodexEnvironment(env)
   delete childEnv.CCHP_GITHUB_BROKER_SOCKET
   delete childEnv.CCHP_GITHUB_BROKER_TOKEN
   delete childEnv.CCHP_GITHUB_BROKER_FINALIZER
+  delete childEnv.CCHP_PROCESS_RECORD_HMAC_KEY
   childEnv.CODEX_HOME = childHome
   childEnv.REPO_DIR = repoDir
 
@@ -139,10 +176,14 @@ export function createAgentsServer(env: Record<string, string | undefined> = pro
       sandbox: "read-only",
       strictConfig: true,
       onStderr: async (line) => {
-        appendFileSync(join(workdir, "ctx", "child-results", "codex-exec.stderr.log"), `${line}\n`, {
+        appendFileSync(
+          join(workdir, "ctx", "child-results", "codex-exec.stderr.log"),
+          `${redactRuntimeDiagnostic(line, responseSecrets)}\n`,
+          {
           encoding: "utf8",
           mode: 0o600,
-        })
+          },
+        )
       },
     },
     childModels: {
@@ -155,6 +196,8 @@ export function createAgentsServer(env: Record<string, string | undefined> = pro
     timeoutMs: Number(env.CCHP_EXPLICIT_CHILD_TIMEOUT_MS ?? 1_800_000),
     maxActive: Number(env.CCHP_EXPLICIT_MAX_ACTIVE ?? 10),
     admissionLedger: reviewAdmissions,
+    redactDiagnostic: (value) => redactRuntimeDiagnostic(value, responseSecrets),
+    recordHmacKey,
   })
   const spawnProperties: Record<string, object> = {
     task_name: { type: "string" },
@@ -169,7 +212,6 @@ export function createAgentsServer(env: Record<string, string | undefined> = pro
     { name: "followup_task", description: "Resume a terminal explicit child on its existing Codex session.", inputSchema: schema({ target: { type: "string" }, message: { type: "string" } }, ["target", "message"]) },
     { name: "wait_agent", description: "Wait for one child or every current child to reach a terminal state.", inputSchema: schema({ target: { type: "string" }, timeout_ms: { type: "integer", minimum: 1, maximum: 1_800_000 } }, []) },
     { name: "interrupt_agent", description: "Interrupt one explicit child and its process group.", inputSchema: schema({ target: { type: "string" } }, ["target"]) },
-    { name: "close_agent", description: "Close one explicit child, interrupting it first when still active.", inputSchema: schema({ target: { type: "string" }, reason: { type: "string" } }, ["target"]) },
     { name: "list_agents", description: "List explicit child state.", inputSchema: schema({}, []) },
   ]
   const server = new Server({ name: "agents", version: "1.0.0" }, { capabilities: { tools: {} } })
@@ -194,62 +236,62 @@ export function createAgentsServer(env: Record<string, string | undefined> = pro
           }
           const passKind = isReviewPassKind(rawPassKind) ? rawPassKind : undefined
           const message = str(args, "message")
-          if (reviewAdmissions) {
-            if (!passKind) throw new Error("review delegation requires pass_kind")
-            reviewAdmissions.admit({ taskId: id, role, passKind, mode: "explicit_child", prompt: message })
-          }
           const references = reviewAdmissions ? assembleReferenceContext(role, message) : undefined
-          try {
-            const handle = await adapter.spawn(env.CCHP_EXPLICIT_PARENT_ID ?? "root", {
-            id,
-            role,
-            ...(passKind ? { passKind } : {}),
-            agent: typeof args.agent_type === "string" ? args.agent_type : undefined,
-            prompt: references ? `${message}\n\n${references.text}` : message,
-            admissionPrompt: message,
-          })
-            return { content: [{ type: "text", text: response("spawn_agent", [handle], "started") }] }
-          } catch (error) {
-            if (reviewAdmissions?.task(id) && reviewAdmissions.task(id)?.state === "admitted") {
-              reviewAdmissions.markTerminal(id, "failed", error instanceof Error ? error.message : String(error))
+          return await withCollaborationAdmission(workdir, admissionIdentity, async () => {
+            if (reviewAdmissions) {
+              if (!passKind) throw new Error("review delegation requires pass_kind")
+              reviewAdmissions.admit({ taskId: id, role, passKind, mode: "explicit_child", prompt: message })
             }
-            throw error
-          }
+            try {
+              const handle = await adapter.spawn(env.CCHP_EXPLICIT_PARENT_ID ?? "root", {
+                id,
+                role,
+                ...(passKind ? { passKind } : {}),
+                agent: typeof args.agent_type === "string" ? args.agent_type : undefined,
+                prompt: references ? `${message}\n\n${references.text}` : message,
+                admissionPrompt: message,
+              })
+              return { content: [{ type: "text", text: serialize("spawn_agent", [handle], "started") }] }
+            } catch (error) {
+              const message = redactRuntimeDiagnostic(error instanceof Error ? error.message : String(error), responseSecrets)
+              if (reviewAdmissions?.task(id) && reviewAdmissions.task(id)?.state === "admitted") {
+                reviewAdmissions.markTerminal(id, "failed", message)
+              }
+              throw new Error(message)
+            }
+          })
         }
         case "send_message": {
-          const handle = await adapter.sendMessage(str(args, "target"), str(args, "message"))
-          return { content: [{ type: "text", text: response("send_message", [handle], "queued") }] }
+          const handle = await withCollaborationAdmission(workdir, admissionIdentity, () =>
+            adapter.sendMessage(str(args, "target"), str(args, "message")))
+          return { content: [{ type: "text", text: serialize("send_message", [handle], "queued") }] }
         }
         case "followup_task": {
           if (reviewAdmissions) throw new Error("review followup requires a new unique task_name and spawn_agent admission")
-          const handle = await adapter.followupTask(str(args, "target"), str(args, "message"))
-          return { content: [{ type: "text", text: response("followup_task", [handle], "terminal") }] }
+          const handle = await withCollaborationAdmission(workdir, admissionIdentity, () =>
+            adapter.followupTask(str(args, "target"), str(args, "message")))
+          return { content: [{ type: "text", text: serialize("followup_task", [handle], "terminal") }] }
         }
         case "wait_agent": {
           const timeout = args.timeout_ms == null ? undefined : Number(args.timeout_ms)
           const handles = typeof args.target === "string"
             ? [await adapter.waitAgent(args.target, timeout)]
             : await Promise.all(adapter.listAgents().map((agent) => adapter.waitAgent(agent.childId, timeout)))
-          return { content: [{ type: "text", text: response("wait_agent", handles, "terminal") }] }
+          return { content: [{ type: "text", text: serialize("wait_agent", handles, "terminal") }] }
         }
         case "interrupt_agent": {
           const id = str(args, "target")
           await adapter.interruptAgent(id)
-          return { content: [{ type: "text", text: response("interrupt_agent", adapter.listAgents().filter((agent) => agent.childId === id), "interrupted") }] }
-        }
-        case "close_agent": {
-          const id = str(args, "target")
-          const reason = typeof args.reason === "string" && args.reason.trim() ? args.reason.trim() : "closed by parent"
-          await adapter.closeAgent(id, reason)
-          return { content: [{ type: "text", text: response("close_agent", adapter.listAgents().filter((agent) => agent.childId === id), "closed") }] }
+          return { content: [{ type: "text", text: serialize("interrupt_agent", adapter.listAgents().filter((agent) => agent.childId === id), "interrupted") }] }
         }
         case "list_agents":
-          return { content: [{ type: "text", text: response("list_agents", adapter.listAgents()) }] }
+          return { content: [{ type: "text", text: serialize("list_agents", adapter.listAgents()) }] }
         default:
           throw new Error(`unknown tool: ${request.params.name}`)
       }
     } catch (error) {
-      return { isError: true, content: [{ type: "text", text: `error: ${error instanceof Error ? error.message : String(error)}` }] }
+      const message = redactRuntimeDiagnostic(error instanceof Error ? error.message : String(error), responseSecrets)
+      return { isError: true, content: [{ type: "text", text: `error: ${message}` }] }
     }
   })
   return { server, adapter, tools: defs }

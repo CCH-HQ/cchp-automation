@@ -75,6 +75,22 @@ test("freezes the serialized reusable workflow boundary and direct caller mappin
   expect(workflow).not.toContain("CODEX_API_KEY:")
 })
 
+test("checks out the called workflow at GitHub's resolved engine commit", () => {
+  const workflow = readFileSync(resolve(import.meta.dir, "../../.github/workflows/run.yml"), "utf8")
+  const checkout = workflow.indexOf("- name: Checkout engine (pinned, trusted)")
+  const nextStep = workflow.indexOf("- name: Bot identity + isolated workdir", checkout)
+  expect(checkout).toBeGreaterThan(0)
+  expect(nextStep).toBeGreaterThan(checkout)
+  const block = workflow.slice(checkout, nextStep)
+  expect(block).toContain("repository: ${{ fromJSON(toJSON(job)).workflow_repository }}")
+  expect(block).toContain("ref: ${{ fromJSON(toJSON(job)).workflow_sha }}")
+  expect(block).not.toContain("repository: ${{ github.repository }}")
+  expect(block).not.toContain("ref: ${{ github.sha }}")
+
+  const ciWorkflow = readFileSync(resolve(import.meta.dir, "../../.github/workflows/ci.yml"), "utf8")
+  expect(ciWorkflow).not.toContain("workflow_(repository|sha)")
+})
+
 test("parses the production caller variables without changing provider or secret JSON", () => {
   const providerJson = JSON.stringify({
     "gpt-cchp": {
@@ -140,4 +156,27 @@ test("finalizes progress for every acted workflow before cleanup", () => {
   expect(block).toContain("CCHP_CAPABILITY_OUTCOME: ${{ steps.capability_gate.outcome }}")
   expect(block).toContain("CCHP_SUPERVISOR_OUTCOME: ${{ steps.codex_supervisor.outcome }}")
   expect(block).toContain("src/codex/finalize-workflow-progress.ts")
+})
+
+test("round-trips lifecycle evidence from the exact uploaded artifact id", () => {
+  const workflow = readFileSync(resolve(import.meta.dir, "../../.github/workflows/run.yml"), "utf8")
+  const stagedVerify = workflow.indexOf("- name: Verify Actions lifecycle evidence")
+  const upload = workflow.indexOf("- name: Upload Actions lifecycle evidence")
+  const download = workflow.indexOf("- name: Download uploaded Actions lifecycle evidence")
+  const downloadedVerify = workflow.indexOf("- name: Verify downloaded Actions lifecycle evidence")
+  expect(stagedVerify).toBeGreaterThan(0)
+  expect(upload).toBeGreaterThan(stagedVerify)
+  expect(download).toBeGreaterThan(upload)
+  expect(downloadedVerify).toBeGreaterThan(download)
+  const block = workflow.slice(upload)
+  expect(block).toContain("id: upload_lifecycle_evidence")
+  expect(block).toContain("artifact-ids: ${{ steps.upload_lifecycle_evidence.outputs.artifact-id }}")
+  expect(block).toContain("archive: false")
+  expect(block).toContain("UPLOADED_SHA256: ${{ steps.upload_lifecycle_evidence.outputs.artifact-digest }}")
+  expect(block).toContain('[[ "$UPLOADED_SHA256" == "$EXPECTED_SHA256" ]]')
+  expect(block).toContain("permission-actions: write")
+  expect(block).toContain("actions/artifacts/${ARTIFACT_ID}")
+  expect(block).toContain("CCHP_LIFECYCLE_ARTIFACT_PATH: ${{ steps.lifecycle_roundtrip_staging.outputs.dir }}/${{ steps.lifecycle_evidence.outputs.filename }}")
+  expect(block).toContain("CCHP_LIFECYCLE_ARTIFACT_SHA256: ${{ steps.lifecycle_evidence.outputs.sha256 }}")
+  expect(block).toContain("steps.download_lifecycle_evidence.outcome == 'success'")
 })

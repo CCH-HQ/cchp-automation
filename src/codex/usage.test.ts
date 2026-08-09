@@ -4,7 +4,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { UsageLedger } from "./usage"
 
-test("keeps cumulative snapshots and rejects a second terminal provider response for one Codex turn", () => {
+test("keeps cumulative snapshots and bills unique provider responses in one Codex tool-loop turn", () => {
   const path = join(mkdtempSync(join(tmpdir(), "usage-")), "usage.jsonl")
   const ledger = new UsageLedger({ path, totalBudget: 1_000 })
   const update = {
@@ -38,13 +38,13 @@ test("keeps cumulative snapshots and rejects a second terminal provider response
   expect(readFileSync(path, "utf8").trim().split("\n")).toHaveLength(1)
 
   expect(ledger.recordRaw({ threadId: "thread_1", turnId: "turn_1", responseId: "resp_1", totalTokens: 150 })).toMatchObject({ acceptedRaw: true, consumed: 150 })
-  expect(ledger.recordRaw({ threadId: "thread_1", turnId: "turn_1", responseId: "resp_2", totalTokens: 150 })).toMatchObject({ acceptedRaw: false, consumed: 150, blockingAnomalies: 1 })
-  expect(ledger.recordRaw({ threadId: "thread_1", turnId: "turn_1", responseId: "resp_2", totalTokens: 150 })).toMatchObject({ acceptedRaw: false, consumed: 150, blockingAnomalies: 1 })
-  expect(ledger.rawCompletions).toHaveLength(1)
-  expect(ledger.anomalies.map((anomaly) => anomaly.type)).toEqual(["turn_multiple_terminal_responses"])
+  expect(ledger.recordRaw({ threadId: "thread_1", turnId: "turn_1", responseId: "resp_2", totalTokens: 150 })).toMatchObject({ acceptedRaw: true, consumed: 300, blockingAnomalies: 0 })
+  expect(ledger.recordRaw({ threadId: "thread_1", turnId: "turn_1", responseId: "resp_2", totalTokens: 150 })).toMatchObject({ acceptedRaw: false, consumed: 300, blockingAnomalies: 0 })
+  expect(ledger.rawCompletions).toHaveLength(2)
+  expect(ledger.anomalies).toEqual([])
 })
 
-test("replay rejects a second provider response for one turn without rebilling", () => {
+test("replay restores multiple unique provider responses for one turn", () => {
   const path = join(mkdtempSync(join(tmpdir(), "usage-turn-replay-")), "usage.jsonl")
   const recordedAt = new Date().toISOString()
   writeFileSync(path, [
@@ -54,9 +54,9 @@ test("replay rejects a second provider response for one turn without rebilling",
   ].join("\n"))
 
   const restored = new UsageLedger({ path, totalBudget: 1_000 })
-  expect(restored.budget).toMatchObject({ consumed: 10, blockingAnomalies: 1 })
-  expect(restored.rawCompletions.map((record) => record.responseId)).toEqual(["first"])
-  expect(restored.anomalies.map((anomaly) => anomaly.type)).toEqual(["turn_multiple_terminal_responses"])
+  expect(restored.budget).toMatchObject({ consumed: 109, blockingAnomalies: 0, responses: 2, turns: 1 })
+  expect(restored.rawCompletions.map((record) => record.responseId)).toEqual(["first", "second"])
+  expect(restored.anomalies).toEqual([])
 })
 
 test("denies a projected response before the run can overshoot the admission threshold", () => {
@@ -72,7 +72,7 @@ test("denies a projected response before the run can overshoot the admission thr
   })
   ledger.recordRaw({
     threadId: "root", turnId: "turn-2", responseId: "second", provider: "p", model: "m", contextInputTokens: 350,
-    totalTokens: 400, billingScopeId: "run", reservationId: admitted.reservationId,
+    totalTokens: 400, billingScopeId: "run", reservation: admitted.reservation,
   })
   expect(ledger.admitNextResponse({ billingScopeId: "run", threadId: "root", turnId: "turn-3", provider: "p", model: "m" })).toMatchObject({
     allowed: false,
@@ -87,8 +87,8 @@ test("denies a projected response before the run can overshoot the admission thr
   expect(ledger.budget).toMatchObject({ responses: 2, turns: 2, admissionDenials: 1 })
 })
 
-test("reserves projected tokens and response slots across concurrent provider requests", () => {
-  const ledger = new UsageLedger({ totalBudget: 1_000, admissionFraction: 0.85, maxResponsesPerTurn: 2 })
+test("reserves projected tokens across concurrent provider requests", () => {
+  const ledger = new UsageLedger({ totalBudget: 1_000, admissionFraction: 0.85 })
   ledger.recordRaw({ threadId: "other", turnId: "other-turn", responseId: "bulk", provider: "p", model: "large", totalTokens: 760, billingScopeId: "run" })
   ledger.recordRaw({ threadId: "root", turnId: "baseline-turn", responseId: "baseline", provider: "p", model: "m", totalTokens: 40, billingScopeId: "run" })
 
@@ -104,7 +104,7 @@ test("reserves projected tokens and response slots across concurrent provider re
 
   ledger.recordRaw({
     threadId: "root", turnId: "turn", responseId: "settled", provider: "p", model: "m",
-    totalTokens: 40, billingScopeId: "run", reservationId: first.reservationId,
+    totalTokens: 40, billingScopeId: "run", reservation: first.reservation,
   })
   expect(ledger.admitNextResponse({ billingScopeId: "run", threadId: "root", turnId: "turn-2", provider: "p", model: "m", contextWindow: 372_000 })).toMatchObject({
     allowed: false,
@@ -119,10 +119,10 @@ test("releases failed reservations and restores unresolved reservations after re
   const first = new UsageLedger({ path, totalBudget: 1_000, admissionFraction: 0.85 })
   const failed = first.admitNextResponse({ billingScopeId: "run", threadId: "root", turnId: "turn-failed", contextWindow: 100 })
   expect(failed.allowed).toBe(true)
-  expect(first.releaseReservation(failed.reservationId!, "upstream_502")).toBe(true)
+  expect(first.releaseReservation(failed.reservation!, "upstream_502")).toBe(true)
   const healthy = first.admitNextResponse({ billingScopeId: "run", threadId: "root", turnId: "turn-healthy", contextWindow: 100 })
   expect(healthy).toMatchObject({ allowed: true, reservedTokens: 100 })
-  first.releaseReservation(healthy.reservationId!, "test_cleanup")
+  first.releaseReservation(healthy.reservation!, "test_cleanup")
 
   const unresolved = first.admitNextResponse({ billingScopeId: "run", threadId: "root", turnId: "turn-unresolved", contextWindow: 800 })
   expect(unresolved.allowed).toBe(true)
@@ -133,6 +133,54 @@ test("releases failed reservations and restores unresolved reservations after re
     reason: "projected_budget",
     reservedTokens: 800,
   })
+})
+
+test("recovers stale-generation reservations as conservative charges without leaving them in flight", () => {
+  const path = join(mkdtempSync(join(tmpdir(), "usage-reservation-generation-")), "usage.jsonl")
+  const first = new UsageLedger({
+    path,
+    totalBudget: 1_000,
+    admissionFraction: 0.85,
+    writerFence: { writerId: "writer", generation: 1 },
+  })
+  const stale = first.admitNextResponse({
+    billingScopeId: "run",
+    threadId: "root",
+    turnId: "turn-before-crash",
+    contextWindow: 400,
+  })
+  expect(stale).toMatchObject({ allowed: true, responsesInFlight: 1, reservedTokens: 400 })
+
+  const resumed = new UsageLedger({
+    path,
+    totalBudget: 1_000,
+    admissionFraction: 0.85,
+    writerFence: { writerId: "writer", generation: 2 },
+  })
+  const current = resumed.admitNextResponse({
+    billingScopeId: "run",
+    threadId: "root",
+    turnId: "turn-after-restart",
+    contextWindow: 100,
+  })
+  expect(current).toMatchObject({
+    allowed: true,
+    consumed: 400,
+    responsesInFlight: 1,
+    reservedTokens: 100,
+  })
+  expect(resumed.releaseReservation(stale.reservation!, "stale_callback")).toBe(false)
+  expect(resumed.releaseReservation(current.reservation!, "current_complete")).toBe(true)
+
+  expect(resumed.recordRaw({
+    threadId: "root",
+    turnId: "turn-before-crash",
+    responseId: "late-terminal",
+    totalTokens: 250,
+    billingScopeId: "run",
+    reservation: stale.reservation,
+  })).toMatchObject({ acceptedRaw: true, consumed: 250 })
+  expect(readFileSync(path, "utf8")).toContain('"kind":"reservation_recovered"')
 })
 
 test("uses the requested model context for cold starts and model switches", () => {
@@ -148,12 +196,357 @@ test("uses the requested model context for cold starts and model switches", () =
   })).toMatchObject({ allowed: false, reason: "projected_budget", estimatedNextTokens: 800 })
 })
 
-test("blocks sequential response loops per turn even when individual responses are small", () => {
-  const ledger = new UsageLedger({ totalBudget: 10_000, maxResponsesPerTurn: 2 })
-  ledger.recordRaw({ threadId: "root", turnId: "turn", responseId: "first", totalTokens: 10, billingScopeId: "run" })
-  expect(ledger.recordRaw({ threadId: "root", turnId: "turn", responseId: "second", totalTokens: 10, billingScopeId: "run" }))
-    .toMatchObject({ acceptedRaw: false, consumed: 10, blockingAnomalies: 1, responses: 1 })
-  expect(ledger.anomalies.at(-1)?.type).toBe("turn_multiple_terminal_responses")
+test("prefers a request-derived estimate over the model context window", () => {
+  const ledger = new UsageLedger({ totalBudget: 2_000_000, admissionFraction: 0.85 })
+  expect(ledger.admitNextResponse({
+    billingScopeId: "run",
+    threadId: "root",
+    turnId: "turn",
+    provider: "p",
+    model: "m",
+    contextWindow: 372_000,
+    estimatedTokens: 48_000,
+  })).toMatchObject({
+    allowed: true,
+    estimatedNextTokens: 48_000,
+    reservedTokens: 48_000,
+  })
+})
+
+test("does not repeat the 31322123553 whole-context reservation failure", () => {
+  const ledger = new UsageLedger({ totalBudget: 2_000_000, admissionFraction: 0.85 })
+  ledger.recordRaw({
+    threadId: "root", turnId: "completed-turn", responseId: "completed-response",
+    provider: "p", model: "m", totalTokens: 319_426, billingScopeId: "run",
+  })
+
+  for (let index = 0; index < 4; index++) {
+    expect(ledger.admitNextResponse({
+      billingScopeId: "run",
+      threadId: "root",
+      turnId: `concurrent-${index}`,
+      provider: "p",
+      model: "m",
+      contextWindow: 372_000,
+      estimatedTokens: 132_000,
+    })).toMatchObject({
+      allowed: true,
+      estimatedNextTokens: 132_000,
+      responsesInFlight: 1,
+      reservedTokens: 132_000 * (index + 1),
+    })
+  }
+})
+
+test("allows more than sixteen Responses API calls within one Codex turn", () => {
+  const ledger = new UsageLedger({ totalBudget: 10_000 })
+  for (let index = 0; index < 32; index++) {
+    expect(ledger.recordRaw({
+      threadId: "root", turnId: "turn", responseId: `response-${index}`,
+      totalTokens: 10, billingScopeId: "run",
+    })).toMatchObject({
+      acceptedRaw: true,
+      consumed: (index + 1) * 10,
+      blockingAnomalies: 0,
+      responses: index + 1,
+      turns: 1,
+    })
+  }
+})
+
+test("uses run-wide provider history when a child thread has no local usage", () => {
+  const ledger = new UsageLedger({ totalBudget: 2_000_000, admissionFraction: 0.85 })
+  ledger.recordRaw({
+    threadId: "root", turnId: "root-turn", responseId: "root-response", provider: "p", model: "m",
+    contextInputTokens: 90_000, totalTokens: 100_000, billingScopeId: "run",
+  })
+
+  expect(ledger.admitNextResponse({
+    billingScopeId: "run", threadId: "child", turnId: "child-turn", provider: "p", model: "m", contextWindow: 372_000,
+  })).toMatchObject({
+    allowed: true,
+    estimatedNextTokens: 100_000,
+    reservedTokens: 100_000,
+  })
+  ledger.recordRaw({
+    threadId: "child", turnId: "child-turn", responseId: "child-response", provider: "p", model: "m",
+    contextInputTokens: 310_000, totalTokens: 320_000, contextWindow: 372_000, billingScopeId: "run",
+  })
+  expect(ledger.anomalies.map((anomaly) => anomaly.type)).not.toContain("token_jump")
+})
+
+test("reindexes raw-first usage after provider enrichment for admission and prompt jumps", () => {
+  const ledger = new UsageLedger({ totalBudget: 2_000_000, admissionFraction: 0.85 })
+  const raw = {
+    threadId: "root",
+    turnId: "root-turn",
+    responseId: "root-response",
+    contextInputTokens: 20_000,
+    totalTokens: 25_000,
+    billingScopeId: "run",
+  }
+  ledger.recordRaw(raw)
+  ledger.recordRaw({ ...raw, provider: "p", model: "m" })
+
+  const admission = ledger.admitNextResponse({
+    billingScopeId: "run",
+    threadId: "child",
+    turnId: "child-turn",
+    provider: "p",
+    model: "m",
+    contextWindow: 372_000,
+  })
+  expect(admission).toMatchObject({ allowed: true, estimatedNextTokens: 25_000 })
+  ledger.releaseReservation(admission.reservation!, "test_cleanup")
+
+  ledger.recordRaw({
+    threadId: "root",
+    turnId: "root-turn-2",
+    responseId: "root-response-2",
+    provider: "p",
+    model: "m",
+    contextInputTokens: 60_001,
+    totalTokens: 65_000,
+    billingScopeId: "run",
+  })
+  expect(ledger.anomalies.map((anomaly) => anomaly.type)).toContain("token_jump")
+})
+
+test("compares late-enriched usage only with its chronological model predecessor", () => {
+  const forward = new UsageLedger({ totalBudget: 2_000_000 })
+  forward.recordRaw({
+    threadId: "root", turnId: "turn-1", responseId: "known", provider: "p", model: "m",
+    contextInputTokens: 20_000, totalTokens: 25_000,
+  })
+  const late = {
+    threadId: "root", turnId: "turn-2", responseId: "late",
+    contextInputTokens: 70_000, totalTokens: 75_000,
+  }
+  forward.recordRaw(late)
+  forward.recordRaw({ ...late, provider: "p", model: "m" })
+  expect(forward.anomalies.map((anomaly) => anomaly.type)).toContain("token_jump")
+
+  const backward = new UsageLedger({ totalBudget: 2_000_000 })
+  const early = {
+    threadId: "root", turnId: "turn-1", responseId: "early",
+    contextInputTokens: 70_000, totalTokens: 75_000,
+  }
+  backward.recordRaw(early)
+  backward.recordRaw({
+    threadId: "root", turnId: "turn-2", responseId: "later", provider: "p", model: "m",
+    contextInputTokens: 20_000, totalTokens: 25_000,
+  })
+  backward.recordRaw({ ...early, provider: "p", model: "m" })
+  expect(backward.anomalies.map((anomaly) => anomaly.type)).not.toContain("token_jump")
+})
+
+test("rebuilds successor prompt-jump state when an earlier record is enriched", () => {
+  const introduced = new UsageLedger({ totalBudget: 2_000_000 })
+  const early = {
+    threadId: "root", turnId: "turn-1", responseId: "early",
+    contextInputTokens: 20_000, totalTokens: 25_000, billingScopeId: "run",
+  }
+  introduced.recordRaw(early)
+  introduced.recordRaw({
+    threadId: "root", turnId: "turn-2", responseId: "later", provider: "p", model: "m",
+    contextInputTokens: 70_000, totalTokens: 75_000, billingScopeId: "run",
+  })
+  introduced.recordRaw({ ...early, provider: "p", model: "m" })
+  expect(introduced.anomalies.map((anomaly) => anomaly.type)).toEqual(["token_jump"])
+
+  const invalidated = new UsageLedger({ totalBudget: 2_000_000 })
+  invalidated.recordRaw({
+    threadId: "root", turnId: "turn-1", responseId: "first", provider: "p", model: "m",
+    contextInputTokens: 20_000, totalTokens: 25_000, billingScopeId: "run",
+  })
+  const middle = {
+    threadId: "root", turnId: "turn-2", responseId: "middle",
+    contextInputTokens: 30_000, totalTokens: 35_000, billingScopeId: "run",
+  }
+  invalidated.recordRaw(middle)
+  invalidated.recordRaw({
+    threadId: "root", turnId: "turn-3", responseId: "last", provider: "p", model: "m",
+    contextInputTokens: 70_000, totalTokens: 75_000, billingScopeId: "run",
+  })
+  expect(invalidated.anomalies.map((anomaly) => anomaly.type)).toEqual(["token_jump"])
+  invalidated.recordRaw({ ...middle, provider: "p", model: "m" })
+  expect(invalidated.anomalies.map((anomaly) => anomaly.type)).toEqual([])
+})
+
+test("replays a live late-enrichment ledger with identical derived anomalies", () => {
+  const path = join(mkdtempSync(join(tmpdir(), "usage-live-enrichment-replay-")), "usage.jsonl")
+  const live = new UsageLedger({ path, totalBudget: 2_000_000 })
+  live.recordRaw({
+    threadId: "root", turnId: "turn-1", responseId: "early", provider: "p", model: "m",
+    contextInputTokens: 20_000, totalTokens: 25_000, billingScopeId: "run",
+  })
+  const late = {
+    threadId: "root", turnId: "turn-2", responseId: "late",
+    contextInputTokens: 70_000, totalTokens: 75_000, billingScopeId: "run",
+  }
+  live.recordRaw(late)
+  live.recordRaw({ ...late, provider: "p", model: "m" })
+  const restored = new UsageLedger({ path, totalBudget: 2_000_000 })
+  expect(live.anomalies).toHaveLength(1)
+  expect(restored.anomalies).toEqual(live.anomalies)
+  expect(restored.budget.blockingAnomalies).toBe(1)
+})
+
+test("replays chronological late-enrichment token jumps without comparing older records to the future", () => {
+  const directory = mkdtempSync(join(tmpdir(), "usage-enrichment-order-replay-"))
+  const recordedAt = new Date().toISOString()
+  const raw = (value: Record<string, unknown>) => JSON.stringify({
+    kind: "raw_completion_usage",
+    recordedAt,
+    ...value,
+  })
+
+  const forwardPath = join(directory, "forward.jsonl")
+  writeFileSync(forwardPath, [
+    raw({ threadId: "root", turnId: "turn-1", responseId: "known", provider: "p", model: "m", contextInputTokens: 20_000, totalTokens: 25_000 }),
+    raw({ threadId: "root", turnId: "turn-2", responseId: "late", contextInputTokens: 70_000, totalTokens: 75_000 }),
+    raw({ threadId: "root", turnId: "turn-2", responseId: "late", provider: "p", model: "m", contextInputTokens: 70_000, totalTokens: 75_000 }),
+  ].join("\n") + "\n")
+  expect(new UsageLedger({ path: forwardPath, totalBudget: 2_000_000 }).anomalies.map((anomaly) => anomaly.type))
+    .toContain("token_jump")
+
+  const backwardPath = join(directory, "backward.jsonl")
+  writeFileSync(backwardPath, [
+    raw({ threadId: "root", turnId: "turn-1", responseId: "early", contextInputTokens: 70_000, totalTokens: 75_000 }),
+    raw({ threadId: "root", turnId: "turn-2", responseId: "later", provider: "p", model: "m", contextInputTokens: 20_000, totalTokens: 25_000 }),
+    raw({ threadId: "root", turnId: "turn-1", responseId: "early", provider: "p", model: "m", contextInputTokens: 70_000, totalTokens: 75_000 }),
+  ].join("\n") + "\n")
+  expect(new UsageLedger({ path: backwardPath, totalBudget: 2_000_000 }).anomalies.map((anomaly) => anomaly.type))
+    .not.toContain("token_jump")
+})
+
+test("rebuilds enriched model indexes while replaying raw-first usage", () => {
+  const path = join(mkdtempSync(join(tmpdir(), "usage-enrichment-replay-")), "usage.jsonl")
+  const recordedAt = new Date().toISOString()
+  const raw = {
+    kind: "raw_completion_usage",
+    recordedAt,
+    threadId: "root",
+    turnId: "root-turn",
+    responseId: "root-response",
+    contextInputTokens: 20_000,
+    totalTokens: 25_000,
+    billingScopeId: "run",
+  }
+  writeFileSync(path, `${JSON.stringify(raw)}\n${JSON.stringify({ ...raw, provider: "p", model: "m" })}\n`)
+
+  const restored = new UsageLedger({ path, totalBudget: 2_000_000, admissionFraction: 0.85 })
+  const admission = restored.admitNextResponse({
+    billingScopeId: "run",
+    threadId: "child",
+    turnId: "child-turn",
+    provider: "p",
+    model: "m",
+    contextWindow: 372_000,
+  })
+  expect(admission).toMatchObject({ allowed: true, estimatedNextTokens: 25_000 })
+  restored.releaseReservation(admission.reservation!, "test_cleanup")
+  restored.recordRaw({
+    threadId: "root",
+    turnId: "root-turn-2",
+    responseId: "root-response-2",
+    provider: "p",
+    model: "m",
+    contextInputTokens: 60_001,
+    totalTokens: 65_000,
+    billingScopeId: "run",
+  })
+  expect(restored.anomalies.map((anomaly) => anomaly.type)).toContain("token_jump")
+})
+
+test("detects context overflow when a smaller context window arrives during late enrichment", () => {
+  const ledger = new UsageLedger({ totalBudget: 1_000_000 })
+  const raw = {
+    threadId: "root",
+    turnId: "turn",
+    responseId: "response",
+    contextInputTokens: 60_000,
+    totalTokens: 65_000,
+    source: "app-server:rawResponse/completed",
+  }
+  ledger.recordRaw(raw)
+  expect(ledger.recordRaw({
+    ...raw,
+    provider: "provider",
+    model: "model",
+    contextWindow: 32_000,
+    source: "provider-bridge:response.completed",
+  })).toMatchObject({ acceptedRaw: false, consumed: 65_000, blockingAnomalies: 1 })
+  expect(ledger.rawCompletions[0]).toMatchObject({ provider: "provider", model: "model", contextWindow: 32_000 })
+  expect(ledger.anomalies).toMatchObject([{ type: "context_overflow", responseId: "response" }])
+})
+
+test("replays late context-window enrichment with the same blocking overflow", () => {
+  const path = join(mkdtempSync(join(tmpdir(), "usage-late-window-replay-")), "usage.jsonl")
+  const recordedAt = new Date().toISOString()
+  const raw = {
+    kind: "raw_completion_usage",
+    recordedAt,
+    threadId: "root",
+    turnId: "turn",
+    responseId: "response",
+    contextInputTokens: 60_000,
+    totalTokens: 65_000,
+    source: "app-server:rawResponse/completed",
+  }
+  writeFileSync(path, `${JSON.stringify(raw)}\n${JSON.stringify({
+    ...raw,
+    provider: "provider",
+    model: "model",
+    contextWindow: 32_000,
+    source: "provider-bridge:response.completed",
+  })}\n`)
+
+  const restored = new UsageLedger({ path, totalBudget: 1_000_000 })
+  expect(restored.budget).toMatchObject({ consumed: 65_000, responses: 1, blockingAnomalies: 1 })
+  expect(restored.anomalies).toMatchObject([{ type: "context_overflow", responseId: "response" }])
+})
+
+test("fails closed on non-empty usage metadata drift in live and replay paths", () => {
+  const fields = [
+    ["provider", "provider-a", "provider-b"],
+    ["model", "model-a", "model-b"],
+    ["contextWindow", 64_000, 32_000],
+    ["source", "source-a", "source-b"],
+  ] as const
+  for (const [field, first, second] of fields) {
+    const base = { threadId: "root", turnId: "turn", responseId: "response", totalTokens: 10 }
+    const ledger = new UsageLedger({ totalBudget: 1_000 })
+    ledger.recordRaw({ ...base, [field]: first })
+    expect(ledger.recordRaw({ ...base, [field]: second })).toMatchObject({ acceptedRaw: false, consumed: 10, blockingAnomalies: 1 })
+    expect(ledger.anomalies).toMatchObject([{ type: "usage_metadata_conflict" }])
+
+    const path = join(mkdtempSync(join(tmpdir(), `usage-${field}-drift-replay-`)), "usage.jsonl")
+    const recordedAt = new Date().toISOString()
+    const row = { kind: "raw_completion_usage", recordedAt, ...base }
+    writeFileSync(path, `${JSON.stringify({ ...row, [field]: first })}\n${JSON.stringify({ ...row, [field]: second })}\n`)
+    expect(() => new UsageLedger({ path, totalBudget: 1_000 })).toThrow("conflicting usage metadata replay")
+  }
+})
+
+test("ignores the deprecated multi-terminal-response anomaly during replay", () => {
+  const path = join(mkdtempSync(join(tmpdir(), "usage-legacy-anomaly-")), "usage.jsonl")
+  const recordedAt = new Date().toISOString()
+  writeFileSync(path, `${JSON.stringify({
+    kind: "token_anomaly",
+    id: "turn_multiple_terminal_responses:response:1",
+    type: "turn_multiple_terminal_responses",
+    blocking: true,
+    responseId: "response",
+    threadId: "root",
+    turnId: "turn",
+    message: "legacy false positive",
+    recordedAt,
+  })}\n`)
+
+  const restored = new UsageLedger({ path, totalBudget: 1_000 })
+  expect(restored.anomalies).toEqual([])
+  expect(restored.budget).toMatchObject({ blockingAnomalies: 0, consumed: 0 })
 })
 
 test("keeps context and billable input semantics separate and isolates prompt jumps by thread", () => {
@@ -346,12 +739,35 @@ test("blocks input context overflow, response double billing and unexplained gre
     anomalyReason: "validated-large-context",
   })
 
-  expect(ledger.anomalies.map((anomaly) => anomaly.type)).toEqual([
-    "token_jump",
-    "response_double_billing",
+  expect(ledger.anomalies.map((anomaly) => anomaly.type).sort()).toEqual([
     "context_overflow",
+    "response_double_billing",
+    "token_jump",
   ])
   expect(ledger.hasBlockingAnomalies()).toBe(true)
+})
+
+test("keeps token jumps provisional until provider and model identity is enriched", () => {
+  const ledger = new UsageLedger({ totalBudget: 2_000_000 })
+  ledger.recordRaw({ threadId: "root", turnId: "turn-1", responseId: "first", contextInputTokens: 20_000, totalTokens: 20_000 })
+  const provisional = ledger.recordRaw({ threadId: "root", turnId: "turn-2", responseId: "second", contextInputTokens: 70_000, totalTokens: 70_000 })
+  expect(provisional.blockingAnomalies).toBe(0)
+  expect(ledger.hasProvisionalTokenJump()).toBe(true)
+  expect(ledger.recordRaw({
+    threadId: "root", turnId: "turn-2", responseId: "second", provider: "p", model: "m",
+    contextInputTokens: 70_000, totalTokens: 70_000,
+  })).toMatchObject({ blockingAnomalies: 0 })
+  expect(ledger.hasProvisionalTokenJump()).toBe(true)
+  expect(ledger.anomalies.find((anomaly) => anomaly.type === "token_jump")).toMatchObject({
+    baselineResponseId: "first",
+    responseId: "second",
+    blocking: false,
+  })
+  expect(ledger.recordRaw({
+    threadId: "root", turnId: "turn-1", responseId: "first", provider: "p", model: "m",
+    contextInputTokens: 20_000, totalTokens: 20_000,
+  })).toMatchObject({ blockingAnomalies: 1 })
+  expect(ledger.hasProvisionalTokenJump()).toBe(false)
 })
 
 test("does not treat output growth as prompt overflow or prompt jump", () => {

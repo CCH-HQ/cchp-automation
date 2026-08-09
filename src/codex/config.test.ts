@@ -70,6 +70,7 @@ test("writes an isolated strict Codex config with loopback providers and no call
     "CCHP_GITHUB_BROKER_SOCKET",
     "CCHP_GITHUB_BROKER_TOKEN",
     "CCHP_GITHUB_BROKER_FINALIZER",
+    "CCHP_PROCESS_RECORD_HMAC_KEY",
     "SEE_API_KEY",
     "HEROUI_AUTH_TOKEN",
   ]) {
@@ -190,6 +191,7 @@ test("explicit fallback disables native collaboration and registers exactly one 
   const agentsMcp = config.slice(config.indexOf("[mcp_servers.agents]"))
   expect(agentsMcp).toContain('command = "/opt/cchp/bin/bun"')
   expect(agentsMcp).toContain('"BOT_TASK"')
+  expect(agentsMcp).toContain('"CCHP_PROCESS_RECORD_HMAC_KEY"')
   for (const name of ["PATH", "HOME", "LANG", "TMPDIR"]) {
     expect(agentsMcp).toContain(`"${name}"`)
   }

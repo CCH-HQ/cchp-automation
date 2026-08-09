@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test"
-import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs"
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { execFileSync } from "node:child_process"
@@ -10,8 +10,10 @@ import {
   configureGitRemote,
   createRuntimeDiagnosticBuffer,
   createProgressPublisher,
+  createProgressPublicationFence,
   createTerminalProgressPublisher,
   redactRuntimeDiagnostic,
+  requiresReviewFinalization,
   resolveRuntimeBrokerBindings,
   resolveRuntimePermission,
   resolveRuntimeRecovery,
@@ -42,6 +44,10 @@ test("redacts runtime diagnostics before they reach workflow logs", () => {
   expect(redacted).not.toContain("secret")
   expect(redacted).not.toContain("dXNlcjpwYXNz")
   expect(redacted).not.toContain("private-material")
+})
+
+test("redacts overlapping secret values longest-first", () => {
+  expect(redactRuntimeDiagnostic("abcdefgh", ["abcd", "abcdefgh"])).toBe("[REDACTED]")
 })
 
 test("bounds app-server diagnostics while retaining the most recent lines", () => {
@@ -100,6 +106,11 @@ test("maps existing BOT_* target metadata to broker bindings without caller chan
   })
   expect(resolveRuntimeBrokerBindings({ BOT_TASK: "ci_fix", BOT_PR_NUMBER: "42", BOT_RUN_ID: "1234" }))
     .toMatchObject({ target: 42, targetKind: "pr", workflowRunId: 1234 })
+  expect(resolveRuntimeBrokerBindings({
+    BOT_TASK: "ci_fix",
+    BOT_RUN_ID: "engine-2-random",
+    CCHP_WORKFLOW_RUN_ID: "1234",
+  })).toMatchObject({ workflowRunId: 1234 })
   expect(resolveRuntimeBrokerBindings({ BOT_TASK: "release_notes", BOT_RELEASE_TAG: "v1.2.3" }))
     .toMatchObject({ releaseTag: "v1.2.3" })
   expect(() => resolveRuntimeBrokerBindings({ BOT_PR_NUMBER: "1", BOT_ISSUE_NUMBER: "2" }))
@@ -127,6 +138,7 @@ test("reuses the manifest run id and root ownership on a runtime process restart
     runId: "persisted-run",
     task: "manual",
     state: "ROOT_RUNNING",
+    execution_mode: "native_v2",
     rootThreadId: "root",
     rootTurnId: "turn",
     restartAttempts: 1,
@@ -136,10 +148,11 @@ test("reuses the manifest run id and root ownership on a runtime process restart
     updatedAt: new Date().toISOString(),
   })}\n`)
 
-  expect(resolveRuntimeRecovery({}, workdir, "manual", () => "new-run")).toEqual({
+  expect(resolveRuntimeRecovery({}, workdir, "manual", "native_v2", () => "new-run")).toEqual({
     runId: "persisted-run",
     resume: {
       state: "ROOT_RUNNING",
+      executionMode: "native_v2",
       rootThreadId: "root",
       rootTurnId: "turn",
       restartAttempts: 1,
@@ -150,8 +163,19 @@ test("reuses the manifest run id and root ownership on a runtime process restart
       drainDeadlineAt: undefined,
     },
   })
-  expect(() => resolveRuntimeRecovery({ BOT_RUN_ID: "other-run" }, workdir, "manual", () => "new-run"))
+  expect(() => resolveRuntimeRecovery({ BOT_RUN_ID: "other-run" }, workdir, "manual", "native_v2", () => "new-run"))
     .toThrow(/run id mismatch/)
+  expect(() => resolveRuntimeRecovery({}, workdir, "manual", "explicit_child", () => "new-run"))
+    .toThrow(/execution mode mismatch/)
+
+  const manifestPath = join(codexDir, "run-manifest.json")
+  const explicitManifest = JSON.parse(readFileSync(manifestPath, "utf8")) as Record<string, unknown>
+  explicitManifest.execution_mode = "explicit_child"
+  writeFileSync(manifestPath, `${JSON.stringify(explicitManifest)}\n`)
+  expect(resolveRuntimeRecovery({}, workdir, "manual", "explicit_child", () => "new-run"))
+    .toMatchObject({ resume: { executionMode: "explicit_child" } })
+  expect(() => resolveRuntimeRecovery({}, workdir, "manual", "native_v2", () => "new-run"))
+    .toThrow(/execution mode mismatch/)
 })
 
 test("fails closed when durable ledgers exist without a run manifest", () => {
@@ -159,7 +183,7 @@ test("fails closed when durable ledgers exist without a run manifest", () => {
   const codexDir = join(workdir, "ctx", "codex")
   mkdirSync(codexDir, { recursive: true })
   writeFileSync(join(codexDir, "usage.jsonl"), "{}\n")
-  expect(() => resolveRuntimeRecovery({}, workdir, "manual", () => "new-run"))
+  expect(() => resolveRuntimeRecovery({}, workdir, "manual", "native_v2", () => "new-run"))
     .toThrow(/orphaned durable Codex state/)
 })
 
@@ -183,6 +207,7 @@ test("binds the supervisor-owned progress publisher to the trusted repository an
     BOT_TASK: "pr_opened",
     BOT_PR_NUMBER: "42",
     BOT_PROGRESS_TARGET: "42",
+    BOT_LOGIN: "bot[bot]",
     GH_TOKEN: "raw-token-that-will-be-deleted",
   }
   const publish = createProgressPublisher(env, octokit)
@@ -196,6 +221,35 @@ test("binds the supervisor-owned progress publisher to the trusted repository an
     issue_number: 42,
     body: expect.stringContaining("<!-- cchp-bot:progress:pr_opened -->"),
   }))
+})
+
+test("does not retry a successful GitHub publication when local evidence cannot be written", async () => {
+  const root = mkdtempSync(join(tmpdir(), "cchp-runtime-publication-evidence-"))
+  const invalidWorkdir = join(root, "not-a-directory")
+  writeFileSync(invalidWorkdir, "fixture")
+  let creates = 0
+  const octokit = {
+    rest: {
+      issues: {
+        listComments: async () => [],
+        createComment: async () => {
+          creates++
+          return { data: { id: 1, html_url: "https://example.invalid/comment/1" } }
+        },
+      },
+    },
+    paginate: async (fn: () => Promise<unknown>) => fn(),
+  } as unknown as GitHubClient
+  const publish = createProgressPublisher({
+    BOT_REPO: "CCH-HQ/fixture",
+    BOT_TASK: "engage",
+    BOT_ISSUE_NUMBER: "42",
+    BOT_WORKDIR: invalidWorkdir,
+    BOT_LOGIN: "bot[bot]",
+  }, octokit)
+
+  await expect(publish!("working")).resolves.toBeUndefined()
+  expect(creates).toBe(1)
 })
 
 test("rejects progress repository and target drift before publishing", () => {
@@ -237,7 +291,7 @@ test("terminal progress replaces the task sticky only while the trusted PR head 
         },
       },
     },
-    paginate: async () => [{ id: 9, body: "working\n<!-- cchp-bot:progress:pr_opened -->" }],
+    paginate: async () => [{ id: 9, body: "working\n<!-- cchp-bot:progress:pr_opened -->", user: { login: "bot[bot]" } }],
   } as unknown as GitHubClient
   const publish = createTerminalProgressPublisher({
     BOT_REPO: "CCH-HQ/fixture",
@@ -247,6 +301,7 @@ test("terminal progress replaces the task sticky only while the trusted PR head 
     BOT_PROGRESS_TARGET: "42",
     BOT_HEAD_SHA: "head",
     GITHUB_RUN_ID: "123",
+    BOT_LOGIN: "bot[bot]",
   }, octokit, (value) => value.replace("ghp_runtime_secret", "[REDACTED]"))
   expect(await publish!({
     state: "FAILED",
@@ -261,6 +316,55 @@ test("terminal progress replaces the task sticky only while the trusted PR head 
   expect(String(calls[0]!.body)).toContain("Run complete — `pr_opened`")
   expect(String(calls[0]!.body)).toContain("<!-- cchp-bot:progress:pr_opened -->")
   expect(String(calls[0]!.body)).not.toContain("ghp_runtime_secret")
+})
+
+test("repairs a late progress mutation so terminal progress remains the authoritative final write", async () => {
+  let releaseProgress!: () => void
+  let progressStarted!: () => void
+  const progressGate = new Promise<void>((resolve) => { releaseProgress = resolve })
+  const progressObserved = new Promise<void>((resolve) => { progressStarted = resolve })
+  const writes: string[] = []
+  const octokit = {
+    rest: {
+      issues: {
+        listComments: Object.assign(() => {}, { tag: "comments" }),
+        updateComment: async (args: Record<string, unknown>) => {
+          const body = String(args.body)
+          if (!body.includes("Run complete")) {
+            progressStarted()
+            await progressGate
+            writes.push("progress")
+          } else {
+            writes.push("terminal")
+          }
+          return { data: { id: 9, html_url: "https://example.invalid/comment/9" } }
+        },
+      },
+    },
+    paginate: async () => [{ id: 9, body: "working\n<!-- cchp-bot:progress:engage -->", user: { login: "bot[bot]" } }],
+  } as unknown as GitHubClient
+  const env = {
+    BOT_REPO: "CCH-HQ/fixture",
+    BOT_TASK: "engage",
+    BOT_ISSUE_NUMBER: "42",
+    GITHUB_RUN_ID: "123",
+    BOT_LOGIN: "bot[bot]",
+  }
+  const fence = createProgressPublicationFence()
+  const progress = createProgressPublisher(env, octokit, fence)!
+  const terminal = createTerminalProgressPublisher(env, octokit, (value) => value, fence)!
+  const late = progress("working")
+  await progressObserved
+  await terminal({
+    state: "SUCCEEDED",
+    usage: {
+      acceptedRaw: false, consumed: 10, limit: 100, fraction: 0.1, state: "normal",
+      blockingAnomalies: 0, responses: 1, turns: 1, admissionDenials: 0,
+    },
+  })
+  releaseProgress()
+  await late
+  expect(writes).toEqual(["terminal", "progress", "terminal"])
 })
 
 test("terminal progress skips a closed PR without creating or updating comments", async () => {
@@ -282,6 +386,7 @@ test("terminal progress skips a closed PR without creating or updating comments"
     BOT_PR_NUMBER: "42",
     BOT_PROGRESS_TARGET: "42",
     BOT_HEAD_SHA: "head",
+    BOT_LOGIN: "bot[bot]",
   }, octokit)
   expect(await publish!({
     state: "CANCELLED",
@@ -311,7 +416,7 @@ test("terminal progress rechecks the PR head after locating the sticky and befor
     },
     paginate: async () => {
       commentsRead = true
-      return [{ id: 9, body: "working\n<!-- cchp-bot:progress:pr_opened -->" }]
+      return [{ id: 9, body: "working\n<!-- cchp-bot:progress:pr_opened -->", user: { login: "bot[bot]" } }]
     },
   } as unknown as GitHubClient
   const publish = createTerminalProgressPublisher({
@@ -319,6 +424,7 @@ test("terminal progress rechecks the PR head after locating the sticky and befor
     BOT_TASK: "pr_opened",
     BOT_PR_NUMBER: "42",
     BOT_HEAD_SHA: "old-head",
+    BOT_LOGIN: "bot[bot]",
   }, octokit)
   expect(await publish!({
     state: "FAILED",
@@ -347,6 +453,19 @@ test("injects the complete review protocol only for pr_opened", () => {
     instructionOverlay: "overlay",
     taskPrompt: "task",
   })).toThrow(/requires the Codex Ultra Code Review Protocol/)
+})
+
+test("keeps metadata-only PR edits out of the review finalization contract", () => {
+  expect(requiresReviewFinalization({ BOT_TASK: "pr_opened" })).toBeTrue()
+  expect(requiresReviewFinalization({ BOT_TASK: "pr_opened", BOT_SKIP_PR_INSPECT: "0" })).toBeTrue()
+  expect(requiresReviewFinalization({ BOT_TASK: "pr_opened", BOT_SKIP_PR_INSPECT: "1" })).toBeFalse()
+  expect(requiresReviewFinalization({ BOT_TASK: "manual", BOT_SKIP_PR_INSPECT: "1" })).toBeFalse()
+  expect(composeRuntimePrompt({
+    task: "pr_opened",
+    reviewRequired: false,
+    instructionOverlay: "overlay",
+    taskPrompt: "metadata-only task",
+  })).toBe("overlay\nmetadata-only task")
 })
 
 test("runtime environment snapshot restores every credential and generated binding exactly", () => {

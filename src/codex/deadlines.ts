@@ -4,6 +4,7 @@ export const DEADLINES = {
   wholeRunMs: 11 * 60 * 60 * 1000 + 50 * 60 * 1000,
   childMs: 30 * 60 * 1000,
   heartbeatMs: 60 * 1000,
+  progressPublishMs: 30 * 1000,
   noProgressWarningMs: 5 * 60 * 1000,
   noProgressTerminalMs: 20 * 60 * 1000,
   reconcileMs: 30 * 1000,

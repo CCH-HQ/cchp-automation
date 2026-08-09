@@ -1,7 +1,7 @@
 import { mkdirSync } from "node:fs"
 import { createHash } from "node:crypto"
 import { dirname } from "node:path"
-import { appendJsonl, readJsonl } from "./jsonl"
+import { appendJsonl, parseJsonl, readJsonl } from "./jsonl"
 
 export type ChildTerminalState = "completed" | "failed" | "timed_out" | "interrupted" | "lost"
 
@@ -37,6 +37,12 @@ export class ChildGraph {
       mkdirSync(dirname(path), { recursive: true, mode: 0o700 })
       for (const row of readJsonl(path)) this.replay(row)
     }
+  }
+
+  static fromSnapshot(value: string | Buffer, sourceName = "graph snapshot"): ChildGraph {
+    const graph = new ChildGraph()
+    for (const row of parseJsonl(value, sourceName)) graph.replay(row)
+    return graph
   }
 
   open(
@@ -171,17 +177,24 @@ export class ChildGraph {
     const parentId = typeof row.parentId === "string" ? row.parentId : ""
     const childId = typeof row.childId === "string" ? row.childId : ""
     const spawnItemId = typeof row.spawnItemId === "string" ? row.spawnItemId : ""
-    const transport = row.transport === "explicit_child" ? "explicit_child" : "native_v2"
+    const transport = row.transport === undefined || row.transport === "native_v2"
+      ? "native_v2"
+      : row.transport === "explicit_child"
+        ? "explicit_child"
+        : undefined
+    if (!transport) throw new Error(`graph ledger row has invalid transport ${String(row.transport)}`)
     if (!parentId || !childId || !spawnItemId) throw new Error("graph ledger row has invalid edge identity")
     const existing = this.byChild.get(childId)
     if (event === "edge_opened") {
+      const generation = Number.isSafeInteger(row.generation) && Number(row.generation) > 0 ? Number(row.generation) : 1
       if (existing) {
         if (existing.parentId !== parentId || existing.spawnItemId !== spawnItemId) throw new Error(`conflicting replay identity for child ${childId}`)
+        if (existing.transport !== transport) throw new Error(`conflicting replay transport for child ${childId}`)
+        if (existing.generation !== generation) throw new Error(`conflicting replay generation for child ${childId}`)
         return
       }
       const openedAt = typeof row.openedAt === "string" ? row.openedAt : ""
       if (!openedAt) throw new Error(`graph open row missing openedAt for ${childId}`)
-      const generation = Number.isSafeInteger(row.generation) && Number(row.generation) > 0 ? Number(row.generation) : 1
       this.byChild.set(childId, { parentId, childId, spawnItemId, transport, state: "open", openedAt, generation })
       this.children.set(parentId, [...(this.children.get(parentId) ?? []), childId])
       return

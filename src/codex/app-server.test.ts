@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test"
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs"
+import { existsSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import {
@@ -9,8 +9,10 @@ import {
   failClosedServerRequest,
 } from "./app-server"
 import { buildCodexEnvironment } from "./supervisor"
+import { processIdentity, type ProcessIdentity } from "./run-lock"
 
 const fakeCodex = resolve(import.meta.dir, "../../scripts/fixtures/fake-codex-app-server.ts")
+const processRecordHmacKey = "ab".repeat(32)
 
 async function eventually(predicate: () => boolean, timeoutMs = 2_000): Promise<void> {
   const deadline = Date.now() + timeoutMs
@@ -80,6 +82,7 @@ test("drives typed app-server thread lifecycle requests through a real stdio pro
       exits.push(event)
     },
     processRecordPath,
+    processRecordHmacKey,
     runId: "run-app-server",
     writerFence: { writerId: "writer-1", generation: 3 },
     requestTimeoutMs: 1_000,
@@ -87,7 +90,8 @@ test("drives typed app-server thread lifecycle requests through a real stdio pro
   try {
     expect(await app.start()).toEqual({ userAgent: "fake-codex-app-server" })
     const processRecord = JSON.parse(readFileSync(processRecordPath, "utf8")) as Record<string, unknown>
-    expect(processRecord).toMatchObject({ schemaVersion: 1, pid: app.pid, pgid: app.pid, runId: "run-app-server", writerId: "writer-1", writerGeneration: 3 })
+    expect(processRecord).toMatchObject({ schemaVersion: 2, pid: app.pid, pgid: app.pid, runId: "run-app-server", writerId: "writer-1", writerGeneration: 3 })
+    expect(processRecord.mac).toMatch(/^[a-f0-9]{64}$/)
     expect(typeof processRecord.startTicks).toBe("string")
     expect(typeof processRecord.bootId).toBe("string")
     expect(await app.threadRead("thread-1", true)).toEqual({
@@ -138,6 +142,7 @@ test("launches the real app-server subprocess without caller credentials", async
       CCHP_APP_PRIVATE_KEY: "app-private-sentinel",
       SEE_API_KEY: "see-sentinel",
       HEROUI_AUTH_TOKEN: "heroui-sentinel",
+      CCHP_PROCESS_RECORD_HMAC_KEY: processRecordHmacKey,
       UNRELATED_SECRET: "unrelated-sentinel",
     }),
     onNotification: () => undefined,
@@ -152,6 +157,7 @@ test("launches the real app-server subprocess without caller credentials", async
       "GH_TOKEN", "CCHP_GH_TOKEN_FILE", "CCHP_BOT_PROVIDER_KEYS", "CCHP_BOT_PROVIDERS",
       "CCHP_PK_GPT_CCHP", "CCHP_APP_CLIENT_ID", "CCHP_APP_PRIVATE_KEY", "SEE_API_KEY",
       "HEROUI_AUTH_TOKEN", "UNRELATED_SECRET", "github-sentinel", "provider-sentinel",
+      "CCHP_PROCESS_RECORD_HMAC_KEY", processRecordHmacKey,
       "provider-config-sentinel", "provider-key-sentinel", "app-client-sentinel",
       "app-private-sentinel", "see-sentinel", "heroui-sentinel", "unrelated-sentinel",
     ]) expect(joined).not.toContain(forbidden)
@@ -230,6 +236,192 @@ test("escalates from INT to TERM to KILL for the whole detached process group", 
         return (error as NodeJS.ErrnoException).code === "ESRCH"
       }
     })
+  } finally {
+    await app.stop({ interruptGraceMs: 10, termGraceMs: 10, killGraceMs: 100 }).catch(() => undefined)
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test("refuses to signal an app-server process after its recorded identity drifts", async () => {
+  const root = mkdtempSync(join(tmpdir(), "cchp-app-server-identity-drift-"))
+  const processRecordPath = join(root, "app-server-process.json")
+  const app = new CodexAppServer({
+    codexBin: fakeCodex,
+    codexHome: root,
+    cwd: root,
+    env: { PATH: process.env.PATH ?? "", FAKE_CODEX_SCENARIO: "ignore_signals" },
+    onNotification: () => undefined,
+    processRecordPath,
+    processRecordHmacKey,
+    runId: "run-identity-drift",
+    requestTimeoutMs: 1_000,
+  })
+  const internals = app as unknown as { launchedIdentity?: ProcessIdentity }
+  try {
+    await app.start()
+    const pid = app.pid!
+    internals.launchedIdentity = { ...internals.launchedIdentity!, startTicks: "reused" }
+    await expect(app.stop({ interruptGraceMs: 10, termGraceMs: 10, killGraceMs: 10 }))
+      .rejects.toThrow("unproven Codex app-server process group")
+    expect(existsSync(processRecordPath)).toBeTrue()
+    expect(() => process.kill(pid, 0)).not.toThrow()
+    internals.launchedIdentity = processIdentity(pid)
+    await app.stop({ interruptGraceMs: 50, termGraceMs: 50, killGraceMs: 1_000 })
+    expect(existsSync(processRecordPath)).toBeFalse()
+  } finally {
+    if (app.pid) {
+      internals.launchedIdentity = processIdentity(app.pid)
+      await app.stop({ interruptGraceMs: 10, termGraceMs: 10, killGraceMs: 1_000 }).catch(() => undefined)
+    }
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test("keeps the process record when the app-server leader exits before group cleanup", async () => {
+  const root = mkdtempSync(join(tmpdir(), "cchp-app-server-leader-exit-"))
+  const processRecordPath = join(root, "app-server-process.json")
+  const descendantPath = join(root, "descendant.pid")
+  let descendantPid: number | undefined
+  const app = new CodexAppServer({
+    codexBin: fakeCodex,
+    codexHome: root,
+    cwd: root,
+    env: {
+      PATH: process.env.PATH ?? "",
+      FAKE_CODEX_SCENARIO: "leader_exits",
+      FAKE_CODEX_DESCENDANT_PID: descendantPath,
+    },
+    onNotification: () => undefined,
+    processRecordPath,
+    processRecordHmacKey,
+    runId: "run-leader-exit",
+    requestTimeoutMs: 1_000,
+  })
+  try {
+    await app.start().catch(() => undefined)
+    await eventually(() => existsSync(descendantPath))
+    await eventually(() => existsSync(processRecordPath))
+    descendantPid = Number(readFileSync(descendantPath, "utf8").trim())
+    await expect(app.stop({ interruptGraceMs: 25, termGraceMs: 25, killGraceMs: 1_000 }))
+      .rejects.toThrow("refusing to signal unproven Codex app-server process group")
+    expect(existsSync(processRecordPath)).toBeTrue()
+    expect(() => process.kill(descendantPid!, 0)).not.toThrow()
+  } finally {
+    if (app.pid) {
+      try { process.kill(-app.pid, "SIGKILL") } catch { /* the test group may already be gone */ }
+    }
+    await eventually(() => {
+      if (!descendantPid) return true
+      try {
+        process.kill(descendantPid, 0)
+        return false
+      } catch (error) {
+        return (error as NodeJS.ErrnoException).code === "ESRCH"
+      }
+    }).catch(() => undefined)
+    await app.stop({ interruptGraceMs: 10, termGraceMs: 10, killGraceMs: 100 }).catch(() => undefined)
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test("refuses a second app-server without replacing the first process record", async () => {
+  const root = mkdtempSync(join(tmpdir(), "cchp-app-server-exclusive-record-"))
+  const processRecordPath = join(root, "app-server-process.json")
+  const options = {
+    codexBin: fakeCodex,
+    codexHome: root,
+    cwd: root,
+    env: { PATH: process.env.PATH ?? "" },
+    onNotification: () => undefined,
+    processRecordPath,
+    processRecordHmacKey,
+    runId: "run-exclusive-record",
+    requestTimeoutMs: 1_000,
+  }
+  const first = new CodexAppServer(options)
+  const second = new CodexAppServer(options)
+  try {
+    await first.start()
+    const originalRecord = readFileSync(processRecordPath, "utf8")
+    await expect(second.start()).rejects.toThrow()
+    expect(readFileSync(processRecordPath, "utf8")).toBe(originalRecord)
+    expect(first.pid).toBeNumber()
+    expect(() => process.kill(first.pid!, 0)).not.toThrow()
+  } finally {
+    await second.stop({ interruptGraceMs: 10, termGraceMs: 10, killGraceMs: 100 }).catch(() => undefined)
+    await first.stop({ interruptGraceMs: 100, termGraceMs: 100, killGraceMs: 1_000 }).catch(() => undefined)
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test("retains a failed shutdown handle and process record so stop can be retried", async () => {
+  const root = mkdtempSync(join(tmpdir(), "cchp-app-server-retry-stop-"))
+  const processRecordPath = join(root, "app-server-process.json")
+  const app = new CodexAppServer({
+    codexBin: fakeCodex,
+    codexHome: root,
+    cwd: root,
+    env: { PATH: process.env.PATH ?? "" },
+    onNotification: () => undefined,
+    processRecordPath,
+    processRecordHmacKey,
+    runId: "run-retry-stop",
+    requestTimeoutMs: 1_000,
+  })
+  const internals = app as unknown as {
+    signalProcessGroup: (child: unknown, signal: NodeJS.Signals) => void
+    waitForProcessGroupExit: (pgid: number, timeoutMs: number) => Promise<boolean>
+  }
+  try {
+    await app.start()
+    const pid = app.pid!
+    const signalProcessGroup = internals.signalProcessGroup.bind(app)
+    const waitForProcessGroupExit = internals.waitForProcessGroupExit.bind(app)
+    internals.signalProcessGroup = () => undefined
+    internals.waitForProcessGroupExit = async () => false
+    await expect(app.stop({ interruptGraceMs: 1, termGraceMs: 1, killGraceMs: 1 })).rejects.toThrow("did not exit after SIGKILL")
+    expect(app.pid).toBe(pid)
+    expect(existsSync(processRecordPath)).toBeTrue()
+    await expect(app.start()).rejects.toThrow("already started")
+    internals.signalProcessGroup = signalProcessGroup
+    internals.waitForProcessGroupExit = waitForProcessGroupExit
+    await app.stop({ interruptGraceMs: 100, termGraceMs: 100, killGraceMs: 1_000 })
+    expect(app.pid).toBeUndefined()
+    expect(existsSync(processRecordPath)).toBeFalse()
+  } finally {
+    await app.stop({ interruptGraceMs: 10, termGraceMs: 10, killGraceMs: 1_000 }).catch(() => undefined)
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test("preserves a replacement process record swapped in before conditional removal", async () => {
+  const root = mkdtempSync(join(tmpdir(), "cchp-app-server-record-swap-"))
+  const processRecordPath = join(root, "app-server-process.json")
+  const originalRecordPath = join(root, "app-server-process.original.json")
+  const replacement = '{"schemaVersion":2,"runId":"new-owner","mac":"' + "cd".repeat(32) + '"}\n'
+  let swapped = false
+  const app = new CodexAppServer({
+    codexBin: fakeCodex,
+    codexHome: root,
+    cwd: root,
+    env: { PATH: process.env.PATH ?? "" },
+    onNotification: () => undefined,
+    processRecordPath,
+    processRecordHmacKey,
+    runId: "run-record-swap",
+    requestTimeoutMs: 1_000,
+    beforeProcessRecordRemoval: () => {
+      if (swapped) return
+      swapped = true
+      renameSync(processRecordPath, originalRecordPath)
+      writeFileSync(processRecordPath, replacement)
+    },
+  })
+  try {
+    await app.start()
+    await expect(app.stop({ interruptGraceMs: 100, termGraceMs: 100, killGraceMs: 1_000 })).rejects.toThrow("changed before removal")
+    expect(readFileSync(processRecordPath, "utf8")).toBe(replacement)
+    expect(existsSync(originalRecordPath)).toBeTrue()
   } finally {
     await app.stop({ interruptGraceMs: 10, termGraceMs: 10, killGraceMs: 100 }).catch(() => undefined)
     rmSync(root, { recursive: true, force: true })

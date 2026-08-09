@@ -4,7 +4,10 @@ import { autoApproveDisabled, submitReview } from "./review"
 
 function fakeOctokit() {
   const calls: any[] = []
-  const octokit = { rest: { pulls: { createReview: async (p: any) => { calls.push(p); return { data: {} } } } } } as unknown as GitHubClient
+  const octokit = { rest: { pulls: { createReview: async (p: any) => {
+    calls.push(p)
+    return { data: { id: 80, commit_id: p.commit_id, state: p.event === "APPROVE" ? "APPROVED" : p.event === "REQUEST_CHANGES" ? "CHANGES_REQUESTED" : "COMMENTED", html_url: "https://gh/review/80" } }
+  } } } } as unknown as GitHubClient
   return { octokit, calls }
 }
 

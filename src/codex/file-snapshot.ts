@@ -6,6 +6,7 @@ export interface FileSnapshot {
   path: string
   bytes: Buffer
   sha256: string
+  nlink: number
 }
 
 export interface FileSnapshotOptions {
@@ -53,9 +54,11 @@ export function openRegularFileSnapshot(path: string, options: FileSnapshotOptio
       before.ino !== after.ino ||
       before.size !== after.size ||
       before.mtimeMs !== after.mtimeMs ||
-      before.mode !== after.mode
+      before.ctimeMs !== after.ctimeMs ||
+      before.mode !== after.mode ||
+      before.nlink !== after.nlink
     ) throw new Error(`file changed while snapshotting: ${path}`)
-    return { path, bytes, sha256: createHash("sha256").update(bytes).digest("hex") }
+    return { path, bytes, sha256: createHash("sha256").update(bytes).digest("hex"), nlink: after.nlink }
   } finally {
     closeSync(descriptor)
     for (const parent of opened.parents.reverse()) closeSync(parent)

@@ -8,16 +8,23 @@ import { hideProcEnviron, startTokenRotation } from "../github/token-rotation"
 import { startGitHubBroker } from "../mcp/github-broker"
 import { createSeeServer } from "../mcp/see-server"
 import { reviewPublicationBundle } from "../mcp/server"
-import { publishFinalizedReview } from "../publish/finalized-review"
-import { progressMarkerKey, renderTerminalProgress, upsertSticky } from "../publish/sticky"
+import {
+  publishFinalizedReview,
+  writePreparedFinalizedReviewPublication,
+  type PublishFinalizedReviewInput,
+} from "../publish/finalized-review"
+import { progressMarkerKey, renderTerminalProgress, trustedBotLogin, upsertSticky, type StickyResult } from "../publish/sticky"
 import { finalizeReview, selectFinalizerProvenance } from "../review/finalize"
 import { TASKS, type Task } from "../types"
 import { parseCallerContract } from "./caller-contract"
 import { decideCollaborationMode, writeCapabilityDecision } from "./capability"
+import { initializeCollaborationAdmission, sealCollaborationAdmission } from "./collaboration-admission"
 import { prepareCodexHome } from "./config"
+import { redactRuntimeDiagnostic } from "./diagnostic-redaction"
 import { exitCodeFor } from "./exit"
 import { loadExtraInstructions, renderCallerOverlay, renderInstructionOverlay } from "./instructions"
 import { permissionForTask, type TaskPermissionProfile } from "./permissions"
+import { recordProgressPublication, tryRecordProgressPublication } from "./progress-publication"
 import { ProvenanceLedger } from "./provenance"
 import { parseProviders } from "./providers"
 import { startGitHttpProxy } from "./git-http-proxy"
@@ -40,23 +47,7 @@ interface ProgressTarget {
   marker: string
 }
 
-export function redactRuntimeDiagnostic(message: string, secrets: readonly string[]): string {
-  let redacted = message.replace(
-    /((?:["']?(?:authorization|proxy-authorization|x-api-key|api-key|x-goog-api-key|[a-z0-9_-]*(?:token|secret|private[-_]?key|api[-_]?key)[a-z0-9_-]*)["']?)\s*[:=]\s*)("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|(?:Bearer|Basic)\s+[^\s,;}\]]+|[^\s,;}\]]+)/gi,
-    (_match, prefix: string, value: string) => {
-      const quote = value[0] === '"' || value[0] === "'" ? value[0] : ""
-      return `${prefix}${quote}[REDACTED]${quote}`
-    },
-  )
-  for (const secret of secrets) {
-    if (secret.length < 4) continue
-    const escaped = JSON.stringify(secret).slice(1, -1)
-    for (const variant of new Set([secret, escaped])) {
-      redacted = redacted.split(variant).join("[REDACTED]")
-    }
-  }
-  return redacted
-}
+export { redactRuntimeDiagnostic } from "./diagnostic-redaction"
 
 export interface RuntimeDiagnosticBuffer {
   push(message: string): void
@@ -209,12 +200,13 @@ export function resolveRuntimeBrokerBindings(env: RuntimeEnv): RuntimeBrokerBind
   ].filter((entry): entry is ["pr" | "issue" | "discussion", number] => entry[1] != null)
   if (targets.length > 1) throw new Error("GitHub broker accepts exactly one trusted PR, issue, or discussion target")
   const [targetKind, target] = targets[0] ?? []
+  const workflowRunKey = env.CCHP_WORKFLOW_RUN_ID ? "CCHP_WORKFLOW_RUN_ID" : "BOT_RUN_ID"
   return {
     target,
     targetKind,
     trustedCommentId: optionalPositiveInt(env, "BOT_PLAN_COMMENT_ID"),
     roadmapProject: optionalPositiveInt(env, "BOT_ROADMAP_PROJECT"),
-    workflowRunId: env.BOT_TASK === "ci_fix" ? optionalPositiveInt(env, "BOT_RUN_ID") : undefined,
+    workflowRunId: env.BOT_TASK === "ci_fix" ? optionalPositiveInt(env, workflowRunKey) : undefined,
     releaseTag: env.BOT_RELEASE_TAG || undefined,
   }
 }
@@ -234,14 +226,79 @@ export function resolveRuntimePermission(env: RuntimeEnv = process.env): TaskPer
 export function createProgressPublisher(
   env: RuntimeEnv,
   octokit: GitHubClient,
-): ((body: string) => Promise<void>) | undefined {
+  fence?: ProgressPublicationFence,
+): ((body: string, signal?: AbortSignal) => Promise<void>) | undefined {
   const target = resolveProgressTarget(env)
   if (!target) return undefined
   // Progress is the sole supervisor-owned pre-finalization GitHub mutation. It
   // uses an already constructed Octokit client and never exposes its token to
   // Codex or MCP children.
-  return async (body) => {
-    await upsertSticky(octokit, target.repo, target.issueNumber, target.marker, body)
+  return async (body, signal) => {
+    const ticket = fence?.capture() ?? 0
+    const prNumber = optionalPositiveInt(env, "BOT_PR_NUMBER")
+    const targetGuard = async (): Promise<boolean> => {
+      if (fence && !fence.isCurrent(ticket)) return false
+      if (!prNumber) return true
+      const { owner, name } = splitRepo(target.repo)
+      const { data } = await octokit.rest.pulls.get({ owner, repo: name, pull_number: prNumber })
+      if (data.state !== "open" || data.merged || data.merged_at) return false
+      return !env.BOT_HEAD_SHA || data.head.sha === env.BOT_HEAD_SHA
+    }
+    let result: StickyResult | undefined
+    try {
+      result = fence
+        ? await upsertSticky(
+            octokit,
+            target.repo,
+            target.issueNumber,
+            target.marker,
+            body,
+            targetGuard,
+            signal,
+            trustedBotLogin(env),
+          )
+        : await upsertSticky(octokit, target.repo, target.issueNumber, target.marker, body, signal, trustedBotLogin(env))
+    } catch (error) {
+      if (fence && !fence.isCurrent(ticket)) {
+        await fence.repairIfStale(ticket)
+        return
+      }
+      tryRecordProgressPublication(env, target.marker, undefined, false, "failed")
+      throw error
+    }
+    if (fence && !fence.isCurrent(ticket)) {
+      await fence.repairIfStale(ticket)
+      return
+    }
+    if (!result) return
+    tryRecordProgressPublication(env, target.marker, result, false)
+  }
+}
+
+export interface ProgressPublicationFence {
+  capture(): number
+  isCurrent(ticket: number): boolean
+  seal(repair: () => Promise<void>): void
+  repairIfStale(ticket: number): Promise<void>
+}
+
+export function createProgressPublicationFence(): ProgressPublicationFence {
+  let generation = 0
+  let repair: (() => Promise<void>) | undefined
+  let repairTail = Promise.resolve()
+  return {
+    capture: () => generation,
+    isCurrent: (ticket) => ticket === generation && !repair,
+    seal(nextRepair) {
+      generation++
+      repair = nextRepair
+    },
+    async repairIfStale(ticket) {
+      if (ticket === generation || !repair) return
+      const task = repair
+      repairTail = repairTail.then(task, task)
+      await repairTail
+    },
   }
 }
 
@@ -269,6 +326,7 @@ export function createTerminalProgressPublisher(
   env: RuntimeEnv,
   octokit: GitHubClient,
   redact: (value: string) => string = (value) => value,
+  fence?: ProgressPublicationFence,
 ): ((result: Pick<SupervisorResult, "state" | "terminalReason" | "usage">) => Promise<boolean>) | undefined {
   const target = resolveProgressTarget(env)
   if (!target) return undefined
@@ -283,13 +341,32 @@ export function createTerminalProgressPublisher(
     return !env.BOT_HEAD_SHA || data.head.sha === env.BOT_HEAD_SHA
   }
   return async (result) => {
-    const published = await upsertSticky(octokit, target.repo, target.issueNumber, target.marker, renderTerminalProgress(task, {
+    const body = renderTerminalProgress(task, {
       state: result.state,
       runId,
       terminalReason: result.terminalReason ? redact(result.terminalReason) : undefined,
       consumedTokens: result.usage.consumed,
       tokenLimit: result.usage.limit,
-    }), guard)
+    })
+    const publishBody = async (): Promise<StickyResult | undefined> => upsertSticky(
+      octokit,
+      target.repo,
+      target.issueNumber,
+      target.marker,
+      body,
+      guard,
+      undefined,
+      trustedBotLogin(env),
+    )
+    fence?.seal(async () => { await publishBody() })
+    let published: StickyResult | undefined
+    try {
+      published = await publishBody()
+    } catch (error) {
+      tryRecordProgressPublication(env, target.marker, undefined, true, "failed")
+      throw error
+    }
+    recordProgressPublication(env, target.marker, published, true)
     return Boolean(published)
   }
 }
@@ -298,10 +375,11 @@ export function resolveRuntimeRecovery(
   env: RuntimeEnv,
   workdir: string,
   task: string,
+  executionMode: "native_v2" | "explicit_child",
   createRunId: () => string = () => `${Date.now()}`,
 ): { runId: string; resume?: SupervisorResumeState } {
   const requestedRunId = env.BOT_RUN_ID || undefined
-  const manifest = readRunManifest(workdir, { runId: requestedRunId, task })
+  const manifest = readRunManifest(workdir, { runId: requestedRunId, task, executionMode })
   if (manifest) {
     return { runId: manifest.runId, resume: resumeStateFromManifest(manifest) }
   }
@@ -318,14 +396,20 @@ export function composeRuntimePrompt(input: {
   instructionOverlay: string
   taskPrompt: string
   reviewProtocol?: string
+  reviewRequired?: boolean
 }): string {
-  const review = input.task === "pr_opened"
+  const reviewRequired = input.task === "pr_opened" && input.reviewRequired !== false
+  const review = reviewRequired
     ? `\n# Injected Ultra Code Review Protocol\n${input.reviewProtocol?.trim() || ""}\n# End Injected Ultra Code Review Protocol\n`
     : ""
-  if (input.task === "pr_opened" && !input.reviewProtocol?.trim()) {
+  if (reviewRequired && !input.reviewProtocol?.trim()) {
     throw new Error("pr_opened requires the Codex Ultra Code Review Protocol")
   }
   return `${review}${input.instructionOverlay}\n${input.taskPrompt}`
+}
+
+export function requiresReviewFinalization(env: Record<string, string | undefined>): boolean {
+  return env.BOT_TASK === "pr_opened" && env.BOT_SKIP_PR_INSPECT !== "1"
 }
 
 export function configureGitRemote(repoDir: string, repoUrl: string): void {
@@ -358,6 +442,7 @@ export async function main(): Promise<number> {
   let cleanupErrors: RuntimeCleanupError[] = []
   let lease: RunLease | undefined
   let publishTerminalProgress: ReturnType<typeof createTerminalProgressPublisher>
+  const progressPublicationFence = createProgressPublicationFence()
   const diagnosticSecrets = new Set<string>([
     process.env.GH_TOKEN,
     process.env.CCHP_GH_TOKEN_FILE,
@@ -383,13 +468,12 @@ export async function main(): Promise<number> {
     if (seeApiKey) diagnosticSecrets.add(seeApiKey)
     delete process.env.SEE_API_KEY
     delete process.env.CCHP_SEE_API_KEY_STDIN
-    const seeCliBin = join(process.env.HOME ?? "", ".local", "lib", "see-cli", "see")
+    const seeCliBin = process.env.SEE_CLI_BIN ?? join(workdir, "ctx", "tools", "see", "see")
+    const seeCliSha256 = process.env.SEE_CLI_SHA256
     lease = acquireRunLease(workdir, process.env.BOT_RUN_ID)
     const contract = parseCallerContract(process.env)
     const permission = resolveRuntimePermission(process.env)
-    const recovery = resolveRuntimeRecovery(process.env, workdir, permission.task)
-    const runId = recovery.runId
-    process.env.BOT_RUN_ID = runId
+    const reviewRequired = requiresReviewFinalization(process.env)
     const providerSet = parseProviders({
       providerJson: contract.providerJson,
       providerKeysJson: contract.providerKeysJson,
@@ -404,18 +488,29 @@ export async function main(): Promise<number> {
     // child and every MCP child are started after these variables are removed.
     delete process.env.CCHP_BOT_PROVIDER_KEYS
     delete process.env.CCHP_BOT_PROVIDERS
+    const decision = decideCollaborationMode({ env: process.env })
+    const recovery = resolveRuntimeRecovery(process.env, workdir, permission.task, decision.executionMode)
+    const runId = recovery.runId
+    process.env.BOT_RUN_ID = runId
+    const collaborationAdmission = {
+      runId,
+      writerId: lease.fence.writerId,
+      generation: lease.fence.generation,
+    }
+    initializeCollaborationAdmission(workdir, collaborationAdmission)
+    process.env.CCHP_RUN_WRITER_ID = collaborationAdmission.writerId
+    process.env.CCHP_RUN_WRITER_GENERATION = String(collaborationAdmission.generation)
     bridge = startProviderBridge(providerSet, {
       onUsage: async (usage) => { await supervisor?.recordProviderUsage(usage) },
       onBeforeRequest: async (request) => supervisor
         ? supervisor.authorizeProviderRequest(request)
         : { allowed: true },
-      onRequestFinished: async (reservationId, outcome, reason) => {
-        if (outcome === "released") await supervisor?.releaseProviderReservation(reservationId, reason)
+      onRequestFinished: async (reservation, outcome, reason) => {
+        if (outcome === "released") await supervisor?.releaseProviderReservation(reservation, reason)
       },
     })
     diagnosticSecrets.add(bridge.token)
     process.env[bridgeEnv] = bridge.token
-    const decision = decideCollaborationMode({ env: process.env })
     writeCapabilityDecision(join(workdir, "ctx", "codex", "capability.json"), decision)
     const repo = required("BOT_REPO")
     tokenRotation = await startTokenRotation({
@@ -440,12 +535,13 @@ export async function main(): Promise<number> {
     const herouiAuthToken = process.env.HEROUI_AUTH_TOKEN
     const finalizerMarker = process.env.BOT_REVIEW_FINALIZED_MARKER || join(workdir, "ctx", "review-finalized.json")
     const brokerBindings = resolveRuntimeBrokerBindings(process.env)
-    const seeUpload = process.env.BOT_HAVE_SEE === "1" && seeApiKey && existsSync(seeCliBin)
+    const seeUpload = process.env.BOT_HAVE_SEE === "1" && seeApiKey && /^[a-f0-9]{64}$/.test(seeCliSha256 ?? "") && existsSync(seeCliBin)
       ? createSeeServer({
           repoDir,
           botWorkdir: workdir,
           apiKey: seeApiKey,
           seeBin: seeCliBin,
+          seeSha256: seeCliSha256,
           forbiddenValues: () => [...diagnosticSecrets],
         }).uploadFile
       : undefined
@@ -474,11 +570,12 @@ export async function main(): Promise<number> {
     process.env.CCHP_GITHUB_BROKER_TOKEN = broker.token
     diagnosticSecrets.add(broker.token)
     process.env.CCHP_GITHUB_BROKER_FINALIZER = finalizerMarker
-    const publishProgress = createProgressPublisher(process.env, githubClient)
+    const publishProgress = createProgressPublisher(process.env, githubClient, progressPublicationFence)
     publishTerminalProgress = createTerminalProgressPublisher(
       process.env,
       githubClient,
       (value) => redactRuntimeDiagnostic(value, [...diagnosticSecrets]),
+      progressPublicationFence,
     )
     delete process.env.GH_TOKEN
     delete process.env.CCHP_GH_TOKEN_FILE
@@ -494,6 +591,7 @@ export async function main(): Promise<number> {
       instructionOverlay: renderInstructionOverlay(extra),
       taskPrompt: existsSync(promptPath) ? readFileSync(promptPath, "utf8") : "",
       reviewProtocol: existsSync(reviewProtocolPath) ? readFileSync(reviewProtocolPath, "utf8") : undefined,
+      reviewRequired,
     })
     const prepared = prepareCodexHome({
       botWorkdir: workdir,
@@ -524,24 +622,29 @@ export async function main(): Promise<number> {
       contextWindow: providerSet.main.context,
       totalTokenBudget: Number(process.env.CCHP_TOKEN_BUDGET || 2_000_000),
       tokenAdmissionFraction: 0.85,
-      maxResponsesPerTurn: 16,
-      drainUsage: () => bridge!.drain(),
+      sealProviderAndDrain: () => bridge!.sealAndDrain(),
+      cancelProviderThread: (threadId) => bridge!.cancelThread(threadId),
+      sealExplicitAdmissions: decision.executionMode === "explicit_child"
+        ? () => sealCollaborationAdmission(workdir, collaborationAdmission)
+        : undefined,
       approvalPolicy: permission.approvalPolicy,
       sandboxMode: permission.sandboxMode,
       publishProgress,
       codexVersion: decision.codexVersion,
       codexV2Gate: decision.codexV2Gate,
       executionMode: decision.executionMode,
+      reviewRequired,
       capabilityReason: decision.reason,
       assertWriterOwnership: () => lease!.assertOwned(),
       processRecordPath: process.env.CCHP_CODEX_PID_FILE,
+      processRecordHmacKey: process.env.CCHP_PROCESS_RECORD_HMAC_KEY,
       writerFence: lease!.fence,
       resume: recovery.resume,
       redactDiagnostic: (value) => redactRuntimeDiagnostic(value, [...diagnosticSecrets]),
       onAppServerStderr: (line) => {
         appServerDiagnostics.push(line)
       },
-      finalizer: process.env.BOT_TASK === "pr_opened" ? async (context) => {
+      finalizer: reviewRequired ? async (context) => {
         const provenance = new ProvenanceLedger(join(workdir, "ctx", "codex", "provenance.jsonl"), context.runId)
         const evidenceProvenanceSha256 = selectFinalizerProvenance(
           finalizerMarker,
@@ -561,7 +664,7 @@ export async function main(): Promise<number> {
           },
         )
         const bundle = reviewPublicationBundle(process.env, marker)
-        await publishFinalizedReview({
+        const publicationInput: PublishFinalizedReviewInput = {
           octokit: githubClient,
           repository: repo,
           prNumber: marker.pr_number,
@@ -571,7 +674,24 @@ export async function main(): Promise<number> {
           statePath: join(workdir, "ctx", "codex", "review-publication.json"),
           env: process.env,
           forbiddenValues: () => [...diagnosticSecrets],
-        })
+          onSummaryMutationStarting: (repair) => {
+            progressPublicationFence.seal(repair)
+          },
+          onSummaryPublished: (result) => recordProgressPublication(
+            process.env,
+            progressMarkerKey("pr_opened"),
+            result,
+            true,
+          ),
+        }
+        if (process.env.CCHP_DEFER_SUCCESS_PUBLICATION === "true") {
+          writePreparedFinalizedReviewPublication(
+            join(workdir, "ctx", "codex", "prepared-review-publication.json"),
+            publicationInput,
+          )
+        } else {
+          await publishFinalizedReview(publicationInput)
+        }
         return {
           ...marker,
           preterminal_provenance_sha256: context.preterminalProvenanceSha256,
@@ -580,7 +700,8 @@ export async function main(): Promise<number> {
       } : undefined,
     })
     const result = await supervisor.run()
-    if (!(permission.task === "pr_opened" && result.state === "SUCCEEDED") && publishTerminalProgress) {
+    const deferSuccessfulPublication = process.env.CCHP_DEFER_SUCCESS_PUBLICATION === "true" && result.state === "SUCCEEDED"
+    if (!deferSuccessfulPublication && !(reviewRequired && result.state === "SUCCEEDED") && publishTerminalProgress) {
       try {
         await publishTerminalProgress(result)
       } catch (error) {

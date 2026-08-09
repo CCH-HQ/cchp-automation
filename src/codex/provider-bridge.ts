@@ -1,10 +1,13 @@
 import { randomBytes, timingSafeEqual } from "node:crypto"
 import type { ParsedProvider, ProviderSet } from "./providers"
+import type { UsageReservationRef } from "./usage"
 
 export interface ProviderBridge {
   baseUrl: string
   token: string
   drain(): Promise<void>
+  cancelThread(threadId: string, reason?: string): Promise<number>
+  sealAndDrain(): Promise<void>
   close(): Promise<void>
 }
 
@@ -13,7 +16,7 @@ export interface ProviderBridgeOptions {
   hostname?: string
   onUsage?(usage: ProviderBridgeUsage): void | Promise<void>
   onBeforeRequest?(request: ProviderBridgeRequest): ProviderBridgeAdmission | Promise<ProviderBridgeAdmission>
-  onRequestFinished?(reservationId: string, outcome: "usage" | "released", reason?: string): void | Promise<void>
+  onRequestFinished?(reservation: UsageReservationRef, outcome: "usage" | "released", reason?: string): void | Promise<void>
 }
 
 export interface ProviderBridgeRequest {
@@ -22,12 +25,13 @@ export interface ProviderBridgeRequest {
   threadId?: string
   turnId?: string
   contextWindow?: number
+  estimatedTokens?: number
 }
 
 export interface ProviderBridgeAdmission {
   allowed: boolean
   reason?: string
-  reservationId?: string
+  reservation?: UsageReservationRef
 }
 
 export interface ProviderBridgeUsage {
@@ -45,7 +49,7 @@ export interface ProviderBridgeUsage {
   reasoningOutputTokens: number
   totalTokens: number
   contextWindow?: number
-  reservationId?: string
+  reservation?: UsageReservationRef
 }
 
 function authorized(request: Request, token: string): boolean {
@@ -80,6 +84,24 @@ function callerModelConfig(provider: ParsedProvider, body: Record<string, unknow
   const configured = provider.models[modelKey]
   if (!configured) throw new Error(`unknown model ${provider.id}/${modelKey}`)
   return { modelKey, configured, upstreamId: configured.upstream_id ?? modelKey }
+}
+
+function positiveInteger(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0 ? value : undefined
+}
+
+/** Reserve against the request sent upstream, not the model's full capacity. */
+export function estimateProviderRequestTokens(body: JsonRecord, contextWindow?: number): number {
+  const output = positiveInteger(body.max_output_tokens) ?? positiveInteger(body.max_tokens) ?? 0
+  const promptBody = { ...body }
+  delete promptBody.max_output_tokens
+  delete promptBody.max_tokens
+  delete promptBody.stream
+  const promptBytes = Buffer.byteLength(JSON.stringify(promptBody), "utf8")
+  const promptTokens = Math.max(1, Math.ceil(promptBytes / 3))
+  const estimate = promptTokens + output
+  const contextLimit = positiveInteger(contextWindow)
+  return contextLimit ? Math.min(estimate, contextLimit) : estimate
 }
 
 type JsonRecord = Record<string, unknown>
@@ -675,30 +697,58 @@ function chatUsage(raw: unknown): ResponsesUsage | undefined {
 
 async function consumeSse(
   reader: ReadableStreamDefaultReader<Uint8Array>,
-  consume: (event: string | undefined, data: string) => void,
+  consume: (event: string | undefined, data: string) => boolean | void | Promise<boolean | void>,
+  forward?: (chunk: Uint8Array) => void | Promise<void>,
+  waitForDemand?: () => void | Promise<void>,
 ): Promise<void> {
   const decoder = new TextDecoder()
   let buffer = ""
-  const parse = (block: string) => {
+  const parse = async (block: string): Promise<boolean> => {
     let event: string | undefined
     const data: string[] = []
     for (const line of block.split(/\r?\n/)) {
       if (line.startsWith("event:")) event = line.slice(6).trim()
       else if (line.startsWith("data:")) data.push(line.slice(5).trimStart())
     }
-    if (data.length) consume(event, data.join("\n"))
+    return data.length ? (await consume(event, data.join("\n"))) !== false : true
   }
   while (true) {
+    await waitForDemand?.()
     const { value, done } = await reader.read()
+    if (value) await forward?.(value)
     buffer += decoder.decode(value, { stream: !done })
     let boundary: RegExpExecArray | null
     while ((boundary = /\r?\n\r?\n/.exec(buffer))) {
-      parse(buffer.slice(0, boundary.index))
+      await waitForDemand?.()
+      if (!(await parse(buffer.slice(0, boundary.index)))) return
       buffer = buffer.slice(boundary.index + boundary[0].length)
     }
     if (done) break
   }
-  if (buffer.trim()) parse(buffer)
+  if (buffer.trim()) {
+    await waitForDemand?.()
+    await parse(buffer)
+  }
+}
+
+function streamDemandGate() {
+  let cancelled = false
+  let resume: (() => void) | undefined
+  return {
+    async wait(controller: ReadableStreamDefaultController<Uint8Array>): Promise<void> {
+      while (!cancelled && controller.desiredSize !== null && controller.desiredSize <= 0) {
+        await new Promise<void>((resolve) => { resume = resolve })
+        resume = undefined
+      }
+    },
+    pull(): void {
+      resume?.()
+    },
+    cancel(): void {
+      cancelled = true
+      resume?.()
+    },
+  }
 }
 
 function sseEvent(value: JsonRecord): Uint8Array {
@@ -715,26 +765,29 @@ function openAiResponsesStream(upstream: Response, model: string): Response {
   let closed = false
   let terminal = false
   let doneEmitted = false
+  const demand = streamDemandGate()
   const stopReading = Symbol("openai-responses-terminal")
   const stream = new ReadableStream<Uint8Array>({
-    async start(controller) {
+    start(controller) {
+      void (async () => {
       const close = () => {
         if (closed) return
         closed = true
         controller.close()
       }
-      const enqueue = (value: Uint8Array) => {
+      const enqueue = async (value: Uint8Array) => {
+        await demand.wait(controller)
         if (!closed) controller.enqueue(value)
       }
-      const emitDone = () => {
+      const emitDone = async () => {
         if (doneEmitted) return
         doneEmitted = true
-        enqueue(encoder.encode("data: [DONE]\n\n"))
+        await enqueue(encoder.encode("data: [DONE]\n\n"))
       }
-      const fail = (error: unknown) => {
+      const fail = async (error: unknown) => {
         if (terminal) return
         terminal = true
-        enqueue(sseEvent({
+        await enqueue(sseEvent({
           type: "response.failed",
           response: {
             id: responseId,
@@ -748,7 +801,7 @@ function openAiResponsesStream(upstream: Response, model: string): Response {
         }))
       }
       try {
-        await consumeSse(upstreamReader, (event, data) => {
+        await consumeSse(upstreamReader, async (event, data) => {
           if (data === "[DONE]") {
             throw stopReading
           }
@@ -768,28 +821,33 @@ function openAiResponsesStream(upstream: Response, model: string): Response {
             value.type = eventName
             payloadType = eventName
           }
-          enqueue(encoder.encode(`${eventName ? `event: ${eventName}\n` : ""}data: ${JSON.stringify(value)}\n\n`))
+          await enqueue(encoder.encode(`${eventName ? `event: ${eventName}\n` : ""}data: ${JSON.stringify(value)}\n\n`))
           if (payloadType && ["response.completed", "response.failed", "response.incomplete", "response.cancelled"].includes(payloadType)) {
             terminal = true
             throw stopReading
           }
-        })
-        if (!terminal) fail(new Error("upstream Responses stream closed before a terminal response event"))
-        emitDone()
+        }, undefined, () => demand.wait(controller))
+        if (!terminal) await fail(new Error("upstream Responses stream closed before a terminal response event"))
+        await emitDone()
         close()
       } catch (error) {
         if (closed) return
-        if (error !== stopReading) fail(error)
-        else if (!terminal) fail(new Error("upstream Responses stream ended before a terminal response event"))
-        emitDone()
+        if (error !== stopReading) await fail(error)
+        else if (!terminal) await fail(new Error("upstream Responses stream ended before a terminal response event"))
+        await emitDone()
         close()
         void upstreamReader.cancel().catch(() => undefined)
       }
+      })()
+    },
+    pull() {
+      demand.pull()
     },
     cancel() {
       // The consumer owns cancellation; prevent a racing reader failure from
       // enqueueing after the stream has already been cancelled.
       closed = true
+      demand.cancel()
       void upstreamReader.cancel().catch(() => undefined)
     },
   })
@@ -807,20 +865,31 @@ function chatResponsesStream(upstream: Response, model: string): Response {
   headers.set("content-type", "text/event-stream; charset=utf-8")
   const responseId = randomId("resp")
   const messageId = randomId("msg")
+  let closed = false
+  const demand = streamDemandGate()
   const stream = new ReadableStream<Uint8Array>({
-    async start(controller) {
-      const emit = (value: JsonRecord) => controller.enqueue(sseEvent(value))
+    start(controller) {
+      void (async () => {
+      const emit = async (value: JsonRecord) => {
+        await demand.wait(controller)
+        if (!closed) controller.enqueue(sseEvent(value))
+      }
+      const close = () => {
+        if (closed) return
+        closed = true
+        controller.close()
+      }
       let messageStarted = false
       let messageText = ""
       let usage = zeroUsage()
       let terminal = false
       const tools = new Map<number, { callId: string; name: string; arguments: string }>()
-      emit({ type: "response.created", response: { id: responseId, model, status: "in_progress" } })
+      await emit({ type: "response.created", response: { id: responseId, model, status: "in_progress" } })
       try {
-        await consumeSse(upstreamReader, (_event, data) => {
+        await consumeSse(upstreamReader, async (_event, data) => {
           if (data === "[DONE]") {
             terminal = true
-            return
+            return false
           }
           const chunk = JSON.parse(data) as JsonRecord
           const nextUsage = chatUsage(chunk.usage)
@@ -835,14 +904,14 @@ function chatResponsesStream(upstream: Response, model: string): Response {
             if (typeof record.content === "string" && record.content) {
               if (!messageStarted) {
                 messageStarted = true
-                emit({
+                await emit({
                   type: "response.output_item.added",
                   output_index: 0,
                   item: { id: messageId, type: "message", role: "assistant", content: [] },
                 })
               }
               messageText += record.content
-              emit({
+              await emit({
                 type: "response.output_text.delta",
                 item_id: messageId,
                 output_index: 0,
@@ -866,10 +935,11 @@ function chatResponsesStream(upstream: Response, model: string): Response {
               }
             }
           }
-        })
+        }, undefined, () => demand.wait(controller))
         if (!terminal) throw new Error("upstream Chat stream closed before [DONE]")
+        void upstreamReader.cancel().catch(() => undefined)
         if (messageStarted) {
-          emit({
+          await emit({
             type: "response.output_item.done",
             output_index: 0,
             item: {
@@ -883,19 +953,21 @@ function chatResponsesStream(upstream: Response, model: string): Response {
         }
         for (const [index, tool] of [...tools.entries()].sort(([a], [b]) => a - b)) {
           if (!tool.callId || !tool.name) throw new Error(`incomplete upstream tool call at index ${index}`)
-          emit({
+          await emit({
             type: "response.output_item.done",
             output_index: (messageStarted ? 1 : 0) + index,
             item: functionCallItem(tool.callId, tool.name, tool.arguments),
           })
         }
-        emit({
+        await emit({
           type: "response.completed",
           response: { id: responseId, model, status: "completed", usage },
         })
-        controller.close()
+        close()
       } catch (error) {
-        emit({
+        if (closed) return
+        void upstreamReader.cancel(error).catch(() => undefined)
+        await emit({
           type: "response.failed",
           response: {
             id: responseId,
@@ -904,10 +976,16 @@ function chatResponsesStream(upstream: Response, model: string): Response {
             error: { code: "upstream_stream_error", message: (error as Error).message },
           },
         })
-        controller.close()
+        close()
       }
+      })()
+    },
+    pull() {
+      demand.pull()
     },
     cancel() {
+      closed = true
+      demand.cancel()
       void upstreamReader.cancel().catch(() => undefined)
     },
   })
@@ -921,9 +999,20 @@ function anthropicResponsesStream(upstream: Response, model: string): Response {
   headers.set("content-type", "text/event-stream; charset=utf-8")
   const responseId = randomId("resp")
   const messageId = randomId("msg")
+  let closed = false
+  const demand = streamDemandGate()
   const stream = new ReadableStream<Uint8Array>({
-    async start(controller) {
-      const emit = (value: JsonRecord) => controller.enqueue(sseEvent(value))
+    start(controller) {
+      void (async () => {
+      const emit = async (value: JsonRecord) => {
+        await demand.wait(controller)
+        if (!closed) controller.enqueue(sseEvent(value))
+      }
+      const close = () => {
+        if (closed) return
+        closed = true
+        controller.close()
+      }
       let messageStarted = false
       let messageText = ""
       let reasoning = ""
@@ -933,9 +1022,9 @@ function anthropicResponsesStream(upstream: Response, model: string): Response {
       let cacheWriteTokens = 0
       let outputTokens = 0
       const tools = new Map<number, { callId: string; name: string; arguments: string }>()
-      emit({ type: "response.created", response: { id: responseId, model, status: "in_progress" } })
+      await emit({ type: "response.created", response: { id: responseId, model, status: "in_progress" } })
       try {
-        await consumeSse(upstreamReader, (event, data) => {
+        await consumeSse(upstreamReader, async (event, data) => {
           const chunk = JSON.parse(data) as JsonRecord
           const kind = typeof chunk.type === "string" ? chunk.type : event
           switch (kind) {
@@ -968,7 +1057,7 @@ function anthropicResponsesStream(upstream: Response, model: string): Response {
               if (block.type === "text") {
                 if (!messageStarted) {
                   messageStarted = true
-                  emit({
+                  await emit({
                     type: "response.output_item.added",
                     output_index: 0,
                     item: { id: messageId, type: "message", role: "assistant", content: [] },
@@ -976,7 +1065,7 @@ function anthropicResponsesStream(upstream: Response, model: string): Response {
                 }
                 if (typeof block.text === "string" && block.text) {
                   messageText += block.text
-                  emit({
+                  await emit({
                     type: "response.output_text.delta",
                     item_id: messageId,
                     output_index: 0,
@@ -1007,14 +1096,14 @@ function anthropicResponsesStream(upstream: Response, model: string): Response {
               if (delta.type === "text_delta" && typeof delta.text === "string") {
                 if (!messageStarted) {
                   messageStarted = true
-                  emit({
+                  await emit({
                     type: "response.output_item.added",
                     output_index: 0,
                     item: { id: messageId, type: "message", role: "assistant", content: [] },
                   })
                 }
                 messageText += delta.text
-                emit({
+                await emit({
                   type: "response.output_text.delta",
                   item_id: messageId,
                   output_index: 0,
@@ -1047,14 +1136,15 @@ function anthropicResponsesStream(upstream: Response, model: string): Response {
             }
             case "message_stop":
               terminal = true
-              break
+              return false
             case "error":
               throw new Error(contentAsText(chunk.error ?? chunk))
           }
-        })
+        }, undefined, () => demand.wait(controller))
         if (!terminal) throw new Error("upstream Anthropic stream closed before message_stop")
+        void upstreamReader.cancel().catch(() => undefined)
         if (messageStarted) {
-          emit({
+          await emit({
             type: "response.output_item.done",
             output_index: 0,
             item: {
@@ -1067,7 +1157,7 @@ function anthropicResponsesStream(upstream: Response, model: string): Response {
           })
         }
         if (reasoning) {
-          emit({
+          await emit({
             type: "response.output_item.done",
             output_index: messageStarted ? 1 : 0,
             item: {
@@ -1083,7 +1173,7 @@ function anthropicResponsesStream(upstream: Response, model: string): Response {
           // A valid Anthropic tool_use input is always a JSON object. Parsing here
           // makes a truncated stream fail before Codex can execute a malformed call.
           parsedArguments(tool.arguments || "{}", `tool ${tool.callId} arguments`)
-          emit({
+          await emit({
             type: "response.output_item.done",
             output_index: outputIndex++,
             item: functionCallItem(tool.callId, tool.name, tool.arguments || "{}"),
@@ -1100,13 +1190,15 @@ function anthropicResponsesStream(upstream: Response, model: string): Response {
           output_tokens_details: { reasoning_tokens: 0 },
           total_tokens: billedInput + outputTokens,
         }
-        emit({
+        await emit({
           type: "response.completed",
           response: { id: responseId, model, status: "completed", usage },
         })
-        controller.close()
+        close()
       } catch (error) {
-        emit({
+        if (closed) return
+        void upstreamReader.cancel(error).catch(() => undefined)
+        await emit({
           type: "response.failed",
           response: {
             id: responseId,
@@ -1115,10 +1207,16 @@ function anthropicResponsesStream(upstream: Response, model: string): Response {
             error: { code: "upstream_stream_error", message: (error as Error).message },
           },
         })
-        controller.close()
+        close()
       }
+      })()
+    },
+    pull() {
+      demand.pull()
     },
     cancel() {
+      closed = true
+      demand.cancel()
       void upstreamReader.cancel().catch(() => undefined)
     },
   })
@@ -1248,7 +1346,7 @@ function anthropicResponsesJson(body: JsonRecord, model: string): JsonRecord {
   }
 }
 
-async function passthroughResponse(
+export async function passthroughResponse(
   provider: ParsedProvider,
   upstream: Response,
   model: string,
@@ -1303,11 +1401,16 @@ function observedUsage(
   provider: ParsedProvider,
   model: string,
   attribution?: { threadId?: string; turnId?: string },
-  reservationId?: string,
+  reservation?: UsageReservationRef,
 ): ProviderBridgeUsage | undefined {
   if (!payload || typeof payload !== "object" || Array.isArray(payload)) return undefined
   const envelope = payload as JsonRecord
-  const response = envelope.type === "response.completed"
+  const response = typeof envelope.type === "string" && [
+    "response.completed",
+    "response.failed",
+    "response.incomplete",
+    "response.cancelled",
+  ].includes(envelope.type)
     ? envelope.response && typeof envelope.response === "object" && !Array.isArray(envelope.response)
       ? envelope.response as JsonRecord
       : {}
@@ -1332,7 +1435,7 @@ function observedUsage(
     responseId,
     ...(attribution?.threadId ? { threadId: attribution.threadId } : {}),
     ...(attribution?.turnId ? { turnId: attribution.turnId } : {}),
-    ...(reservationId ? { reservationId } : {}),
+    ...(reservation ? { reservation } : {}),
     inputTokens,
     contextInputTokens: inputTokens,
     billableInputTokens: inputTokens,
@@ -1345,18 +1448,20 @@ function observedUsage(
   }
 }
 
-function observeResponseUsage(
+export function observeResponseUsage(
   response: Response,
   provider: ParsedProvider,
   model: string,
   attribution: { threadId?: string; turnId?: string } | undefined,
-  reservationId: string | undefined,
+  reservation: UsageReservationRef | undefined,
   onUsage?: ProviderBridgeOptions["onUsage"],
   onRequestFinished?: ProviderBridgeOptions["onRequestFinished"],
   track?: (task: Promise<void>) => void,
+  registerActiveStream?: (threadId: string | undefined, cancel: (reason: string) => Promise<void>) => () => void,
+  cancelUpstream?: (reason: unknown) => void,
 ): Response {
   const release = async (reason: string) => {
-    if (reservationId && onRequestFinished) await onRequestFinished(reservationId, "released", reason)
+    if (reservation && onRequestFinished) await onRequestFinished(reservation, "released", reason)
   }
   const scheduleRelease = (reason: string) => {
     const task = release(reason)
@@ -1373,26 +1478,82 @@ function observeResponseUsage(
   }
   const contentType = response.headers.get("content-type") ?? ""
   if (contentType.includes("text/event-stream")) {
-    const [client, observer] = response.body.tee()
-    const task = (async () => {
-      let terminal: ProviderBridgeUsage | undefined
+    const reader = response.body.getReader()
+    let terminal: ProviderBridgeUsage | undefined
+    let cancelled = false
+    let settled = false
+    let resumeDemand: (() => void) | undefined
+    let resolveTask!: () => void
+    let rejectTask!: (error: unknown) => void
+    const task = new Promise<void>((resolve, reject) => {
+      resolveTask = resolve
+      rejectTask = reject
+    })
+    const settle = async (reason: string, error?: unknown) => {
+      if (settled) return
+      settled = true
       try {
-        await consumeSse(observer.getReader(), (_event, data) => {
-          if (data === "[DONE]") return
-          const usage = observedUsage(JSON.parse(data), provider, model, attribution, reservationId)
-          if (usage) terminal = usage
-        })
         if (terminal) {
           await onUsage(terminal)
-          if (reservationId && onRequestFinished) await onRequestFinished(reservationId, "usage", "usage_observed")
+          if (reservation && onRequestFinished) await onRequestFinished(reservation, "usage", "usage_observed")
         } else {
-          await release("stream_completed_without_usage")
+          await release(reason)
         }
-      } catch (error) {
-        await release("stream_usage_observer_error")
-        throw error
+        if (error === undefined) resolveTask()
+        else rejectTask(error)
+      } catch (observerError) {
+        if (terminal) {
+          try { await release("stream_usage_observer_error") } catch {}
+        }
+        rejectTask(observerError)
       }
-    })()
+    }
+    const cancelStream = async (reason: string, readerReason: unknown = reason) => {
+      if (cancelled) return
+      cancelled = true
+      resumeDemand?.()
+      resumeDemand = undefined
+      cancelUpstream?.(readerReason)
+      try {
+        await reader.cancel(readerReason)
+      } finally {
+        await settle(reason)
+      }
+    }
+    const client = new ReadableStream<Uint8Array>({
+      start(controller) {
+        void (async () => {
+          try {
+            await consumeSse(reader, (_event, data) => {
+              if (data === "[DONE]") return
+              const usage = observedUsage(JSON.parse(data), provider, model, attribution, reservation)
+              if (usage) terminal = usage
+            }, async (chunk) => {
+              while (!cancelled && controller.desiredSize !== null && controller.desiredSize <= 0) {
+                await new Promise<void>((resolve) => { resumeDemand = resolve })
+                resumeDemand = undefined
+              }
+              if (!cancelled) controller.enqueue(chunk)
+            })
+            if (cancelled) return
+            controller.close()
+            await settle("stream_completed_without_usage")
+          } catch (error) {
+            if (cancelled) return
+            controller.error(error)
+            await settle("stream_usage_observer_error", error)
+          }
+        })()
+      },
+      pull() {
+        resumeDemand?.()
+      },
+      async cancel(reason) {
+        await cancelStream("stream_cancelled", reason)
+      },
+    })
+    const unregister = registerActiveStream?.(attribution?.threadId, (reason) => cancelStream(reason))
+    if (unregister) void task.finally(unregister).catch(() => undefined)
     if (track) track(task)
     else void task.catch(() => undefined)
     return new Response(client, {
@@ -1401,13 +1562,17 @@ function observeResponseUsage(
       headers: response.headers,
     })
   }
+  if (!/json/i.test(contentType)) {
+    scheduleRelease("non_json_response")
+    return response
+  }
   const copy = response.clone()
   const task = (async () => {
     try {
-      const usage = observedUsage(await copy.json(), provider, model, attribution, reservationId)
+      const usage = observedUsage(await copy.json(), provider, model, attribution, reservation)
       if (usage) {
         await onUsage(usage)
-        if (reservationId && onRequestFinished) await onRequestFinished(reservationId, "usage", "usage_observed")
+        if (reservation && onRequestFinished) await onRequestFinished(reservation, "usage", "usage_observed")
       } else {
         await release("response_completed_without_usage")
       }
@@ -1430,13 +1595,14 @@ async function handleProviderRequest(
   onBeforeRequest?: ProviderBridgeOptions["onBeforeRequest"],
   onRequestFinished?: ProviderBridgeOptions["onRequestFinished"],
   trackUsage?: (task: Promise<void>) => void,
+  registerActiveStream?: (threadId: string | undefined, cancel: (reason: string) => Promise<void>) => () => void,
 ): Promise<Response> {
   let body: Record<string, unknown>
   let callerModelKey = ""
   let responseModelKey = ""
   let effectiveProvider = provider
   let attribution: { threadId?: string; turnId?: string } | undefined
-  let reservationId: string | undefined
+  let reservation: UsageReservationRef | undefined
   try {
     const raw = await request.json()
     if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error("body must be an object")
@@ -1470,11 +1636,12 @@ async function handleProviderRequest(
         model: callerModelKey,
         ...attribution,
         ...(configured?.context ? { contextWindow: configured.context } : {}),
+        estimatedTokens: estimateProviderRequestTokens(body, configured?.context),
       })
       if (!admission.allowed) {
-        if (admission.reservationId && onRequestFinished) {
+        if (admission.reservation && onRequestFinished) {
           try {
-            await onRequestFinished(admission.reservationId, "released", "admission_denied")
+            await onRequestFinished(admission.reservation, "released", "admission_denied")
           } catch {
             // Admission is already denied; cleanup failure must not expose a secret or alter the stable 429 response.
           }
@@ -1486,10 +1653,10 @@ async function handleProviderRequest(
           },
         }, { status: 429 }), effectiveProvider)
       }
-      reservationId = admission.reservationId
+      reservation = admission.reservation
     }
   } catch (error) {
-    if (reservationId && onRequestFinished) await onRequestFinished(reservationId, "released", "request_translation_error")
+    if (reservation && onRequestFinished) await onRequestFinished(reservation, "released", "request_translation_error")
     return scrubResponse(Response.json(
       { error: { type: "invalid_request_error", message: (error as Error).message } },
       { status: 400 },
@@ -1498,16 +1665,17 @@ async function handleProviderRequest(
 
   const target = `${effectiveProvider.baseUrl}/${upstreamPath(effectiveProvider)}`
   let upstream: Response
+  const upstreamAbort = new AbortController()
   try {
     upstream = await fetch(target, {
       method: "POST",
       headers: upstreamHeaders(effectiveProvider, request),
       body: JSON.stringify(body),
-      signal: request.signal,
+      signal: AbortSignal.any([request.signal, upstreamAbort.signal]),
       redirect: "error",
     })
   } catch (error) {
-    if (reservationId && onRequestFinished) await onRequestFinished(reservationId, "released", "upstream_transport_error")
+    if (reservation && onRequestFinished) await onRequestFinished(reservation, "released", "upstream_transport_error")
     return scrubResponse(Response.json(
       { error: { type: "upstream_transport_error", message: (error as Error).message } },
       { status: 502 },
@@ -1519,13 +1687,15 @@ async function handleProviderRequest(
       effectiveProvider,
       callerModelKey,
       attribution,
-      reservationId,
+      reservation,
       onUsage,
       onRequestFinished,
       trackUsage,
+      registerActiveStream,
+      (reason) => upstreamAbort.abort(reason),
     )
   } catch (error) {
-    if (reservationId && onRequestFinished) await onRequestFinished(reservationId, "released", "response_translation_error")
+    if (reservation && onRequestFinished) await onRequestFinished(reservation, "released", "response_translation_error")
     return scrubResponse(Response.json(
       { error: { type: "upstream_response_error", message: (error as Error).message } },
       { status: 502 },
@@ -1541,7 +1711,10 @@ export function startProviderBridge(
   const hostname = options.hostname ?? "127.0.0.1"
   const providers = new Map(providerSet.providers.map((provider) => [provider.id, provider]))
   const usageTasks = new Set<Promise<void>>()
+  const requestTasks = new Set<Promise<Response>>()
   const usageErrors: unknown[] = []
+  const activeStreams = new Set<{ threadId?: string; cancel: (reason: string) => Promise<void> }>()
+  let sealed = false
   const trackUsage = (task: Promise<void>) => {
     usageTasks.add(task)
     void task.catch((error) => { usageErrors.push(error) }).finally(() => { usageTasks.delete(task) })
@@ -1549,6 +1722,28 @@ export function startProviderBridge(
   const drainUsage = async () => {
     while (usageTasks.size) await Promise.allSettled([...usageTasks])
     if (usageErrors.length) throw new AggregateError(usageErrors.splice(0), "provider usage observer failed")
+  }
+  const registerActiveStream = (threadId: string | undefined, cancel: (reason: string) => Promise<void>) => {
+    const active = { ...(threadId ? { threadId } : {}), cancel }
+    activeStreams.add(active)
+    return () => { activeStreams.delete(active) }
+  }
+  const cancelThread = async (threadId: string, reason = "thread_terminal") => {
+    if (!threadId) throw new Error("provider stream cancellation requires a thread id")
+    const matches = [...activeStreams].filter((active) => active.threadId === threadId)
+    for (const active of matches) activeStreams.delete(active)
+    await Promise.all(matches.map((active) => active.cancel(reason)))
+    return matches.length
+  }
+  const sealAndDrain = async () => {
+    sealed = true
+    while (requestTasks.size) await Promise.allSettled([...requestTasks])
+    while (activeStreams.size) {
+      const active = [...activeStreams]
+      for (const stream of active) activeStreams.delete(stream)
+      await Promise.allSettled(active.map((stream) => stream.cancel("bridge_sealed")))
+    }
+    await drainUsage()
   }
   const server = Bun.serve({
     hostname,
@@ -1571,7 +1766,29 @@ export function startProviderBridge(
       }
       const provider = providers.get(providerId)
       if (!provider) return new Response("unknown provider", { status: 404 })
-      return handleProviderRequest(request, provider, providerSet, providers, options.onUsage, options.onBeforeRequest, options.onRequestFinished, trackUsage)
+      if (sealed) {
+        return Response.json(
+          { error: { type: "provider_admission_closed", message: "provider admission is sealed" } },
+          { status: 409 },
+        )
+      }
+      const task = handleProviderRequest(
+        request,
+        provider,
+        providerSet,
+        providers,
+        options.onUsage,
+        options.onBeforeRequest,
+        options.onRequestFinished,
+        trackUsage,
+        registerActiveStream,
+      )
+      requestTasks.add(task)
+      try {
+        return await task
+      } finally {
+        requestTasks.delete(task)
+      }
     },
   })
 
@@ -1580,10 +1797,13 @@ export function startProviderBridge(
     baseUrl: `http://${hostname}:${server.port}`,
     token,
     drain: drainUsage,
+    cancelThread,
+    sealAndDrain,
     async close() {
       closeTask ??= (async () => {
+        sealed = true
         await server.stop(true)
-        await drainUsage()
+        await sealAndDrain()
       })()
       await closeTask
     },

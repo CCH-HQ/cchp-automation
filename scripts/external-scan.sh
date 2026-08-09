@@ -27,6 +27,7 @@
 # Optional env (pins live in the constants below; overrides are for the
 # self-test and for emergency ops only):
 #   BOT_CODEQL_VERSION BOT_SEMGREP_VERSION BOT_SEMGREP_RULES_COMMIT
+#   BOT_CODEQL_GO_CREATE_TIMEOUT_SECONDS BOT_CODEQL_GO_ANALYZE_TIMEOUT_SECONDS
 set -euo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # The trusted prepare step installs optional bot tools under ~/.local/bin, never in
@@ -40,6 +41,17 @@ warn() { printf '\033[1;33m[external-scan][warn]\033[0m %s\n' "$*"; }
 CODEQL_BUNDLE_VERSION="${BOT_CODEQL_VERSION:-v2.26.1}"   # github/codeql-action release codeql-bundle-<ver>
 SEMGREP_VERSION="${BOT_SEMGREP_VERSION:-1.169.0}"        # used for the uvx/pipx fallbacks
 SEMGREP_RULES_COMMIT="${BOT_SEMGREP_RULES_COMMIT:-e5b5a42ec061854378c11e0d01f19250b52bc2e9}"
+CODEQL_GO_CREATE_TIMEOUT_SECONDS="${BOT_CODEQL_GO_CREATE_TIMEOUT_SECONDS:-480}"
+CODEQL_GO_ANALYZE_TIMEOUT_SECONDS="${BOT_CODEQL_GO_ANALYZE_TIMEOUT_SECONDS:-300}"
+CODEQL_GO_CREATE_TIMEOUT_MAX_SECONDS=600
+CODEQL_GO_ANALYZE_TIMEOUT_MAX_SECONDS=420
+CODEQL_KILL_GRACE_SECONDS="${BOT_CODEQL_KILL_GRACE_SECONDS:-10}"
+[[ "$CODEQL_GO_CREATE_TIMEOUT_SECONDS" =~ ^[1-9][0-9]*$ ]] && (( CODEQL_GO_CREATE_TIMEOUT_SECONDS <= CODEQL_GO_CREATE_TIMEOUT_MAX_SECONDS )) \
+  || CODEQL_GO_CREATE_TIMEOUT_SECONDS=480
+[[ "$CODEQL_GO_ANALYZE_TIMEOUT_SECONDS" =~ ^[1-9][0-9]*$ ]] && (( CODEQL_GO_ANALYZE_TIMEOUT_SECONDS <= CODEQL_GO_ANALYZE_TIMEOUT_MAX_SECONDS )) \
+  || CODEQL_GO_ANALYZE_TIMEOUT_SECONDS=300
+[[ "$CODEQL_KILL_GRACE_SECONDS" =~ ^[1-9][0-9]*$ ]] && (( CODEQL_KILL_GRACE_SECONDS <= 10 )) \
+  || CODEQL_KILL_GRACE_SECONDS=10
 SEMGREP_RULES_REPO="https://github.com/semgrep/semgrep-rules"
 SEMGREP_RULE_DIRS=(go typescript yaml/github-actions generic/ci)
 
@@ -78,19 +90,23 @@ mkdir -p "$RAW_DIR" "$TMP_DIR" "$CODEQL_CACHE_ROOT" "$SEMGREP_RULES_CACHE_ROOT"
 printf '[]\n' > "$CHANGED_JSON"
 
 SCANNERS=(semgrep codeql_javascript codeql_go)
-declare -A SC_STATUS SC_REASON SC_DURATION SC_TOTAL SC_INDIFF
+declare -A SC_STATUS SC_REASON SC_DURATION SC_TOTAL SC_INDIFF SC_EXIT_CODE SC_TIMED_OUT
 for key in "${SCANNERS[@]}"; do
   SC_STATUS[$key]=skipped
   SC_REASON[$key]="not attempted"
   SC_DURATION[$key]=0
   SC_TOTAL[$key]=0
   SC_INDIFF[$key]=0
+  SC_EXIT_CODE[$key]=null
+  SC_TIMED_OUT[$key]=null
   printf '[]\n' > "${TMP_DIR}/filtered-${key}.json"
 done
 
-mark() { # $1=scanner  $2=status  $3=reason ("" for ran)
+mark() { # $1=scanner  $2=status  $3=reason  $4=exit code|null  $5=true|false|null
   SC_STATUS[$1]="$2"
   SC_REASON[$1]="${3:-}"
+  SC_EXIT_CODE[$1]="${4:-null}"
+  SC_TIMED_OUT[$1]="${5:-null}"
 }
 
 mark_all_skipped() { # $1=reason
@@ -100,16 +116,22 @@ mark_all_skipped() { # $1=reason
 
 scanner_status_json() { # $1=scanner
   local d="${SC_DURATION[$1]}" t="${SC_TOTAL[$1]}" i="${SC_INDIFF[$1]}"
+  local exit_code="${SC_EXIT_CODE[$1]}" timed_out="${SC_TIMED_OUT[$1]}"
   [[ "$d" =~ ^[0-9]+$ ]] || d=0
   [[ "$t" =~ ^[0-9]+$ ]] || t=0
   [[ "$i" =~ ^[0-9]+$ ]] || i=0
+  [[ "$exit_code" == "null" || "$exit_code" =~ ^[0-9]+$ ]] || exit_code=null
+  [[ "$timed_out" == "true" || "$timed_out" == "false" || "$timed_out" == "null" ]] || timed_out=null
   jq -n \
     --arg status "${SC_STATUS[$1]}" \
     --arg reason "${SC_REASON[$1]}" \
     --argjson duration "$d" --argjson total "$t" --argjson in_diff "$i" \
+    --argjson exit_code "$exit_code" --argjson timed_out "$timed_out" \
     '{status: $status,
       reason: (if $reason == "" then null else $reason end),
       duration_seconds: $duration,
+      exit_code: $exit_code,
+      timed_out: $timed_out,
       findings_total: $total,
       findings_in_diff: $in_diff}'
 }
@@ -307,7 +329,7 @@ run_semgrep_impl() {
       --json-output "$raw_json" --sarif-output "$raw_sarif" \
       "${targets[@]}" ) >>"$slog" 2>&1 || rc=$?
   if (( rc != 0 )) || [[ ! -s "$raw_json" ]]; then
-    mark semgrep failed "semgrep exited rc=${rc} or produced no JSON (see raw/semgrep.log)"
+    mark semgrep failed "semgrep exited rc=${rc} or produced no JSON (see raw/semgrep.log)" "$rc" null
     return 0
   fi
   local norm="${TMP_DIR}/normalized-semgrep.json"
@@ -378,24 +400,77 @@ run_codeql_javascript_impl() {
     return 0
   fi
   local db="${TMP_DIR}/db-javascript" raw="${RAW_DIR}/codeql-javascript.sarif"
-  local clog="${RAW_DIR}/codeql-javascript.log"
+  local clog="${RAW_DIR}/codeql-javascript.log" rc=0
   # Extraction-only (build mode none): no project code is executed, so this is
   # safe for fork PR heads too.
   log "codeql javascript-typescript: database create (no build)"
-  if ! timeout 1500 "$CODEQL_BIN" database create "$db" \
+  timeout 1500 "$CODEQL_BIN" database create "$db" \
        --language=javascript-typescript --build-mode=none \
-       --source-root "$SCAN_DIR" --threads=0 --overwrite >>"$clog" 2>&1; then
-    mark codeql_javascript failed "codeql database create failed/timed out (see raw/codeql-javascript.log)"
+       --source-root "$SCAN_DIR" --threads=0 --overwrite >>"$clog" 2>&1 || rc=$?
+  if (( rc != 0 )); then
+    mark codeql_javascript failed "codeql database create failed rc=${rc} or timed out (see raw/codeql-javascript.log)" "$rc" null
     return 0
   fi
   log "codeql javascript-typescript: database analyze"
-  if ! timeout 1500 "$CODEQL_BIN" database analyze "$db" \
+  rc=0
+  timeout 1500 "$CODEQL_BIN" database analyze "$db" \
        "codeql/javascript-queries:codeql-suites/javascript-code-scanning.qls" \
-       --format=sarif-latest --threads=0 --output "$raw" >>"$clog" 2>&1; then
-    mark codeql_javascript failed "codeql database analyze failed/timed out (see raw/codeql-javascript.log)"
+       --format=sarif-latest --threads=0 --output "$raw" >>"$clog" 2>&1 || rc=$?
+  if (( rc != 0 )); then
+    mark codeql_javascript failed "codeql database analyze failed rc=${rc} or timed out (see raw/codeql-javascript.log)" "$rc" null
     return 0
   fi
   collect_sarif codeql_javascript "$raw"
+}
+
+DEADLINE_EXIT_CODE=0
+DEADLINE_TIMED_OUT=false
+
+run_with_deadline() { # $1=seconds $2=log path $3...=command
+  local seconds="$1" log_path="$2"
+  shift 2
+  local flag="${TMP_DIR}/deadline-$RANDOM-$RANDOM.flag" pid pgid watchdog rc=0
+  rm -f "$flag"
+  setsid "$@" >>"$log_path" 2>&1 &
+  pid=$!
+  pgid=$pid
+  (
+    timer=""
+    trap 'if [[ -n "${timer:-}" ]]; then kill "$timer" 2>/dev/null || true; wait "$timer" 2>/dev/null || true; fi; exit 0' TERM INT
+    sleep "$seconds" &
+    timer=$!
+    wait "$timer" || exit 0
+    timer=""
+    if kill -0 "$pid" 2>/dev/null; then
+      printf 'timed_out\n' > "$flag"
+      kill -TERM -- "-$pgid" 2>/dev/null || true
+      sleep "$CODEQL_KILL_GRACE_SECONDS"
+      kill -KILL -- "-$pgid" 2>/dev/null || true
+    fi
+  ) &
+  watchdog=$!
+  wait "$pid" || rc=$?
+  if [[ -f "$flag" ]]; then
+    wait "$watchdog" 2>/dev/null || true
+  else
+    kill "$watchdog" 2>/dev/null || true
+    wait "$watchdog" 2>/dev/null || true
+  fi
+  if kill -0 -- "-$pgid" 2>/dev/null; then
+    kill -KILL -- "-$pgid" 2>/dev/null || true
+    sleep 0.1
+  fi
+  if kill -0 -- "-$pgid" 2>/dev/null; then
+    warn "deadline process group ${pgid} survived SIGKILL"
+    rc=1
+  fi
+  DEADLINE_TIMED_OUT=false
+  DEADLINE_EXIT_CODE=$rc
+  if [[ -f "$flag" ]]; then
+    DEADLINE_TIMED_OUT=true
+    DEADLINE_EXIT_CODE=124
+  fi
+  rm -f "$flag"
 }
 
 run_codeql_go_impl() {
@@ -420,22 +495,36 @@ run_codeql_go_impl() {
   # go.mod replace directives point into third_party/sdk git submodules; fetch
   # them best-effort (a miss just makes the build → database create fail,
   # which is fail-open like everything else here).
-  timeout 600 git -C "$SCAN_DIR" submodule update --init --recursive --depth 1 >/dev/null 2>&1 \
+  timeout --signal=TERM --kill-after=10s 60s git -C "$SCAN_DIR" submodule update --init --recursive --depth 1 >/dev/null 2>&1 \
     || warn "scan-head submodule fetch failed (go build may fail)"
   local db="${TMP_DIR}/db-go" raw="${RAW_DIR}/codeql-go.sarif" clog="${RAW_DIR}/codeql-go.log"
+  local rc=0
   # GOEXPERIMENT=jsonv2: this repository does not compile without it.
   log "codeql go: database create (go build ./...)"
-  if ! timeout 1500 env GOEXPERIMENT=jsonv2 "$CODEQL_BIN" database create "$db" \
+  run_with_deadline "$CODEQL_GO_CREATE_TIMEOUT_SECONDS" "$clog" env GOEXPERIMENT=jsonv2 "$CODEQL_BIN" database create "$db" \
        --language=go --source-root "$SCAN_DIR" --threads=0 --overwrite \
-       --command="go build ./..." >>"$clog" 2>&1; then
-    mark codeql_go failed "codeql database create failed/timed out (see raw/codeql-go.log)"
+       --command="go build ./..."
+  rc=$DEADLINE_EXIT_CODE
+  if (( rc != 0 )); then
+    if [[ "$DEADLINE_TIMED_OUT" == "true" ]]; then
+      mark codeql_go failed "codeql database create timed out after ${CODEQL_GO_CREATE_TIMEOUT_SECONDS}s (rc=${rc}; see raw/codeql-go.log)" "$rc" true
+    else
+      mark codeql_go failed "codeql database create failed rc=${rc} (see raw/codeql-go.log)" "$rc" false
+    fi
     return 0
   fi
   log "codeql go: database analyze"
-  if ! timeout 1500 "$CODEQL_BIN" database analyze "$db" \
+  rc=0
+  run_with_deadline "$CODEQL_GO_ANALYZE_TIMEOUT_SECONDS" "$clog" "$CODEQL_BIN" database analyze "$db" \
        "codeql/go-queries:codeql-suites/go-code-scanning.qls" \
-       --format=sarif-latest --threads=0 --output "$raw" >>"$clog" 2>&1; then
-    mark codeql_go failed "codeql database analyze failed/timed out (see raw/codeql-go.log)"
+       --format=sarif-latest --threads=0 --output "$raw"
+  rc=$DEADLINE_EXIT_CODE
+  if (( rc != 0 )); then
+    if [[ "$DEADLINE_TIMED_OUT" == "true" ]]; then
+      mark codeql_go failed "codeql database analyze timed out after ${CODEQL_GO_ANALYZE_TIMEOUT_SECONDS}s (rc=${rc}; see raw/codeql-go.log)" "$rc" true
+    else
+      mark codeql_go failed "codeql database analyze failed rc=${rc} (see raw/codeql-go.log)" "$rc" false
+    fi
     return 0
   fi
   collect_sarif codeql_go "$raw"

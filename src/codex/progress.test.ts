@@ -52,3 +52,45 @@ test("hydrates todo state without bumping revision or rewriting an unchanged pla
   expect(readFileSync(path, "utf8")).toBe(before)
   expect(() => new ProgressTracker({ path, rootThreadId: "other", task: "manual", runId: "run" })).toThrow("root thread mismatch")
 })
+
+test("serializes progress publication and coalesces pending plans to the latest revision", async () => {
+  const path = join(mkdtempSync(join(tmpdir(), "progress-queue-")), "todo.json")
+  let release!: () => void
+  let entered!: () => void
+  const gate = new Promise<void>((resolve) => { release = resolve })
+  const firstEntered = new Promise<void>((resolve) => { entered = resolve })
+  const published: string[] = []
+  let active = 0
+  let maxActive = 0
+  const tracker = new ProgressTracker({
+    path,
+    rootThreadId: "root",
+    task: "manual",
+    runId: "run-queue",
+    publish: async (body) => {
+      active++
+      maxActive = Math.max(maxActive, active)
+      published.push(body)
+      if (published.length === 1) {
+        entered()
+        await gate
+      }
+      active--
+    },
+  })
+
+  await tracker.applyPlan("root", [{ step: "plan A", status: "in_progress" }])
+  await firstEntered
+  await tracker.applyPlan("root", [{ step: "plan B", status: "in_progress" }])
+  await tracker.applyPlan("root", [{ step: "plan C", status: "in_progress" }])
+  expect(published).toHaveLength(1)
+  release()
+  await tracker.heartbeat({})
+
+  expect(maxActive).toBe(1)
+  expect(published).toHaveLength(2)
+  expect(published[0]).toContain("plan A")
+  expect(published[1]).toContain("plan C")
+  expect(published.join("\n")).not.toContain("plan B")
+  expect(readFileSync(path, "utf8")).toContain("plan C")
+})

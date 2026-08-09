@@ -80,12 +80,14 @@ jobs:
 
       # The pinned engine code (this reusable workflow's own repo, at the exact
       # commit GitHub resolved for @latest or @<sha>). The github context belongs
-      # to the caller, while job.workflow_* identifies the called workflow.
+      # to the caller, while job.workflow_* identifies the called workflow. The
+      # JSON round trip preserves that runtime identity while accommodating
+      # actionlint versions whose static job schema predates these fields.
       - name: Checkout engine (pinned, trusted)
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
-          repository: ${{ job.workflow_repository }}
-          ref: ${{ job.workflow_sha }}
+          repository: ${{ fromJSON(toJSON(job)).workflow_repository }}
+          ref: ${{ fromJSON(toJSON(job)).workflow_sha }}
           path: .cchp-engine
           token: ${{ steps.base.outputs.token }}
           persist-credentials: false
@@ -101,20 +103,95 @@ jobs:
         run: |
           set -euo pipefail
           uid=$(gh api "/users/${SLUG}[bot]" --jq .id)
+          runner_temp="$(realpath -e -- "$RUNNER_TEMP")"
+          workdir="$(mktemp -d -- "${runner_temp}/cchp-bot.${GITHUB_RUN_ID}.${GITHUB_RUN_ATTEMPT}.XXXXXX")"
+          chmod 700 -- "$workdir"
+          bot_run_id="${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-$(openssl rand -hex 16)"
           {
             echo "BOT_SLUG=${SLUG}"
+            echo "BOT_LOGIN=${SLUG}[bot]"
             echo "BOT_GIT_NAME=${SLUG}[bot]"
             echo "BOT_GIT_EMAIL=${uid}+${SLUG}[bot]@users.noreply.github.com"
-            echo "BOT_WORKDIR=$(mktemp -d)"
+            echo "BOT_WORKDIR=${workdir}"
+            if [[ -n "${BOT_RUN_ID:-}" ]]; then
+              [[ "$BOT_RUN_ID" =~ ^[1-9][0-9]*$ ]]
+              echo "CCHP_WORKFLOW_RUN_ID=${BOT_RUN_ID}"
+            fi
+            echo "BOT_RUN_ID=${bot_run_id}"
           } >> "$GITHUB_ENV"
 
+      - name: Prepare trusted lifecycle staging
+        id: lifecycle_staging
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ -n "${BOT_WORKDIR:-}" && -d "$BOT_WORKDIR" && ! -L "$BOT_WORKDIR" ]]
+          runner_temp="$(realpath -e -- "$RUNNER_TEMP")"
+          workdir_device="$(stat -Lc '%d' -- "$BOT_WORKDIR")"
+          workdir_inode="$(stat -Lc '%i' -- "$BOT_WORKDIR")"
+          staging=""
+          staging_device=""
+          staging_inode=""
+          committed=0
+          cleanup_uncommitted() {
+            local status=$?
+            trap - EXIT
+            if [[ "$committed" != "1" ]]; then
+              if [[ -n "$staging" && -n "$staging_device" && -n "$staging_inode" && -d "$staging" && ! -L "$staging" ]]; then
+                python3 "$ENGINE_DIR/scripts/secure-remove-tree.py" \
+                  --path "$staging" --runner-root "$runner_temp" \
+                  --device "$staging_device" --inode "$staging_inode" || true
+              fi
+              if [[ -d "$BOT_WORKDIR" && ! -L "$BOT_WORKDIR" ]]; then
+                python3 "$ENGINE_DIR/scripts/secure-remove-tree.py" \
+                  --path "$BOT_WORKDIR" --runner-root "$runner_temp" \
+                  --device "$workdir_device" --inode "$workdir_inode" || true
+              fi
+            fi
+            exit "$status"
+          }
+          trap cleanup_uncommitted EXIT
+          staging="$(mktemp -d "${RUNNER_TEMP}/cchp-actions-lifecycle.${GITHUB_RUN_ID}.${GITHUB_RUN_ATTEMPT}.XXXXXX")"
+          chmod 700 "$staging"
+          staging_device="$(stat -Lc '%d' -- "$staging")"
+          staging_inode="$(stat -Lc '%i' -- "$staging")"
+          identity="$staging/workdir-identity.json"
+          identity_tmp="$(mktemp "$staging/.workdir-identity.XXXXXX")"
+          record_key="$(openssl rand -hex 32)"
+          echo "::add-mask::${record_key}"
+          identity_payload="$(jq -cSn \
+            --arg path "$BOT_WORKDIR" \
+            --argjson device "$workdir_device" \
+            --argjson inode "$workdir_inode" \
+            --arg run "$GITHUB_RUN_ID" \
+            --arg attempt "$GITHUB_RUN_ATTEMPT" \
+            '{schemaVersion: 1, path: $path, device: $device, inode: $inode, githubRunId: $run, githubRunAttempt: $attempt}')"
+          identity_mac="$(printf '%s' "$identity_payload" | openssl dgst -sha256 -mac HMAC -macopt "hexkey:${record_key}" | awk '{print $NF}')"
+          jq --arg mac "$identity_mac" '. + {mac: $mac}' <<<"$identity_payload" >"$identity_tmp"
+          chmod 600 "$identity_tmp"
+          mv -f -- "$identity_tmp" "$identity"
+          env_commit="$(mktemp "$staging/.github-env.XXXXXX")"
+          output_commit="$(mktemp "$staging/.github-output.XXXXXX")"
+          printf 'CCHP_PROCESS_RECORD_HMAC_KEY=%s\n' "$record_key" > "$env_commit"
+          printf 'dir=%s\nworkdir_identity=%s\nprocess_file=%s\ncleanup_complete=%s\n' \
+            "$staging" "$identity" "$staging/codex-app-server-process.json" "$staging/cleanup-complete.json" \
+            > "$output_commit"
+          cat "$env_commit" >> "$GITHUB_ENV"
+          cat "$output_commit" >> "$GITHUB_OUTPUT"
+          rm -f -- "$env_commit" "$output_commit"
+          committed=1
+          trap - EXIT
+
       - name: Install Bun
+        if: steps.lifecycle_staging.outcome == 'success'
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
           bun-version-file: .cchp-engine/.bun-version
           no-cache: true
 
       - name: Install engine dependencies
+        if: steps.lifecycle_staging.outcome == 'success'
         working-directory: .cchp-engine
         run: bun install --frozen-lockfile
 
@@ -123,6 +200,7 @@ jobs:
       # correctly ignores the consumer's own bot workflow.
       - name: Route event
         id: route
+        if: steps.lifecycle_staging.outcome == 'success'
         working-directory: .cchp-engine
         env:
           GH_TOKEN: ${{ steps.base.outputs.token }}
@@ -159,7 +237,7 @@ jobs:
           GH_TOKEN: ${{ steps.base.outputs.token }}
         run: |
           set -euo pipefail
-          bash "${{ env.ENGINE_DIR }}/scripts/install-codex.sh"
+          bash "$ENGINE_DIR/scripts/install-codex.sh"
 
       - name: Prepare isolated Codex environment
         id: prepare_codex
@@ -167,14 +245,14 @@ jobs:
         env:
           BOT_TOKEN: ${{ steps.write.outputs.token || steps.base.outputs.token }}
           HEROUI_AUTH_TOKEN: ${{ secrets.heroui-token }}
-        run: bash ${{ env.ENGINE_DIR }}/scripts/prepare-codex-env.sh
+        run: bash "$ENGINE_DIR/scripts/prepare-codex-env.sh"
 
       - name: External static analysis (trusted pre-review scan)
         id: external_scan
         if: steps.route.outputs.act == 'true'
         env:
           GH_TOKEN: ${{ steps.base.outputs.token }}
-        run: bash ${{ env.ENGINE_DIR }}/scripts/external-scan.sh
+        run: bash "$ENGINE_DIR/scripts/external-scan.sh"
 
       - name: Verify Codex capability gate
         id: capability_gate
@@ -182,7 +260,7 @@ jobs:
         env:
           CCHP_ARTIFACT_RUN_ID: ${{ github.run_id }}-${{ github.run_attempt }}
           CCHP_CAPABILITY_ARTIFACT_DIR: ${{ env.BOT_WORKDIR }}/ctx/codex/capability-gate
-        run: bash ${{ env.ENGINE_DIR }}/scripts/verify-capability-gate.sh
+        run: bash "$ENGINE_DIR/scripts/verify-capability-gate.sh"
 
       # Run the agent. Model/provider VARIABLES are read straight from the caller's
       # `vars` context (unchanged); provider keys + SEE come from the passed secrets.
@@ -221,7 +299,9 @@ jobs:
           # The agent session may (re)install web deps (@heroui-pro registry) during
           # fix tasks — same job-level exposure the consumer workflow had.
           HEROUI_AUTH_TOKEN: ${{ secrets.heroui-token }}
-        run: bash ${{ env.ENGINE_DIR }}/scripts/run-codex.sh
+          CCHP_CODEX_PID_FILE: ${{ steps.lifecycle_staging.outputs.process_file }}
+          CCHP_DEFER_SUCCESS_PUBLICATION: "true"
+        run: bash "$ENGINE_DIR/scripts/run-codex.sh"
 
       # Runtime publication covers normal supervisor terminals. This independent
       # finalizer also runs when setup, preparation, static analysis, the
@@ -230,6 +310,7 @@ jobs:
       - name: Mint App token (progress finalizer)
         id: finalizer_token
         if: always() && steps.route.outputs.act == 'true'
+        continue-on-error: true
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3
         with:
           client-id: ${{ secrets.app-client-id }}
@@ -239,9 +320,19 @@ jobs:
           permission-issues: write
           permission-pull-requests: write
 
+      - name: Snapshot trusted runtime lifecycle state
+        id: runtime_snapshot
+        if: always() && steps.route.outputs.act == 'true' && steps.lifecycle_staging.outcome == 'success'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ steps.finalizer_token.outputs.token || steps.base.outputs.token }}
+          CCHP_RUNTIME_SNAPSHOT_PATH: ${{ steps.lifecycle_staging.outputs.dir }}/runtime-snapshot.json
+        run: bun "$ENGINE_DIR/src/codex/workflow-runtime-snapshot.ts"
+
       - name: Finalize progress comment
         id: finalize_progress
         if: always() && steps.route.outputs.act == 'true'
+        continue-on-error: true
         env:
           GH_TOKEN: ${{ steps.finalizer_token.outputs.token || steps.base.outputs.token }}
           CCHP_WRITE_OUTCOME: ${{ steps.write.outcome }}
@@ -251,8 +342,393 @@ jobs:
           CCHP_SCAN_OUTCOME: ${{ steps.external_scan.outcome }}
           CCHP_CAPABILITY_OUTCOME: ${{ steps.capability_gate.outcome }}
           CCHP_SUPERVISOR_OUTCOME: ${{ steps.codex_supervisor.outcome }}
-        run: bun ${{ env.ENGINE_DIR }}/src/codex/finalize-workflow-progress.ts
+          CCHP_JOB_CANCELLED: ${{ job.status == 'cancelled' }}
+          CCHP_DEFER_SUCCESS_PUBLICATION: "true"
+          CCHP_RUNTIME_SNAPSHOT_PATH: ${{ steps.runtime_snapshot.outputs.path }}
+          CCHP_RUNTIME_SNAPSHOT_SHA256: ${{ steps.runtime_snapshot.outputs.sha256 }}
+          CCHP_PROGRESS_PUBLICATION_PATH: ${{ steps.lifecycle_staging.outputs.dir || runner.temp }}/progress-publication.json
+          CCHP_WORKFLOW_FINALIZATION_PATH: ${{ steps.lifecycle_staging.outputs.dir || runner.temp }}/workflow-finalization.json
+        run: bun "$ENGINE_DIR/src/codex/finalize-workflow-progress.ts"
+
+      # Upload only a strict lifecycle projection: enums, counters, stable ids,
+      # and usage totals. Raw prompts, TODO text, child output, diagnostics, and
+      # credentials never enter this artifact.
+      - name: Write Actions lifecycle evidence
+        id: lifecycle_evidence
+        if: always() && steps.route.outputs.act == 'true' && steps.lifecycle_staging.outcome == 'success'
+        continue-on-error: true
+        env:
+          CCHP_LIFECYCLE_ARTIFACT_DIR: ${{ steps.lifecycle_staging.outputs.dir }}
+          CCHP_LIFECYCLE_ARTIFACT_PHASE: primary
+          CCHP_WORKFLOW_FINALIZATION_PATH: ${{ steps.lifecycle_staging.outputs.dir }}/workflow-finalization.json
+          CCHP_RUNTIME_SNAPSHOT_PATH: ${{ steps.runtime_snapshot.outputs.path }}
+          CCHP_RUNTIME_SNAPSHOT_SHA256: ${{ steps.runtime_snapshot.outputs.sha256 }}
+          CCHP_WRITE_OUTCOME: ${{ steps.write.outcome }}
+          CCHP_NEEDS_WRITE: ${{ steps.route.outputs.needs_write }}
+          CCHP_INSTALL_OUTCOME: ${{ steps.install_codex.outcome }}
+          CCHP_PREPARE_OUTCOME: ${{ steps.prepare_codex.outcome }}
+          CCHP_SCAN_OUTCOME: ${{ steps.external_scan.outcome }}
+          CCHP_CAPABILITY_OUTCOME: ${{ steps.capability_gate.outcome }}
+          CCHP_SUPERVISOR_OUTCOME: ${{ steps.codex_supervisor.outcome }}
+          CCHP_RUNTIME_SNAPSHOT_OUTCOME: ${{ steps.runtime_snapshot.outcome }}
+          CCHP_FINALIZER_OUTCOME: ${{ steps.finalize_progress.outcome }}
+          CCHP_JOB_CANCELLED: ${{ job.status == 'cancelled' }}
+        run: bun "$ENGINE_DIR/src/codex/lifecycle-artifact.ts"
 
       - name: Cleanup isolated environment
-        if: always()
-        run: bash ${{ env.ENGINE_DIR }}/scripts/cleanup.sh
+        id: environment_cleanup
+        if: always() && steps.lifecycle_staging.outcome == 'success'
+        continue-on-error: true
+        env:
+          CCHP_WORKDIR_IDENTITY_PATH: ${{ steps.lifecycle_staging.outputs.workdir_identity }}
+          CCHP_CLEANUP_COMPLETE_PATH: ${{ steps.lifecycle_staging.outputs.cleanup_complete }}
+          CCHP_CODEX_PID_FILE: ${{ steps.lifecycle_staging.outputs.process_file }}
+        run: bash "$ENGINE_DIR/scripts/cleanup.sh"
+
+      - name: Verify Actions lifecycle evidence
+        id: verify_lifecycle_evidence
+        if: always() && steps.route.outputs.act == 'true' && steps.lifecycle_evidence.outcome == 'success'
+        continue-on-error: true
+        env:
+          CCHP_LIFECYCLE_ARTIFACT_PATH: ${{ steps.lifecycle_evidence.outputs.path }}
+          CCHP_LIFECYCLE_ARTIFACT_SHA256: ${{ steps.lifecycle_evidence.outputs.sha256 }}
+        run: bun "$ENGINE_DIR/src/codex/lifecycle-artifact.ts" --verify
+
+      - name: Upload Actions lifecycle evidence
+        id: upload_lifecycle_evidence
+        if: always() && steps.route.outputs.act == 'true' && steps.verify_lifecycle_evidence.outcome == 'success'
+        continue-on-error: true
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: cchp-actions-lifecycle-${{ github.run_id }}-${{ github.run_attempt }}-${{ steps.lifecycle_evidence.outputs.sha256 }}
+          path: ${{ steps.lifecycle_evidence.outputs.path }}
+          archive: false
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Verify uploaded Actions lifecycle digest
+        id: verify_uploaded_lifecycle_evidence
+        if: always() && steps.route.outputs.act == 'true' && steps.upload_lifecycle_evidence.outcome == 'success'
+        continue-on-error: true
+        env:
+          ARTIFACT_ID: ${{ steps.upload_lifecycle_evidence.outputs.artifact-id }}
+          UPLOADED_SHA256: ${{ steps.upload_lifecycle_evidence.outputs.artifact-digest }}
+          EXPECTED_SHA256: ${{ steps.lifecycle_evidence.outputs.sha256 }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$ARTIFACT_ID" =~ ^[1-9][0-9]*$ ]]
+          [[ "$UPLOADED_SHA256" =~ ^[a-f0-9]{64}$ ]]
+          [[ "$UPLOADED_SHA256" == "$EXPECTED_SHA256" ]]
+
+      - name: Prepare lifecycle evidence round-trip staging
+        id: lifecycle_roundtrip_staging
+        if: always() && steps.route.outputs.act == 'true' && steps.verify_uploaded_lifecycle_evidence.outcome == 'success'
+        continue-on-error: true
+        shell: bash
+        run: |
+          roundtrip="$(mktemp -d "${RUNNER_TEMP}/cchp-actions-lifecycle-roundtrip.XXXXXX")"
+          chmod 700 "$roundtrip"
+          printf 'dir=%s\n' "$roundtrip" >> "$GITHUB_OUTPUT"
+
+      - name: Download uploaded Actions lifecycle evidence
+        id: download_lifecycle_evidence
+        if: always() && steps.route.outputs.act == 'true' && steps.verify_uploaded_lifecycle_evidence.outcome == 'success' && steps.lifecycle_roundtrip_staging.outcome == 'success'
+        continue-on-error: true
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ steps.upload_lifecycle_evidence.outputs.artifact-id }}
+          path: ${{ steps.lifecycle_roundtrip_staging.outputs.dir }}
+          digest-mismatch: error
+
+      - name: Verify downloaded Actions lifecycle evidence
+        id: verify_downloaded_lifecycle_evidence
+        if: always() && steps.route.outputs.act == 'true' && steps.download_lifecycle_evidence.outcome == 'success'
+        continue-on-error: true
+        env:
+          CCHP_LIFECYCLE_ARTIFACT_PATH: ${{ steps.lifecycle_roundtrip_staging.outputs.dir }}/${{ steps.lifecycle_evidence.outputs.filename }}
+          CCHP_LIFECYCLE_ARTIFACT_SHA256: ${{ steps.lifecycle_evidence.outputs.sha256 }}
+        run: bun "$ENGINE_DIR/src/codex/lifecycle-artifact.ts" --verify
+
+      - name: Mint App token (invalid primary artifact cleanup)
+        id: invalid_primary_artifact_cleanup_token
+        if: >-
+          always() && steps.route.outputs.act == 'true' &&
+          steps.upload_lifecycle_evidence.outcome == 'success' &&
+          (steps.verify_uploaded_lifecycle_evidence.outcome != 'success' ||
+           steps.lifecycle_roundtrip_staging.outcome != 'success' ||
+           steps.download_lifecycle_evidence.outcome != 'success' ||
+           steps.verify_downloaded_lifecycle_evidence.outcome != 'success')
+        continue-on-error: true
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3
+        with:
+          client-id: ${{ secrets.app-client-id }}
+          private-key: ${{ secrets.app-private-key }}
+          permission-actions: write
+          permission-contents: read
+          permission-metadata: read
+
+      - name: Delete invalid uploaded lifecycle evidence
+        id: delete_invalid_lifecycle_evidence
+        if: >-
+          always() && steps.route.outputs.act == 'true' &&
+          steps.invalid_primary_artifact_cleanup_token.outcome == 'success' &&
+          steps.upload_lifecycle_evidence.outcome == 'success' &&
+          (steps.verify_uploaded_lifecycle_evidence.outcome != 'success' ||
+           steps.lifecycle_roundtrip_staging.outcome != 'success' ||
+           steps.download_lifecycle_evidence.outcome != 'success' ||
+           steps.verify_downloaded_lifecycle_evidence.outcome != 'success')
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ steps.invalid_primary_artifact_cleanup_token.outputs.token }}
+          ARTIFACT_ID: ${{ steps.upload_lifecycle_evidence.outputs.artifact-id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$ARTIFACT_ID" =~ ^[1-9][0-9]*$ ]]
+          gh api --method DELETE "repos/${GITHUB_REPOSITORY}/actions/artifacts/${ARTIFACT_ID}"
+
+      # Resolve every pre-transport failure before creating a final candidate.
+      # Successful public terminal publication stays deferred until that
+      # candidate has completed its full upload round-trip.
+      - name: Reconcile pre-transport workflow state
+        id: reconcile_terminal
+        if: always() && steps.route.outputs.act == 'true'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ steps.finalizer_token.outputs.token || steps.base.outputs.token }}
+          CCHP_WRITE_OUTCOME: ${{ steps.write.outcome }}
+          CCHP_NEEDS_WRITE: ${{ steps.route.outputs.needs_write }}
+          CCHP_INSTALL_OUTCOME: ${{ steps.install_codex.outcome }}
+          CCHP_PREPARE_OUTCOME: ${{ steps.prepare_codex.outcome }}
+          CCHP_SCAN_OUTCOME: ${{ steps.external_scan.outcome }}
+          CCHP_CAPABILITY_OUTCOME: ${{ steps.capability_gate.outcome }}
+          CCHP_SUPERVISOR_OUTCOME: ${{ steps.codex_supervisor.outcome }}
+          CCHP_LIFECYCLE_STAGING_OUTCOME: ${{ steps.lifecycle_staging.outcome }}
+          CCHP_LIFECYCLE_EVIDENCE_OUTCOME: ${{ steps.lifecycle_evidence.outcome }}
+          CCHP_VERIFY_LIFECYCLE_OUTCOME: ${{ steps.verify_lifecycle_evidence.outcome }}
+          CCHP_UPLOAD_LIFECYCLE_OUTCOME: ${{ steps.upload_lifecycle_evidence.outcome }}
+          CCHP_VERIFY_UPLOADED_LIFECYCLE_OUTCOME: ${{ steps.verify_uploaded_lifecycle_evidence.outcome }}
+          CCHP_LIFECYCLE_ROUNDTRIP_STAGING_OUTCOME: ${{ steps.lifecycle_roundtrip_staging.outcome }}
+          CCHP_DOWNLOAD_LIFECYCLE_OUTCOME: ${{ steps.download_lifecycle_evidence.outcome }}
+          CCHP_VERIFY_DOWNLOADED_LIFECYCLE_OUTCOME: ${{ steps.verify_downloaded_lifecycle_evidence.outcome }}
+          CCHP_RUNTIME_SNAPSHOT_OUTCOME: ${{ steps.runtime_snapshot.outcome }}
+          CCHP_ENVIRONMENT_CLEANUP_OUTCOME: ${{ steps.environment_cleanup.outcome }}
+          CCHP_PRIMARY_ARTIFACT_INVALID: ${{ steps.upload_lifecycle_evidence.outcome == 'success' && (steps.verify_uploaded_lifecycle_evidence.outcome != 'success' || steps.lifecycle_roundtrip_staging.outcome != 'success' || steps.download_lifecycle_evidence.outcome != 'success' || steps.verify_downloaded_lifecycle_evidence.outcome != 'success') }}
+          CCHP_INVALID_PRIMARY_ARTIFACT_CLEANUP_TOKEN_OUTCOME: ${{ steps.invalid_primary_artifact_cleanup_token.outcome }}
+          CCHP_INVALID_PRIMARY_ARTIFACT_CLEANUP_OUTCOME: ${{ steps.delete_invalid_lifecycle_evidence.outcome }}
+          CCHP_JOB_CANCELLED: ${{ job.status == 'cancelled' }}
+          CCHP_DEFER_SUCCESS_PUBLICATION: "true"
+          CCHP_RUNTIME_SNAPSHOT_PATH: ${{ steps.runtime_snapshot.outputs.path }}
+          CCHP_RUNTIME_SNAPSHOT_SHA256: ${{ steps.runtime_snapshot.outputs.sha256 }}
+          CCHP_PROGRESS_PUBLICATION_PATH: ${{ steps.lifecycle_staging.outputs.dir || runner.temp }}/progress-publication.json
+          CCHP_WORKFLOW_FINALIZATION_PATH: ${{ steps.lifecycle_staging.outputs.dir || runner.temp }}/workflow-finalization.json
+        run: bun "$ENGINE_DIR/src/codex/finalize-workflow-progress.ts"
+
+      - name: Prepare final lifecycle evidence staging
+        id: final_lifecycle_staging
+        if: always() && steps.route.outputs.act == 'true' && steps.reconcile_terminal.outcome == 'success'
+        continue-on-error: true
+        shell: bash
+        run: |
+          final_staging="$(mktemp -d "${RUNNER_TEMP}/cchp-actions-lifecycle-final.XXXXXX")"
+          chmod 700 "$final_staging"
+          printf 'dir=%s\n' "$final_staging" >> "$GITHUB_OUTPUT"
+
+      - name: Write final Actions lifecycle evidence
+        id: final_lifecycle_evidence
+        if: always() && steps.route.outputs.act == 'true' && steps.final_lifecycle_staging.outcome == 'success'
+        continue-on-error: true
+        env:
+          CCHP_LIFECYCLE_ARTIFACT_DIR: ${{ steps.final_lifecycle_staging.outputs.dir }}
+          CCHP_LIFECYCLE_ARTIFACT_PHASE: final_candidate
+          CCHP_WORKFLOW_FINALIZATION_PATH: ${{ steps.lifecycle_staging.outputs.dir || runner.temp }}/workflow-finalization.json
+          CCHP_RUNTIME_SNAPSHOT_PATH: ${{ steps.runtime_snapshot.outputs.path }}
+          CCHP_RUNTIME_SNAPSHOT_SHA256: ${{ steps.runtime_snapshot.outputs.sha256 }}
+          CCHP_PROGRESS_PUBLICATION_PATH: ${{ steps.lifecycle_staging.outputs.dir || runner.temp }}/progress-publication.json
+          CCHP_WRITE_OUTCOME: ${{ steps.write.outcome }}
+          CCHP_NEEDS_WRITE: ${{ steps.route.outputs.needs_write }}
+          CCHP_INSTALL_OUTCOME: ${{ steps.install_codex.outcome }}
+          CCHP_PREPARE_OUTCOME: ${{ steps.prepare_codex.outcome }}
+          CCHP_SCAN_OUTCOME: ${{ steps.external_scan.outcome }}
+          CCHP_CAPABILITY_OUTCOME: ${{ steps.capability_gate.outcome }}
+          CCHP_SUPERVISOR_OUTCOME: ${{ steps.codex_supervisor.outcome }}
+          CCHP_FINALIZER_OUTCOME: ${{ steps.reconcile_terminal.outcome }}
+          CCHP_LIFECYCLE_STAGING_OUTCOME: ${{ steps.lifecycle_staging.outcome }}
+          CCHP_LIFECYCLE_EVIDENCE_OUTCOME: ${{ steps.lifecycle_evidence.outcome }}
+          CCHP_VERIFY_LIFECYCLE_OUTCOME: ${{ steps.verify_lifecycle_evidence.outcome }}
+          CCHP_UPLOAD_LIFECYCLE_OUTCOME: ${{ steps.upload_lifecycle_evidence.outcome }}
+          CCHP_VERIFY_UPLOADED_LIFECYCLE_OUTCOME: ${{ steps.verify_uploaded_lifecycle_evidence.outcome }}
+          CCHP_LIFECYCLE_ROUNDTRIP_STAGING_OUTCOME: ${{ steps.lifecycle_roundtrip_staging.outcome }}
+          CCHP_DOWNLOAD_LIFECYCLE_OUTCOME: ${{ steps.download_lifecycle_evidence.outcome }}
+          CCHP_VERIFY_DOWNLOADED_LIFECYCLE_OUTCOME: ${{ steps.verify_downloaded_lifecycle_evidence.outcome }}
+          CCHP_RUNTIME_SNAPSHOT_OUTCOME: ${{ steps.runtime_snapshot.outcome }}
+          CCHP_ENVIRONMENT_CLEANUP_OUTCOME: ${{ steps.environment_cleanup.outcome }}
+          CCHP_PRIMARY_ARTIFACT_INVALID: ${{ steps.upload_lifecycle_evidence.outcome == 'success' && (steps.verify_uploaded_lifecycle_evidence.outcome != 'success' || steps.lifecycle_roundtrip_staging.outcome != 'success' || steps.download_lifecycle_evidence.outcome != 'success' || steps.verify_downloaded_lifecycle_evidence.outcome != 'success') }}
+          CCHP_INVALID_PRIMARY_ARTIFACT_CLEANUP_TOKEN_OUTCOME: ${{ steps.invalid_primary_artifact_cleanup_token.outcome }}
+          CCHP_INVALID_PRIMARY_ARTIFACT_CLEANUP_OUTCOME: ${{ steps.delete_invalid_lifecycle_evidence.outcome }}
+          CCHP_JOB_CANCELLED: ${{ job.status == 'cancelled' }}
+        run: bun "$ENGINE_DIR/src/codex/lifecycle-artifact.ts"
+
+      - name: Verify final Actions lifecycle evidence
+        id: verify_final_lifecycle_evidence
+        if: always() && steps.route.outputs.act == 'true' && steps.final_lifecycle_evidence.outcome == 'success'
+        continue-on-error: true
+        env:
+          CCHP_LIFECYCLE_ARTIFACT_PATH: ${{ steps.final_lifecycle_evidence.outputs.path }}
+          CCHP_LIFECYCLE_ARTIFACT_SHA256: ${{ steps.final_lifecycle_evidence.outputs.sha256 }}
+        run: bun "$ENGINE_DIR/src/codex/lifecycle-artifact.ts" --verify
+
+      - name: Upload final Actions lifecycle evidence
+        id: upload_final_lifecycle_evidence
+        if: always() && steps.route.outputs.act == 'true' && steps.verify_final_lifecycle_evidence.outcome == 'success'
+        continue-on-error: true
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: cchp-actions-lifecycle-final-${{ github.run_id }}-${{ github.run_attempt }}-${{ steps.final_lifecycle_evidence.outputs.sha256 }}
+          path: ${{ steps.final_lifecycle_evidence.outputs.path }}
+          archive: false
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Verify uploaded final lifecycle digest
+        id: verify_uploaded_final_lifecycle_evidence
+        if: always() && steps.route.outputs.act == 'true' && steps.upload_final_lifecycle_evidence.outcome == 'success'
+        continue-on-error: true
+        env:
+          ARTIFACT_ID: ${{ steps.upload_final_lifecycle_evidence.outputs.artifact-id }}
+          UPLOADED_SHA256: ${{ steps.upload_final_lifecycle_evidence.outputs.artifact-digest }}
+          EXPECTED_SHA256: ${{ steps.final_lifecycle_evidence.outputs.sha256 }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$ARTIFACT_ID" =~ ^[1-9][0-9]*$ ]]
+          [[ "$UPLOADED_SHA256" =~ ^[a-f0-9]{64}$ ]]
+          [[ "$UPLOADED_SHA256" == "$EXPECTED_SHA256" ]]
+
+      - name: Prepare final lifecycle round-trip staging
+        id: final_lifecycle_roundtrip_staging
+        if: always() && steps.route.outputs.act == 'true' && steps.verify_uploaded_final_lifecycle_evidence.outcome == 'success'
+        continue-on-error: true
+        shell: bash
+        run: |
+          final_roundtrip="$(mktemp -d "${RUNNER_TEMP}/cchp-actions-lifecycle-final-roundtrip.XXXXXX")"
+          chmod 700 "$final_roundtrip"
+          printf 'dir=%s\n' "$final_roundtrip" >> "$GITHUB_OUTPUT"
+
+      - name: Download final Actions lifecycle evidence
+        id: download_final_lifecycle_evidence
+        if: always() && steps.route.outputs.act == 'true' && steps.final_lifecycle_roundtrip_staging.outcome == 'success'
+        continue-on-error: true
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ steps.upload_final_lifecycle_evidence.outputs.artifact-id }}
+          path: ${{ steps.final_lifecycle_roundtrip_staging.outputs.dir }}
+          digest-mismatch: error
+
+      - name: Verify downloaded final Actions lifecycle evidence
+        id: verify_downloaded_final_lifecycle_evidence
+        if: always() && steps.route.outputs.act == 'true' && steps.download_final_lifecycle_evidence.outcome == 'success'
+        continue-on-error: true
+        env:
+          CCHP_LIFECYCLE_ARTIFACT_PATH: ${{ steps.final_lifecycle_roundtrip_staging.outputs.dir }}/${{ steps.final_lifecycle_evidence.outputs.filename }}
+          CCHP_LIFECYCLE_ARTIFACT_SHA256: ${{ steps.final_lifecycle_evidence.outputs.sha256 }}
+        run: bun "$ENGINE_DIR/src/codex/lifecycle-artifact.ts" --verify
+
+      - name: Mint App token (invalid artifact cleanup)
+        id: invalid_artifact_cleanup_token
+        if: >-
+          always() && steps.route.outputs.act == 'true' &&
+          (steps.upload_final_lifecycle_evidence.outcome == 'success' &&
+            (steps.verify_uploaded_final_lifecycle_evidence.outcome != 'success' ||
+             steps.final_lifecycle_roundtrip_staging.outcome != 'success' ||
+             steps.download_final_lifecycle_evidence.outcome != 'success' ||
+             steps.verify_downloaded_final_lifecycle_evidence.outcome != 'success'))
+        continue-on-error: true
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3
+        with:
+          client-id: ${{ secrets.app-client-id }}
+          private-key: ${{ secrets.app-private-key }}
+          permission-actions: write
+          permission-contents: read
+          permission-metadata: read
+
+      - name: Delete invalid uploaded final lifecycle evidence
+        id: delete_invalid_final_lifecycle_evidence
+        if: >-
+          always() && steps.route.outputs.act == 'true' &&
+          steps.invalid_artifact_cleanup_token.outcome == 'success' &&
+          steps.upload_final_lifecycle_evidence.outcome == 'success' &&
+          (steps.verify_uploaded_final_lifecycle_evidence.outcome != 'success' ||
+           steps.final_lifecycle_roundtrip_staging.outcome != 'success' ||
+           steps.download_final_lifecycle_evidence.outcome != 'success' ||
+           steps.verify_downloaded_final_lifecycle_evidence.outcome != 'success')
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ steps.invalid_artifact_cleanup_token.outputs.token }}
+          ARTIFACT_ID: ${{ steps.upload_final_lifecycle_evidence.outputs.artifact-id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$ARTIFACT_ID" =~ ^[1-9][0-9]*$ ]]
+          gh api --method DELETE "repos/${GITHUB_REPOSITORY}/actions/artifacts/${ARTIFACT_ID}"
+
+      # This is the sole authoritative success publication. It runs only after
+      # final candidate transport and invalid-artifact cleanup are known, so the
+      # public terminal state and the eventual job conclusion share one resolver.
+      - name: Reconcile final workflow state
+        id: reconcile_final_transport
+        if: always() && steps.route.outputs.act == 'true'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ steps.finalizer_token.outputs.token || steps.base.outputs.token }}
+          CCHP_WRITE_OUTCOME: ${{ steps.write.outcome }}
+          CCHP_NEEDS_WRITE: ${{ steps.route.outputs.needs_write }}
+          CCHP_INSTALL_OUTCOME: ${{ steps.install_codex.outcome }}
+          CCHP_PREPARE_OUTCOME: ${{ steps.prepare_codex.outcome }}
+          CCHP_SCAN_OUTCOME: ${{ steps.external_scan.outcome }}
+          CCHP_CAPABILITY_OUTCOME: ${{ steps.capability_gate.outcome }}
+          CCHP_SUPERVISOR_OUTCOME: ${{ steps.codex_supervisor.outcome }}
+          CCHP_LIFECYCLE_STAGING_OUTCOME: ${{ steps.lifecycle_staging.outcome }}
+          CCHP_LIFECYCLE_EVIDENCE_OUTCOME: ${{ steps.lifecycle_evidence.outcome }}
+          CCHP_VERIFY_LIFECYCLE_OUTCOME: ${{ steps.verify_lifecycle_evidence.outcome }}
+          CCHP_UPLOAD_LIFECYCLE_OUTCOME: ${{ steps.upload_lifecycle_evidence.outcome }}
+          CCHP_VERIFY_UPLOADED_LIFECYCLE_OUTCOME: ${{ steps.verify_uploaded_lifecycle_evidence.outcome }}
+          CCHP_LIFECYCLE_ROUNDTRIP_STAGING_OUTCOME: ${{ steps.lifecycle_roundtrip_staging.outcome }}
+          CCHP_DOWNLOAD_LIFECYCLE_OUTCOME: ${{ steps.download_lifecycle_evidence.outcome }}
+          CCHP_VERIFY_DOWNLOADED_LIFECYCLE_OUTCOME: ${{ steps.verify_downloaded_lifecycle_evidence.outcome }}
+          CCHP_RUNTIME_SNAPSHOT_OUTCOME: ${{ steps.runtime_snapshot.outcome }}
+          CCHP_ENVIRONMENT_CLEANUP_OUTCOME: ${{ steps.environment_cleanup.outcome }}
+          CCHP_FINALIZER_OUTCOME: ${{ steps.reconcile_terminal.outcome }}
+          CCHP_FINAL_CANDIDATE_REQUIRED: ${{ steps.reconcile_terminal.outcome == 'success' }}
+          CCHP_PRIMARY_ARTIFACT_INVALID: ${{ steps.upload_lifecycle_evidence.outcome == 'success' && (steps.verify_uploaded_lifecycle_evidence.outcome != 'success' || steps.lifecycle_roundtrip_staging.outcome != 'success' || steps.download_lifecycle_evidence.outcome != 'success' || steps.verify_downloaded_lifecycle_evidence.outcome != 'success') }}
+          CCHP_INVALID_PRIMARY_ARTIFACT_CLEANUP_TOKEN_OUTCOME: ${{ steps.invalid_primary_artifact_cleanup_token.outcome }}
+          CCHP_INVALID_PRIMARY_ARTIFACT_CLEANUP_OUTCOME: ${{ steps.delete_invalid_lifecycle_evidence.outcome }}
+          CCHP_FINAL_LIFECYCLE_STAGING_OUTCOME: ${{ steps.final_lifecycle_staging.outcome }}
+          CCHP_FINAL_LIFECYCLE_EVIDENCE_OUTCOME: ${{ steps.final_lifecycle_evidence.outcome }}
+          CCHP_VERIFY_FINAL_LIFECYCLE_OUTCOME: ${{ steps.verify_final_lifecycle_evidence.outcome }}
+          CCHP_UPLOAD_FINAL_LIFECYCLE_OUTCOME: ${{ steps.upload_final_lifecycle_evidence.outcome }}
+          CCHP_VERIFY_UPLOADED_FINAL_LIFECYCLE_OUTCOME: ${{ steps.verify_uploaded_final_lifecycle_evidence.outcome }}
+          CCHP_FINAL_LIFECYCLE_ROUNDTRIP_STAGING_OUTCOME: ${{ steps.final_lifecycle_roundtrip_staging.outcome }}
+          CCHP_DOWNLOAD_FINAL_LIFECYCLE_OUTCOME: ${{ steps.download_final_lifecycle_evidence.outcome }}
+          CCHP_VERIFY_DOWNLOADED_FINAL_LIFECYCLE_OUTCOME: ${{ steps.verify_downloaded_final_lifecycle_evidence.outcome }}
+          CCHP_FINAL_ARTIFACT_INVALID: ${{ steps.upload_final_lifecycle_evidence.outcome == 'success' && (steps.verify_uploaded_final_lifecycle_evidence.outcome != 'success' || steps.final_lifecycle_roundtrip_staging.outcome != 'success' || steps.download_final_lifecycle_evidence.outcome != 'success' || steps.verify_downloaded_final_lifecycle_evidence.outcome != 'success') }}
+          CCHP_INVALID_FINAL_ARTIFACT_CLEANUP_TOKEN_OUTCOME: ${{ steps.invalid_artifact_cleanup_token.outcome }}
+          CCHP_INVALID_FINAL_ARTIFACT_CLEANUP_OUTCOME: ${{ steps.delete_invalid_final_lifecycle_evidence.outcome }}
+          CCHP_JOB_CANCELLED: ${{ job.status == 'cancelled' }}
+          CCHP_ENFORCE_RESOLVED_STATE: "true"
+          CCHP_RUNTIME_SNAPSHOT_PATH: ${{ steps.runtime_snapshot.outputs.path }}
+          CCHP_RUNTIME_SNAPSHOT_SHA256: ${{ steps.runtime_snapshot.outputs.sha256 }}
+          CCHP_PROGRESS_PUBLICATION_PATH: ${{ steps.lifecycle_staging.outputs.dir || runner.temp }}/progress-publication.json
+          CCHP_WORKFLOW_FINALIZATION_PATH: ${{ steps.lifecycle_staging.outputs.dir || runner.temp }}/workflow-finalization.json
+          CCHP_REVIEW_PUBLICATION_PATH: ${{ steps.lifecycle_staging.outputs.dir || runner.temp }}/review-publication.json
+        run: bun "$ENGINE_DIR/src/codex/finalize-workflow-progress.ts"
+
+      - name: Enforce terminal workflow and final artifact transport
+        if: always() && steps.route.outputs.act == 'true'
+        env:
+          FINAL_RECONCILE_OUTCOME: ${{ steps.reconcile_final_transport.outcome }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$FINAL_RECONCILE_OUTCOME" == "success" ]]

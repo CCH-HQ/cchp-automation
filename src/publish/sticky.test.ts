@@ -5,10 +5,11 @@ import { progressMarkerKey, renderProgress, renderTerminalProgress, sanitizeTask
 
 // A recording fake: listComments (via paginate) returns the seeded thread;
 // create/update record their params and echo an id + html_url.
-function fake(listComments: { id: number; body?: string | null }[] = []) {
+function fake(listComments: { id: number; body?: string | null; user?: { login?: string } }[] = []) {
   const calls = {
     createComment: [] as Record<string, unknown>[],
     updateComment: [] as Record<string, unknown>[],
+    deleteComment: [] as Record<string, unknown>[],
     paginate: [] as { tag: string; params: Record<string, unknown> }[],
   }
   const listRef = Object.assign(() => {}, { __tag: "listComments" })
@@ -18,11 +19,20 @@ function fake(listComments: { id: number; body?: string | null }[] = []) {
         listComments: listRef,
         createComment: async (p: Record<string, unknown>) => {
           calls.createComment.push(p)
+          listComments.push({ id: 999, body: String(p.body ?? ""), user: { login: "cchp[bot]" } })
           return { data: { id: 999, html_url: "https://gh/comments/999" } }
         },
         updateComment: async (p: Record<string, unknown>) => {
           calls.updateComment.push(p)
+          const existing = listComments.find((comment) => comment.id === p.comment_id)
+          if (existing) existing.body = String(p.body ?? "")
           return { data: { id: p.comment_id, html_url: `https://gh/comments/${p.comment_id}` } }
+        },
+        deleteComment: async (p: Record<string, unknown>) => {
+          calls.deleteComment.push(p)
+          const index = listComments.findIndex((comment) => comment.id === p.comment_id)
+          if (index >= 0) listComments.splice(index, 1)
+          return { data: {} }
         },
       },
     },
@@ -31,14 +41,14 @@ function fake(listComments: { id: number; body?: string | null }[] = []) {
       return fn.__tag === "listComments" ? listComments : []
     },
   } as unknown as GitHubClient
-  return { octokit, calls }
+  return { octokit, calls, comments: listComments }
 }
 
 // ── upsertSticky: create-vs-edit branch ───────────────────────────────────────
 test("upsertSticky: no existing marker → creates a new comment with the marker appended", async () => {
   const { octokit, calls } = fake([])
   const key = MARKER.progress("pr_opened")
-  const res = await upsertSticky(octokit, "CCH-HQ/repo", 7, key, "hello world")
+  const res = await upsertSticky(octokit, "CCH-HQ/repo", 7, key, "hello world", undefined, "cchp[bot]")
   expect(res).toEqual({ action: "created", id: 999, htmlUrl: "https://gh/comments/999" })
   expect(calls.updateComment.length).toBe(0)
   expect(calls.createComment.length).toBe(1)
@@ -58,9 +68,9 @@ test("upsertSticky: existing marker → edits that comment in place, no new comm
   const key = MARKER.progress("pr_opened")
   const { octokit, calls } = fake([
     { id: 1, body: "unrelated" },
-    { id: 42, body: `stale progress\n${hidden(key)}` },
+    { id: 42, body: `stale progress\n${hidden(key)}`, user: { login: "cchp[bot]" } },
   ])
-  const res = await upsertSticky(octokit, "CCH-HQ/repo", 7, key, "fresh progress")
+  const res = await upsertSticky(octokit, "CCH-HQ/repo", 7, key, "fresh progress", undefined, "cchp[bot]")
   expect(res).toEqual({ action: "updated", id: 42, htmlUrl: "https://gh/comments/42" })
   expect(calls.createComment.length).toBe(0)
   expect(calls.updateComment.length).toBe(1)
@@ -72,10 +82,60 @@ test("upsertSticky: existing marker → edits that comment in place, no new comm
 
 test("upsertSticky: a different marker in the thread is NOT matched (create, not edit)", async () => {
   const { octokit, calls } = fake([{ id: 5, body: `other\n${hidden(MARKER.progress("ci_fix"))}` }])
-  const res = await upsertSticky(octokit, "CCH-HQ/repo", 7, MARKER.progress("pr_opened"), "body")
+  const res = await upsertSticky(octokit, "CCH-HQ/repo", 7, MARKER.progress("pr_opened"), "body", undefined, "cchp[bot]")
   expect(res.action).toBe("created")
   expect(calls.updateComment.length).toBe(0)
   expect(calls.createComment.length).toBe(1)
+})
+
+test("upsertSticky: foreign marker owner is never edited", async () => {
+  const key = MARKER.progress("pr_opened")
+  const { octokit, calls } = fake([{ id: 9, body: `old\n${hidden(key)}`, user: { login: "attacker" } }])
+  const result = await upsertSticky(octokit, "CCH-HQ/repo", 7, key, "fresh", undefined, "cchp[bot]")
+  expect(result?.action).toBe("created")
+  expect(calls.updateComment).toHaveLength(0)
+  expect(calls.createComment).toHaveLength(1)
+})
+
+test("upsertSticky: a foreign marker cannot shadow a later bot-owned sticky", async () => {
+  const key = MARKER.progress("pr_opened")
+  const { octokit, calls, comments } = fake([
+    { id: 1, body: `forged\n${hidden(key)}`, user: { login: "attacker" } },
+    { id: 2, body: `old\n${hidden(key)}`, user: { login: "cchp[bot]" } },
+  ])
+  expect(await upsertSticky(octokit, "CCH-HQ/repo", 7, key, "fresh", undefined, "cchp[bot]"))
+    .toEqual({ action: "updated", id: 2, htmlUrl: "https://gh/comments/2" })
+  expect(calls.createComment).toHaveLength(0)
+  expect(calls.updateComment.map((call) => call.comment_id)).toEqual([2])
+  expect(calls.deleteComment).toHaveLength(0)
+  expect(comments.find((comment) => comment.id === 1)?.body).toBe(`forged\n${hidden(key)}`)
+})
+
+test("upsertSticky: bot-owned duplicates converge without touching foreign markers", async () => {
+  const key = MARKER.progress("pr_opened")
+  const { octokit, calls, comments } = fake([
+    { id: 1, body: `forged-one\n${hidden(key)}`, user: { login: "attacker" } },
+    { id: 10, body: `old-one\n${hidden(key)}`, user: { login: "cchp[bot]" } },
+    { id: 2, body: `forged-two\n${hidden(key)}`, user: { login: "attacker" } },
+    { id: 11, body: `old-two\n${hidden(key)}`, user: { login: "cchp[bot]" } },
+  ])
+  expect(await upsertSticky(octokit, "CCH-HQ/repo", 7, key, "latest", undefined, "cchp[bot]"))
+    .toEqual({ action: "updated", id: 10, htmlUrl: "https://gh/comments/10" })
+  expect(calls.updateComment.map((call) => call.comment_id)).toEqual([10])
+  expect(calls.deleteComment.map((call) => call.comment_id)).toEqual([11])
+  expect(comments.map((comment) => comment.id)).toEqual([1, 10, 2])
+  expect(comments.find((comment) => comment.id === 1)?.body).toContain("forged-one")
+  expect(comments.find((comment) => comment.id === 2)?.body).toContain("forged-two")
+})
+
+test("upsertSticky: missing trusted owner fails before any GitHub request", async () => {
+  const { octokit, calls } = fake()
+  await expect(upsertSticky(octokit, "CCH-HQ/repo", 7, MARKER.progress("pr_opened"), "body", undefined, ""))
+    .rejects.toThrow("trusted bot login is required")
+  expect(calls.paginate).toHaveLength(0)
+  expect(calls.createComment).toHaveLength(0)
+  expect(calls.updateComment).toHaveLength(0)
+  expect(calls.deleteComment).toHaveLength(0)
 })
 
 // ── renderProgress (Progress Comment renderer — faithful port) ─────────────────

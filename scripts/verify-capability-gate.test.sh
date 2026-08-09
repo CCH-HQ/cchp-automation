@@ -21,7 +21,13 @@ app_server='"app_server_long_lived_secrets_absent":"passed",'
 shell_caps='"shell_capabilities_excluded":"passed",'
 shell_snapshot='"shell_snapshot_directory_absent":"passed",'
 network_reason="${TEST_NETWORK_REASON:-proxy-structured-denial}"
-network='"external_network":{"result":"policy-blocked","reason":"'"$network_reason"'","probe_target":"https://example.com","configured_enforcement":"direct"},'
+network_observations=''
+if [[ "$network_reason" == "host-reachable-sandbox-refused" && "${TEST_OMIT_FIELD:-}" != "paired-network-observations" ]]; then
+  sandbox_detail='"ConnectionRefused"'
+  [[ "${TEST_OMIT_FIELD:-}" != "paired-detail-array" ]] || sandbox_detail='["ConnectionRefused"]'
+  network_observations=',"observations":{"host_before":{"result":"reachable","reason":"http-response","target":"https://example.com","detail":"status=200"},"sandbox":{"result":"indeterminate","reason":"unclassified-error","target":"https://example.com","detail":'"$sandbox_detail"'},"host_after":{"result":"reachable","reason":"http-response","target":"https://example.com","detail":"status=200"}}'
+fi
+network='"external_network":{"result":"policy-blocked","reason":"'"$network_reason"'","probe_target":"https://example.com","configured_enforcement":"direct"'"$network_observations"'},'
 [[ "${TEST_OMIT_FIELD:-}" != "app_server_long_lived_secrets_absent" ]] || app_server=''
 [[ "${TEST_OMIT_FIELD:-}" != "shell_capabilities_excluded" ]] || shell_caps=''
 [[ "${TEST_OMIT_FIELD:-}" != "shell_snapshot_directory_absent" ]] || shell_snapshot=''
@@ -57,4 +63,7 @@ run_case missing-shell-capabilities shell_capabilities_excluded 1
 run_case missing-shell-snapshot shell_snapshot_directory_absent 1
 run_case missing-network external_network 1
 run_case ambiguous-network "" 1 unclassified-error
+run_case paired-network "" 0 host-reachable-sandbox-refused
+run_case paired-network-missing-observations paired-network-observations 1 host-reachable-sandbox-refused
+run_case paired-network-non-string-detail paired-detail-array 1 host-reachable-sandbox-refused
 printf '[capability-gate-test] passed\n'

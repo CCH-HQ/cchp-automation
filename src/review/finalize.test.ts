@@ -201,7 +201,7 @@ function writeValid(
       : { candidate_ids: ["c1"] } })
     const resultPath = join(root, `${taskId}.json`)
     const result: Record<string, unknown> = {
-      schemaVersion: 2,
+      schemaVersion: 3,
       mode: "explicit_child",
       runId: FINALIZE_CONTEXT.runId,
       parentRunId: FINALIZE_CONTEXT.runId,
@@ -246,6 +246,14 @@ test("finalizeReview: a complete valid bundle passes and writes the attestation"
   // Default marker path is <artifactDir>/review-finalized.json.
   const written = JSON.parse(readFileSync(join(artifactDir, "review-finalized.json"), "utf8"))
   expect(written).toEqual(marker as unknown as Record<string, unknown>)
+})
+
+test("finalizeReview: accepts legacy explicit v2 artifacts during durable resume", () => {
+  const { artifactDir, trustedManifest } = writeValid(
+    () => undefined,
+    (result) => { result.schemaVersion = 2 },
+  )
+  expect(finalize(artifactDir, trustedManifest)).toMatchObject({ valid: true, run_id: FINALIZE_CONTEXT.runId })
 })
 
 test("finalizeReview: trusted manifest identity and schema must match the finalizer context", () => {
@@ -389,7 +397,7 @@ test("finalizeReview: confirmed locations require a valid anchored range", () =>
   expect(() => finalize(invalid.artifactDir, invalid.trustedManifest)).toThrow(/one valid terminal verdict/)
 })
 
-test("finalizeReview: validation and attestation use the same opened evidence snapshot", () => {
+test("finalizeReview: evidence replacement while snapshotting fails closed before attestation", () => {
   const { artifactDir, trustedManifest, root } = writeValid()
   const coveragePath = join(artifactDir, "coverage.json")
   const originalCoverage = readFileSync(coveragePath)
@@ -404,10 +412,10 @@ test("finalizeReview: validation and attestation use the same opened evidence sn
       },
     }),
   }
-  const marker = finalize(artifactDir, trustedManifest, dependencies)
+  expect(() => finalize(artifactDir, trustedManifest, dependencies)).toThrow(/missing or unsafe regular file/)
   expect(replaced).toBe(true)
-  expect(marker.artifacts.coverage).toBe(sha(originalCoverage))
-  expect(marker.artifacts.coverage).not.toBe(sha(readFileSync(coveragePath)))
+  expect(readFileSync(join(root, "coverage.original.json"))).toEqual(originalCoverage)
+  expect(existsSync(join(artifactDir, "review-finalized.json"))).toBe(false)
 })
 
 test("finalizeReview: result mode must exactly match the admission mode", () => {
