@@ -301,6 +301,7 @@ CCHP_RECORD_HMAC_KEY="$record_key" \
 CCHP_SECURE_UNLINK_TESTING=1 \
 CCHP_SECURE_UNLINK_TEST_PAUSE="$secure_pause" \
 CCHP_SECURE_UNLINK_TEST_RESUME="$secure_resume" \
+GITHUB_ACTIONS=false \
   python3 "$repo_root/scripts/secure-unlink.py" --path "$secure_record" --expected-mac "$secure_mac" \
   > "$fixture/secure-unlink.log" 2>&1 &
 secure_unlink_pid=$!
