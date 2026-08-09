@@ -9,6 +9,15 @@ runner_temp="$fixture/runner"
 mkdir -p -- "$runner_temp"
 record_key="$(printf 'ab%.0s' {1..32})"
 
+process_live() {
+  local pid="$1" stat state
+  [[ -r "/proc/${pid}/stat" ]] || return 1
+  stat="$(<"/proc/${pid}/stat")" || return 1
+  stat="${stat##*) }"
+  read -r state _ <<<"$stat"
+  [[ "$state" != "Z" ]]
+}
+
 authenticate_file() {
   local path="$1" json mac temporary
   json="$(<"$path")"
@@ -275,8 +284,8 @@ if command -v setsid >/dev/null 2>&1; then
   wait "$leader_pid"
   descendant_pid="$(<"$descendant_path")"
   run_cleanup "$workdir"
-  for _ in {1..100}; do kill -0 "$descendant_pid" 2>/dev/null || break; sleep 0.05; done
-  ! kill -0 "$descendant_pid" 2>/dev/null
+  for _ in {1..100}; do process_live "$descendant_pid" || break; sleep 0.05; done
+  ! process_live "$descendant_pid"
   [[ ! -e "$process_file" ]]
 fi
 
