@@ -53,6 +53,8 @@ export interface RawUsageRecord extends RawUsageInput {
 export interface UsageResult {
   acceptedRaw: boolean
   consumed: number
+  reservedTokens?: number
+  responsesInFlight?: number
   limit: number
   fraction: number
   state: TokenBudgetState
@@ -464,11 +466,14 @@ export class UsageLedger {
 
   private result(acceptedRaw: boolean): UsageResult {
     const fraction = this.consumed / this.options.totalBudget
+    const reservations = [...this.reservations.values()]
     const state: TokenBudgetState =
       fraction >= 1 ? "exceeded" : fraction >= 0.85 ? "throttled" : fraction >= 0.7 ? "warning" : "normal"
     return {
       acceptedRaw,
       consumed: this.consumed,
+      reservedTokens: reservations.reduce((sum, reservation) => sum + reservation.estimatedTokens, 0),
+      responsesInFlight: reservations.length,
       limit: this.options.totalBudget,
       fraction,
       state,

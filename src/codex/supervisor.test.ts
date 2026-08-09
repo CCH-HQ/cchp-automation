@@ -132,10 +132,16 @@ test("persists a successful app-server root lifecycle and runs finalizer once", 
         return { thread: { id: "root" } }
       }
       if (method === "turn/start") {
-        queueMicrotask(() => void supervisor.handleNotification({
-          method: "turn/completed",
-          params: { threadId: "root", turn: { id: "turn", status: "completed" } },
-        }))
+        queueMicrotask(async () => {
+          await supervisor.handleNotification({
+            method: "item/completed",
+            params: { threadId: "root", item: { id: "message", type: "agentMessage", text: "Inspection complete." } },
+          })
+          await supervisor.handleNotification({
+            method: "turn/completed",
+            params: { threadId: "root", turn: { id: "turn", status: "completed" } },
+          })
+        })
         return { turn: { id: "turn" } }
       }
       return {}
@@ -161,7 +167,15 @@ test("persists a successful app-server root lifecycle and runs finalizer once", 
     deadlines: { wholeRunMs: 10_000, heartbeatMs: 10, noProgressWarningMs: 2_000, noProgressTerminalMs: 8_000 },
   })
   const result = await supervisor.run()
-  expect(result).toMatchObject({ state: "SUCCEEDED", exitCode: 0, rootThreadId: "root", rootTurnId: "turn" })
+  expect(result).toMatchObject({
+    state: "SUCCEEDED",
+    exitCode: 0,
+    rootThreadId: "root",
+    rootTurnId: "turn",
+    finalMessage: "Inspection complete.",
+    runtime: { codexVersion: "unknown", executionMode: "native_v2" },
+    usage: { reservedTokens: 0, responsesInFlight: 0 },
+  })
   expect(threadStartParams).toMatchObject({ experimentalRawEvents: true })
   expect(finalized).toBe(1)
   expect(supervisor.currentState).toBe("SUCCEEDED")

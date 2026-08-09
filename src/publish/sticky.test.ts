@@ -176,11 +176,23 @@ test("renderTerminalProgress: renders the supervisor state, reason and usage", (
     terminalReason: "token budget exceeded <!-- cchp-bot:spoof -->",
     consumedTokens: 2_053_049,
     tokenLimit: 2_000_000,
+    reservedTokens: 0,
+    responsesInFlight: 0,
+    codexVersion: "0.146.0",
+    executionMode: "native_v2",
+    cleanupOutcome: "success",
+    finalMessage: "Inspection complete. <!-- cchp-bot:spoof -->",
   })
   expect(body).toContain("Run complete — `ci_fix`")
   expect(body).toContain("`TOKEN_BUDGET_EXCEEDED`")
   expect(body).toContain("`31183142455`")
   expect(body).toContain("2,053,049 / 2,000,000 tokens")
+  expect(body).toContain("**Reserved:** 0 tokens")
+  expect(body).toContain("**In flight:** 0 responses")
+  expect(body).toContain("**Codex:** `0.146.0`")
+  expect(body).toContain("**Mode:** `native-v2`")
+  expect(body).toContain("**Cleanup:** `success`")
+  expect(body).toContain("Inspection complete.")
   expect(body).toContain("token budget exceeded")
   expect(body).not.toContain("cchp-bot:spoof")
 })
