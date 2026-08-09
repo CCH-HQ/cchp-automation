@@ -593,7 +593,7 @@ test("preserves a whole-run timeout that begins while the external finalizer is 
 
   const running = supervisor.run()
   await finalizerEntered
-  await eventually(() => supervisor.currentState === "TIMED_OUT", 500)
+  await eventually(() => supervisor.currentState === "TIMED_OUT")
   releaseFinalizer()
   expect(await running).toMatchObject({ state: "TIMED_OUT", exitCode: 124, terminalReason: "whole run deadline exceeded" })
   expect(supervisor.currentState).toBe("TIMED_OUT")
