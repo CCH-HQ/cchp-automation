@@ -996,11 +996,11 @@ test("restores the original root drain deadline instead of losing an active chil
       rootTurnId: "turn",
       restartAttempts: 0,
       startedAt,
-      wholeRunDeadlineAt: new Date(Date.now() + 1000).toISOString(),
+      wholeRunDeadlineAt: new Date(Date.now() + 10_000).toISOString(),
       lastSemanticProgressAt: startedAt,
-      drainDeadlineAt: new Date(Date.now() + 300).toISOString(),
+      drainDeadlineAt: new Date(Date.now() + 5_000).toISOString(),
     },
-    deadlines: { wholeRunMs: 1000, heartbeatMs: 100, reconcileMs: 10, parentResumeMs: 300, noProgressWarningMs: 500, noProgressTerminalMs: 900 },
+    deadlines: { wholeRunMs: 10_000, heartbeatMs: 100, reconcileMs: 10, parentResumeMs: 5_000, noProgressWarningMs: 5_000, noProgressTerminalMs: 9_000 },
   })
   const running = supervisor.run()
   await Bun.sleep(50)

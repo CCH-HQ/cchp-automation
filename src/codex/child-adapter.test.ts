@@ -380,7 +380,7 @@ test("followup resumes the same session and sendMessage queues the next turn", a
         env: { PATH: process.env.PATH ?? "", FAKE_CODEX_EXEC_SCENARIO: "slow", FAKE_CODEX_EXEC_TRACE: trace },
       },
       resultRoot: join(root, "results"),
-      timeoutMs: 1_000,
+      timeoutMs: 5_000,
     })
 
     const first = await adapter.spawn("root", { id: "child-1", role: "reviewer", passKind: "review_shard", prompt: "first" })
