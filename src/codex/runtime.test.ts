@@ -123,11 +123,13 @@ test("caps response count and tokens only for short read-only interactive tasks"
     expect(resolveRuntimeUsageGuardrails({ task, hasWriteToken: false }, 2_000_000)).toEqual({
       totalTokenBudget: 384_000,
       maxResponsesPerTurn: 6,
+      maxOutputTokens: 8_192,
     })
   }
   expect(resolveRuntimeUsageGuardrails({ task: "manual", hasWriteToken: false }, 128_000)).toEqual({
     totalTokenBudget: 128_000,
     maxResponsesPerTurn: 6,
+    maxOutputTokens: 8_192,
   })
   expect(resolveRuntimeUsageGuardrails({ task: "manual", hasWriteToken: true }, 2_000_000)).toEqual({
     totalTokenBudget: 2_000_000,
@@ -138,6 +140,7 @@ test("caps response count and tokens only for short read-only interactive tasks"
   expect(resolveRuntimeUsageGuardrails({ task: "engage", hasWriteToken: false }, Number.NaN)).toEqual({
     totalTokenBudget: 384_000,
     maxResponsesPerTurn: 6,
+    maxOutputTokens: 8_192,
   })
 })
 

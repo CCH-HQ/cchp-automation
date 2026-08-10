@@ -1204,6 +1204,18 @@ export class Supervisor {
     this.writeRunManifest()
   }
 
+  public async chargeProviderReservationEstimate(reservation: UsageReservationRef, reason = "provider_usage_unknown"): Promise<void> {
+    if (!this.usage.chargeReservationEstimate(reservation, reason, !this.settled)) return
+    this.signalUsageCapacityChange()
+    if (this.settled) return
+    this.append({
+      event: "provider_request_reservation_estimate_charged",
+      ...reservation,
+      reason,
+    })
+    this.writeRunManifest()
+  }
+
   public async recordProviderUsage(usage: ProviderBridgeUsage): Promise<UsageResult> {
     if (this.settled) {
       if (usage.reservation) this.usage.releaseReservation(usage.reservation, "late_provider_usage", false)

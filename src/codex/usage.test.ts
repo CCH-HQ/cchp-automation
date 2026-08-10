@@ -167,6 +167,17 @@ test("releases failed reservations and restores unresolved reservations after re
   })
 })
 
+test("charges the reservation estimate when provider usage is unavailable", () => {
+  const ledger = new UsageLedger({ totalBudget: 1_000, admissionFraction: 0.85 })
+  const admission = ledger.admitNextResponse({
+    billingScopeId: "run", threadId: "root", turnId: "turn", contextWindow: 400,
+  })
+  expect(admission.allowed).toBe(true)
+  expect(ledger.chargeReservationEstimate(admission.reservation!, "missing_usage")).toBe(true)
+  expect(ledger.budget).toMatchObject({ consumed: 400, reservedTokens: 0, responsesInFlight: 0 })
+  expect(ledger.releaseReservation(admission.reservation!, "late_release")).toBe(false)
+})
+
 test("recovers stale-generation reservations as conservative charges without leaving them in flight", () => {
   const path = join(mkdtempSync(join(tmpdir(), "usage-reservation-generation-")), "usage.jsonl")
   const first = new UsageLedger({
@@ -242,6 +253,46 @@ test("prefers a request-derived estimate over the model context window", () => {
     allowed: true,
     estimatedNextTokens: 48_000,
     reservedTokens: 48_000,
+  })
+})
+
+test("short read-only conservative prompt bound preserves the 384k hard cap", () => {
+  const ledger = new UsageLedger({
+    totalBudget: 384_000,
+    admissionFraction: 0.85,
+    maxResponsesPerTurn: 6,
+  })
+  for (const [index, totalTokens] of [42_327, 40_000, 40_000, 39_503].entries()) {
+    ledger.recordRaw({
+      threadId: "root",
+      turnId: "turn",
+      responseId: `response-${index}`,
+      provider: "p",
+      model: "m",
+      totalTokens,
+      billingScopeId: "run",
+    })
+  }
+
+  // 生产 run 31342358138 在此处已计费 161,830 tokens. 将单次 output 从
+  // 131,072 限制为 8,192 后, 再以 prompt UTF-8 bytes 作为 token 上界.
+  // 即使 provider 的实际 tokenizer 比平均 3 bytes/token 更密, 请求也不会
+  // 在不可撤销的 dispatch 后才发现它突破了 384k ceiling.
+  const fifth = ledger.admitNextResponse({
+    billingScopeId: "run",
+    threadId: "root",
+    turnId: "turn",
+    provider: "p",
+    model: "m",
+    estimatedTokens: 185_882,
+  })
+  expect(fifth).toMatchObject({
+    allowed: false,
+    reason: "projected_budget",
+    consumed: 161_830,
+    threshold: 326_400,
+    estimatedNextTokens: 185_882,
+    responsesInTurn: 4,
   })
 })
 
