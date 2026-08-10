@@ -228,7 +228,7 @@ const SHORT_READ_ONLY_TASKS = new Set<Task>(["engage", "manual", "dispatch"])
 export function resolveRuntimeUsageGuardrails(
   permission: Pick<TaskPermissionProfile, "task" | "hasWriteToken">,
   configuredBudget: number,
-): { totalTokenBudget: number; maxResponsesPerTurn?: number } {
+): { totalTokenBudget: number; maxResponsesPerTurn?: number; maxOutputTokens?: number } {
   const budget = Number.isSafeInteger(configuredBudget) && configuredBudget > 0 ? configuredBudget : 2_000_000
   if (permission.hasWriteToken || !SHORT_READ_ONLY_TASKS.has(permission.task)) {
     return { totalTokenBudget: budget }
@@ -236,6 +236,7 @@ export function resolveRuntimeUsageGuardrails(
   return {
     totalTokenBudget: Math.min(budget, 384_000),
     maxResponsesPerTurn: 6,
+    maxOutputTokens: 8_192,
   }
 }
 
@@ -529,12 +530,14 @@ export async function main(): Promise<number> {
     process.env.CCHP_RUN_WRITER_ID = collaborationAdmission.writerId
     process.env.CCHP_RUN_WRITER_GENERATION = String(collaborationAdmission.generation)
     bridge = startProviderBridge(providerSet, {
+      maxOutputTokens: usageGuardrails.maxOutputTokens,
       onUsage: async (usage) => { await supervisor?.recordProviderUsage(usage) },
       onBeforeRequest: async (request) => supervisor
         ? supervisor.authorizeProviderRequest(request)
         : { allowed: true },
       onRequestFinished: async (reservation, outcome, reason) => {
         if (outcome === "released") await supervisor?.releaseProviderReservation(reservation, reason)
+        else if (outcome === "estimated") await supervisor?.chargeProviderReservationEstimate(reservation, reason)
       },
     })
     diagnosticSecrets.add(bridge.token)

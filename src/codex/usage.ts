@@ -412,6 +412,27 @@ export class UsageLedger {
     return true
   }
 
+  chargeReservationEstimate(reference: UsageReservationRef, reason = "usage_unknown", persist = true): boolean {
+    const reservation = this.reservations.get(reference.reservationId)
+    if (!reservation || !this.sameReservation(reservation, reference)) return false
+    this.reservations.delete(reference.reservationId)
+    this.recoveredReservations.set(reference.reservationId, reservation)
+    this.consumed += reservation.estimatedTokens
+    if (persist) {
+      this.append({
+        kind: "reservation_estimate_charged",
+        ...reference,
+        scopedTurn: reservation.scopedTurn,
+        provider: reservation.provider,
+        model: reservation.model,
+        estimatedTokens: reservation.estimatedTokens,
+        reason,
+        recordedAt: new Date().toISOString(),
+      })
+    }
+    return true
+  }
+
   recordTerminalUsageConflict(input: RawUsageInput, message: string): UsageResult {
     const record: RawUsageRecord = {
       ...input,
@@ -853,6 +874,39 @@ export class UsageLedger {
       if (prior) {
         if (!this.sameReservation(prior, reference) || prior.estimatedTokens !== reservation.estimatedTokens) {
           throw new Error("usage reservation recovery replay drift")
+        }
+        return
+      }
+      this.recoveredReservations.set(reference.reservationId, reservation)
+      this.consumed += reservation.estimatedTokens
+      return
+    }
+    if (row.kind === "reservation_estimate_charged") {
+      const reference = parseReservationRef(row)
+      if (
+        typeof row.scopedTurn !== "string" || !row.scopedTurn ||
+        typeof row.estimatedTokens !== "number" || !Number.isSafeInteger(row.estimatedTokens) || row.estimatedTokens < 0 ||
+        typeof row.reason !== "string" || !row.reason ||
+        typeof row.recordedAt !== "string" || !row.recordedAt
+      ) throw new Error("invalid charged usage reservation replay row")
+      const reservation: UsageReservation = {
+        id: reference.reservationId,
+        writerId: reference.writerId,
+        writerGeneration: reference.writerGeneration,
+        requestId: reference.requestId,
+        scopedTurn: row.scopedTurn,
+        ...(typeof row.provider === "string" ? { provider: row.provider } : {}),
+        ...(typeof row.model === "string" ? { model: row.model } : {}),
+        estimatedTokens: row.estimatedTokens,
+        recordedAt: row.recordedAt,
+      }
+      const active = this.reservations.get(reference.reservationId)
+      if (active && !this.sameReservation(active, reference)) throw new Error("charged usage reservation identity drift")
+      this.reservations.delete(reference.reservationId)
+      const prior = this.recoveredReservations.get(reference.reservationId)
+      if (prior) {
+        if (!this.sameReservation(prior, reference) || prior.estimatedTokens !== reservation.estimatedTokens) {
+          throw new Error("charged usage reservation replay drift")
         }
         return
       }

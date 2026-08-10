@@ -1303,6 +1303,119 @@ test("estimates request-derived usage instead of reserving the whole context win
     messages: [{ role: "user", content: "x" }],
     max_tokens: 10,
   }, 5)).toBe(5)
+  expect(estimateProviderRequestTokens({
+    model: "gpt-5.6-sol",
+    input: "x".repeat(9_000),
+    max_output_tokens: 8_192,
+  }, 372_000, true)).toBeGreaterThan(17_000)
+  expect(estimateProviderRequestTokens({
+    model: "gpt-5.6-sol",
+    input: "x".repeat(10_000),
+    max_output_tokens: 8_192,
+  }, 1, true)).toBeGreaterThan(18_000)
+})
+
+test("caps short read-only output before admission and every provider dispatch", async () => {
+  for (const format of ["openai-responses", "openai-compatible", "anthropic"] as const) {
+    let upstreamBody: Record<string, unknown> | undefined
+    let estimatedTokens: number | undefined
+    const upstream = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      async fetch(request) {
+        upstreamBody = await request.json() as Record<string, unknown>
+        return Response.json({ error: { message: "fixture complete" } }, { status: 400 })
+      },
+    })
+    const providers = parseProviders({
+      providerJson: JSON.stringify({
+        relay: {
+          format,
+          base_url: `${upstream.url}v1`,
+          models: { primary: { upstream_id: "gpt-5.6-sol", context: 372_000, output: 131_072 } },
+        },
+      }),
+      providerKeysJson: JSON.stringify({ relay: "provider-secret" }),
+      model: "relay/primary",
+    })
+    const bridge = startProviderBridge(providers, {
+      maxOutputTokens: 8_192,
+      onBeforeRequest(request) {
+        estimatedTokens = request.estimatedTokens
+        return { allowed: true }
+      },
+    })
+    try {
+      const response = await fetch(`${bridge.baseUrl}/providers/relay/v1/responses`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${bridge.token}`, "content-type": "application/json" },
+      body: JSON.stringify({ model: "primary", input: "inspect", max_output_tokens: 131_072 }),
+      })
+      expect(response.status).toBe(400)
+      expect(estimatedTokens).toBeGreaterThan(8_192)
+      expect(estimatedTokens).toBeLessThan(20_000)
+      const outputField = format === "openai-responses"
+        ? "max_output_tokens"
+        : format === "openai-compatible"
+          ? "max_completion_tokens"
+          : "max_tokens"
+      expect(upstreamBody?.[outputField]).toBe(8_192)
+    } finally {
+      await bridge.close()
+      upstream.stop(true)
+    }
+  }
+})
+
+test("short read-only guard rejects remote image input before provider dispatch", async () => {
+  let upstreamRequests = 0
+  const upstream = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    fetch() {
+      upstreamRequests += 1
+      return Response.json({ id: "unexpected" })
+    },
+  })
+  const providers = parseProviders({
+    providerJson: JSON.stringify({ relay: { format: "openai-responses", base_url: `${upstream.url}v1`, models: { primary: { upstream_id: "gpt-5.6-sol", context: 372_000 } } } }),
+    model: "relay/primary",
+  })
+  const finished: string[] = []
+  const bridge = startProviderBridge(providers, {
+    maxOutputTokens: 8_192,
+    onBeforeRequest: () => ({ allowed: true, reservation: { reservationId: "image-reservation", writerId: "writer", writerGeneration: 1, requestId: "image-request" } }),
+    onRequestFinished: (_reservation, outcome, reason) => { finished.push(`${outcome}:${reason}`) },
+  })
+  try {
+    const response = await fetch(`${bridge.baseUrl}/providers/relay/v1/responses`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${bridge.token}`, "content-type": "application/json" },
+      body: JSON.stringify({ model: "primary", input: [{ type: "message", role: "user", content: [{ type: "input_image", image_url: "https://example.invalid/image.png" }] }] }),
+    })
+    expect(response.status).toBe(400)
+    expect(await response.json()).toMatchObject({ error: { type: "invalid_request_error" } })
+    expect(upstreamRequests).toBe(0)
+    expect(finished).toEqual([])
+  } finally {
+    await bridge.close()
+    await upstream.stop(true)
+  }
+})
+
+test("rejects an invalid provider output cap before listening", () => {
+  const providers = parseProviders({
+    providerJson: JSON.stringify({
+      relay: {
+        format: "openai-responses",
+        base_url: "https://provider.example/v1",
+        models: { primary: { upstream_id: "gpt-5.6-sol", context: 1_000 } },
+      },
+    }),
+    model: "relay/primary",
+  })
+  expect(() => startProviderBridge(providers, { maxOutputTokens: 0 }))
+    .toThrow("provider bridge max output tokens must be a positive integer")
 })
 
 test("releases an admitted reservation when upstream returns without terminal usage", async () => {

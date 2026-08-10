@@ -14,9 +14,10 @@ export interface ProviderBridge {
 export interface ProviderBridgeOptions {
   token?: string
   hostname?: string
+  maxOutputTokens?: number
   onUsage?(usage: ProviderBridgeUsage): void | Promise<void>
   onBeforeRequest?(request: ProviderBridgeRequest): ProviderBridgeAdmission | Promise<ProviderBridgeAdmission>
-  onRequestFinished?(reservation: UsageReservationRef, outcome: "usage" | "released", reason?: string): void | Promise<void>
+  onRequestFinished?(reservation: UsageReservationRef, outcome: "usage" | "released" | "estimated", reason?: string): void | Promise<void>
 }
 
 export interface ProviderBridgeRequest {
@@ -111,17 +112,40 @@ async function readRequestJson(request: Request, signal?: AbortSignal): Promise<
 }
 
 /** Reserve against the request sent upstream, not the model's full capacity. */
-export function estimateProviderRequestTokens(body: JsonRecord, contextWindow?: number): number {
-  const output = positiveInteger(body.max_output_tokens) ?? positiveInteger(body.max_tokens) ?? 0
+export function estimateProviderRequestTokens(
+  body: JsonRecord,
+  contextWindow?: number,
+  conservativePromptBound = false,
+): number {
+  const output = positiveInteger(body.max_output_tokens)
+    ?? positiveInteger(body.max_completion_tokens)
+    ?? positiveInteger(body.max_tokens)
+    ?? 0
   const promptBody = { ...body }
   delete promptBody.max_output_tokens
+  delete promptBody.max_completion_tokens
   delete promptBody.max_tokens
   delete promptBody.stream
   const promptBytes = Buffer.byteLength(JSON.stringify(promptBody), "utf8")
-  const promptTokens = Math.max(1, Math.ceil(promptBytes / 3))
+  // A byte is the smallest unit a byte-level tokenizer can emit. Short read-only
+  // tasks use this upper bound so admission cannot spend past its hard ceiling
+  // merely because the normal bytes-per-token estimate was optimistic.
+  const promptTokens = Math.max(1, conservativePromptBound ? promptBytes : Math.ceil(promptBytes / 3))
   const estimate = promptTokens + output
   const contextLimit = positiveInteger(contextWindow)
-  return contextLimit ? Math.min(estimate, contextLimit) : estimate
+  return contextLimit && !conservativePromptBound ? Math.min(estimate, contextLimit) : estimate
+}
+
+function hasImageInput(input: unknown): boolean {
+  if (!Array.isArray(input)) return false
+  return input.some((item) => {
+    if (!item || typeof item !== "object" || Array.isArray(item)) return false
+    const record = item as JsonRecord
+    if (record.type === "input_image") return true
+    return Array.isArray(record.content) && record.content.some((part) =>
+      part && typeof part === "object" && !Array.isArray(part) && (part as JsonRecord).type === "input_image",
+    )
+  })
 }
 
 type JsonRecord = Record<string, unknown>
@@ -911,7 +935,7 @@ function chatResponsesStream(upstream: Response, model: string): Response {
       }
       let messageStarted = false
       let messageText = ""
-      let usage = zeroUsage()
+      let usage: ResponsesUsage | undefined
       let terminal = false
       const tools = new Map<number, { callId: string; name: string; arguments: string }>()
       await emit({ type: "response.created", response: { id: responseId, model, status: "in_progress" } })
@@ -991,7 +1015,7 @@ function chatResponsesStream(upstream: Response, model: string): Response {
         }
         await emit({
           type: "response.completed",
-          response: { id: responseId, model, status: "completed", usage },
+          response: { id: responseId, model, status: "completed", ...(usage ? { usage } : {}) },
         })
         close()
       } catch (error) {
@@ -1051,6 +1075,7 @@ function anthropicResponsesStream(upstream: Response, model: string): Response {
       let cachedTokens = 0
       let cacheWriteTokens = 0
       let outputTokens = 0
+      let usageObserved = false
       const tools = new Map<number, { callId: string; name: string; arguments: string }>()
       await emit({ type: "response.created", response: { id: responseId, model, status: "in_progress" } })
       try {
@@ -1068,14 +1093,17 @@ function anthropicResponsesStream(upstream: Response, model: string): Response {
                   ? (message.usage as JsonRecord)
                   : {}
               inputTokens = typeof usage.input_tokens === "number" ? usage.input_tokens : inputTokens
+              usageObserved ||= typeof usage.input_tokens === "number"
               cachedTokens =
                 typeof usage.cache_read_input_tokens === "number"
                   ? usage.cache_read_input_tokens
                   : cachedTokens
+              usageObserved ||= typeof usage.cache_read_input_tokens === "number"
               cacheWriteTokens =
                 typeof usage.cache_creation_input_tokens === "number"
                   ? usage.cache_creation_input_tokens
                   : cacheWriteTokens
+              usageObserved ||= typeof usage.cache_creation_input_tokens === "number"
               break
             }
             case "content_block_start": {
@@ -1154,13 +1182,21 @@ function anthropicResponsesStream(upstream: Response, model: string): Response {
                 chunk.usage && typeof chunk.usage === "object" && !Array.isArray(chunk.usage)
                   ? (chunk.usage as JsonRecord)
                   : {}
-              if (typeof usage.output_tokens === "number") outputTokens = usage.output_tokens
-              if (typeof usage.input_tokens === "number") inputTokens = usage.input_tokens
+              if (typeof usage.output_tokens === "number") {
+                outputTokens = usage.output_tokens
+                usageObserved = true
+              }
+              if (typeof usage.input_tokens === "number") {
+                inputTokens = usage.input_tokens
+                usageObserved = true
+              }
               if (typeof usage.cache_read_input_tokens === "number") {
                 cachedTokens = usage.cache_read_input_tokens
+                usageObserved = true
               }
               if (typeof usage.cache_creation_input_tokens === "number") {
                 cacheWriteTokens = usage.cache_creation_input_tokens
+                usageObserved = true
               }
               break
             }
@@ -1210,19 +1246,21 @@ function anthropicResponsesStream(upstream: Response, model: string): Response {
           })
         }
         const billedInput = inputTokens + cachedTokens + cacheWriteTokens
-        const usage: ResponsesUsage = {
-          input_tokens: billedInput,
-          input_tokens_details: {
-            cached_tokens: cachedTokens,
-            cache_write_tokens: cacheWriteTokens,
-          },
-          output_tokens: outputTokens,
-          output_tokens_details: { reasoning_tokens: 0 },
-          total_tokens: billedInput + outputTokens,
-        }
+        const usage: ResponsesUsage | undefined = usageObserved
+          ? {
+              input_tokens: billedInput,
+              input_tokens_details: {
+                cached_tokens: cachedTokens,
+                cache_write_tokens: cacheWriteTokens,
+              },
+              output_tokens: outputTokens,
+              output_tokens_details: { reasoning_tokens: 0 },
+              total_tokens: billedInput + outputTokens,
+            }
+          : undefined
         await emit({
           type: "response.completed",
-          response: { id: responseId, model, status: "completed", usage },
+          response: { id: responseId, model, status: "completed", ...(usage ? { usage } : {}) },
         })
         close()
       } catch (error) {
@@ -1307,13 +1345,14 @@ function chatResponsesJson(body: JsonRecord, model: string): JsonRecord {
       )
     }
   }
+  const usage = chatUsage(body.usage)
   return {
     id: typeof body.id === "string" ? body.id : randomId("resp"),
     object: "response",
     model,
     status: "completed",
     output,
-    usage: chatUsage(body.usage) ?? zeroUsage(),
+    ...(usage ? { usage } : {}),
   }
 }
 
@@ -1366,13 +1405,14 @@ function anthropicResponsesJson(body: JsonRecord, model: string): JsonRecord {
     }
   }
   if (textValue) output.unshift(responseMessage(textValue))
+  const hasUsage = body.usage && typeof body.usage === "object" && !Array.isArray(body.usage)
   return {
     id: typeof body.id === "string" ? body.id : randomId("resp"),
     object: "response",
     model,
     status: "completed",
     output,
-    usage: anthropicUsage(body.usage),
+    ...(hasUsage ? { usage: anthropicUsage(body.usage) } : {}),
   }
 }
 
@@ -1489,21 +1529,26 @@ export function observeResponseUsage(
   track?: (task: Promise<void>) => void,
   registerActiveStream?: (threadId: string | undefined, cancel: (reason: string) => Promise<void>) => () => void,
   cancelUpstream?: (reason: unknown) => void,
+  chargeUnknownUsage = false,
 ): Response {
   const release = async (reason: string) => {
     if (reservation && onRequestFinished) await onRequestFinished(reservation, "released", reason)
   }
-  const scheduleRelease = (reason: string) => {
-    const task = release(reason)
+  const estimate = async (reason: string) => {
+    if (reservation && onRequestFinished) await onRequestFinished(reservation, "estimated", reason)
+  }
+  const finishUnknown = (reason: string) => chargeUnknownUsage ? estimate(reason) : release(reason)
+  const schedule = (reason: string, outcome: "released" | "estimated") => {
+    const task = outcome === "released" ? release(reason) : estimate(reason)
     if (track) track(task)
     else void task.catch(() => undefined)
   }
   if (!response.ok) {
-    scheduleRelease(`upstream_status_${response.status}`)
+    schedule(`upstream_status_${response.status}`, chargeUnknownUsage ? "estimated" : "released")
     return response
   }
   if (!response.body || !onUsage) {
-    scheduleRelease(!response.body ? "empty_response_body" : "usage_observer_disabled")
+    schedule(!response.body ? "empty_response_body" : "usage_observer_disabled", chargeUnknownUsage ? "estimated" : "released")
     return response
   }
   const contentType = response.headers.get("content-type") ?? ""
@@ -1527,13 +1572,13 @@ export function observeResponseUsage(
           await onUsage(terminal)
           if (reservation && onRequestFinished) await onRequestFinished(reservation, "usage", "usage_observed")
         } else {
-          await release(reason)
+          await finishUnknown(reason)
         }
         if (error === undefined) resolveTask()
         else rejectTask(error)
       } catch (observerError) {
         if (terminal) {
-          try { await release("stream_usage_observer_error") } catch {}
+          try { await finishUnknown("stream_usage_observer_error") } catch {}
         }
         rejectTask(observerError)
       }
@@ -1593,7 +1638,7 @@ export function observeResponseUsage(
     })
   }
   if (!/json/i.test(contentType)) {
-    scheduleRelease("non_json_response")
+    schedule("non_json_response", chargeUnknownUsage ? "estimated" : "released")
     return response
   }
   const copy = response.clone()
@@ -1613,11 +1658,11 @@ export function observeResponseUsage(
         await onUsage(usage)
         if (reservation && onRequestFinished) await onRequestFinished(reservation, "usage", "usage_observed")
       } else {
-        await release("response_completed_without_usage")
+        await finishUnknown("response_completed_without_usage")
       }
     } catch (error) {
       if (cancelled) return
-      await release("response_usage_observer_error")
+      await finishUnknown("response_usage_observer_error")
       throw error
     }
   })()
@@ -1645,6 +1690,7 @@ async function handleProviderRequest(
   onRequestFinished?: ProviderBridgeOptions["onRequestFinished"],
   trackUsage?: (task: Promise<void>) => void,
   registerActiveStream?: (threadId: string | undefined, cancel: (reason: string) => Promise<void>) => () => void,
+  maxOutputTokens?: number,
   upstreamAbort?: AbortController,
 ): Promise<Response> {
   let body: Record<string, unknown>
@@ -1677,6 +1723,15 @@ async function handleProviderRequest(
       callerModelKey = leafModel.modelKey
       ;(raw as Record<string, unknown>).model = callerModelKey
     }
+    if (maxOutputTokens !== undefined) {
+      if (hasImageInput((raw as JsonRecord).input)) {
+        throw new Error("short read-only token guard does not support image input")
+      }
+      const requestedOutput = positiveInteger((raw as JsonRecord).max_output_tokens)
+      ;(raw as JsonRecord).max_output_tokens = requestedOutput
+        ? Math.min(requestedOutput, maxOutputTokens)
+        : maxOutputTokens
+    }
     const translated = translateResponsesRequest(effectiveProvider, raw as Record<string, unknown>)
     body = translated.body
     if (onBeforeRequest) {
@@ -1686,7 +1741,7 @@ async function handleProviderRequest(
         model: callerModelKey,
         ...attribution,
         ...(configured?.context ? { contextWindow: configured.context } : {}),
-        estimatedTokens: estimateProviderRequestTokens(body, configured?.context),
+        estimatedTokens: estimateProviderRequestTokens(body, configured?.context, maxOutputTokens !== undefined),
       })
       if (!admission.allowed) {
         if (admission.reservation && onRequestFinished) {
@@ -1725,7 +1780,9 @@ async function handleProviderRequest(
       redirect: "error",
     })
   } catch (error) {
-    if (reservation && onRequestFinished) await onRequestFinished(reservation, "released", "upstream_transport_error")
+    if (reservation && onRequestFinished) {
+      await onRequestFinished(reservation, maxOutputTokens !== undefined ? "estimated" : "released", "upstream_transport_error")
+    }
     return scrubResponse(Response.json(
       { error: { type: "upstream_transport_error", message: (error as Error).message } },
       { status: 502 },
@@ -1743,9 +1800,12 @@ async function handleProviderRequest(
       trackUsage,
       registerActiveStream,
       (reason) => requestAbort.abort(reason),
+      maxOutputTokens !== undefined,
     )
   } catch (error) {
-    if (reservation && onRequestFinished) await onRequestFinished(reservation, "released", "response_translation_error")
+    if (reservation && onRequestFinished) {
+      await onRequestFinished(reservation, maxOutputTokens !== undefined ? "estimated" : "released", "response_translation_error")
+    }
     return scrubResponse(Response.json(
       { error: { type: "upstream_response_error", message: (error as Error).message } },
       { status: 502 },
@@ -1757,6 +1817,9 @@ export function startProviderBridge(
   providerSet: ProviderSet,
   options: ProviderBridgeOptions = {},
 ): ProviderBridge {
+  if (options.maxOutputTokens !== undefined && !positiveInteger(options.maxOutputTokens)) {
+    throw new Error("provider bridge max output tokens must be a positive integer")
+  }
   const token = options.token ?? randomBytes(32).toString("base64url")
   const hostname = options.hostname ?? "127.0.0.1"
   const providers = new Map(providerSet.providers.map((provider) => [provider.id, provider]))
@@ -1843,6 +1906,7 @@ export function startProviderBridge(
         options.onRequestFinished,
         trackUsage,
         registerActiveStream,
+        options.maxOutputTokens,
         upstreamAbort,
       )
       requestTasks.add(task)
