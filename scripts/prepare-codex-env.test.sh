@@ -133,6 +133,8 @@ chmod +x "$test_root/bin/tar"
 PATH="$test_root/bin:/usr/bin:/bin" \
 HOME="$test_root/home" \
 BOT_WORKDIR="$test_root/work" \
+BOT_TASK=manual \
+BOT_CAN_WRITE=1 \
 BOT_TOKEN="token-sentinel" \
 GH_TOKEN="gh-sentinel" \
 CCHP_APP_PRIVATE_KEY="app-private-sentinel" \
@@ -203,4 +205,27 @@ BOT_SKIP_ATARAXY=1 \
 BOT_SKIP_PR_INSPECT=1 \
   bash "$ROOT/scripts/prepare-codex-env.sh"
 [[ ! -e "$second_home/bun-env.log" ]] || { echo 'read-only manual unexpectedly installed web deps' >&2; exit 1; }
+
+review_work="$test_root/review-work"
+review_home="$test_root/review-home"
+mkdir -p "$review_work" "$review_home"
+: > "$review_work/prompt.md"
+PATH="$test_root/bin:/usr/bin:/bin" \
+HOME="$review_home" \
+BOT_WORKDIR="$review_work" \
+BOT_TASK=pr_opened \
+BOT_CAN_WRITE=1 \
+BOT_TOKEN="token-sentinel" \
+GH_REPO="CCH-HQ/fixture" \
+BOT_DEFAULT_BRANCH="dev" \
+BOT_TARGET_BRANCH="dev" \
+REPO_DIR="$review_work/repo" \
+BOT_PROMPT_FILE="$review_work/prompt.md" \
+BOT_SKIP_ATARAXY=1 \
+BOT_SKIP_PR_INSPECT=1 \
+  bash "$ROOT/scripts/prepare-codex-env.sh"
+[[ ! -e "$review_home/bun-env.log" ]] || { echo 'read-only pr_opened unexpectedly installed web deps' >&2; exit 1; }
+[[ ! -e "$review_work/skills-install-home/bunx-env.names" ]] || { echo 'read-only pr_opened unexpectedly installed skills' >&2; exit 1; }
+[[ ! -e "$review_home/uv-env.names" ]] || { echo 'read-only pr_opened unexpectedly installed Serena' >&2; exit 1; }
+[[ ! -e "$review_work/ctx/tools/see/see" ]] || { echo 'read-only pr_opened unexpectedly installed see-cli' >&2; exit 1; }
 printf 'prepare-codex-env credential sanitization test passed\n'
