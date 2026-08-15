@@ -75,6 +75,27 @@ export interface ChildResultArtifact {
   updatedAt: string
 }
 
+/** Work identity for a running explicit child. Heartbeat/updatedAt are excluded
+ * so liveness writes cannot be mistaken for semantic progress. */
+export function explicitChildWorkKey(child: {
+  generation: number
+  state: string
+  sessionId?: string
+  attempt?: number
+  promptSha256?: string
+  activePrompt?: string
+  queuedPrompts?: readonly string[]
+}): string {
+  return [
+    String(child.generation),
+    child.state,
+    child.sessionId ?? "",
+    String(child.attempt ?? ""),
+    child.promptSha256 ?? child.activePrompt ?? "",
+    Array.isArray(child.queuedPrompts) ? child.queuedPrompts.join("\n") : "",
+  ].join("\0")
+}
+
 export interface ChildRunningArtifact {
   schemaVersion: 5
   mode: "explicit_child"
@@ -163,6 +184,8 @@ interface ChildRecord {
   restartRequested: boolean
   terminalPublished: boolean
   closed: boolean
+  lastRunningWorkKey?: string
+  lastRunningUpdatedAt?: string
 }
 
 export async function stopProvenProcessGroup(
@@ -771,6 +794,19 @@ export class ExplicitChildAdapter implements ReviewChildExecutor {
   private persistRunning(record: ChildRecord): void {
     if (terminalState(record.handle.state)) return
     const now = new Date().toISOString()
+    const workKey = explicitChildWorkKey({
+      generation: record.handle.generation,
+      state: record.handle.state,
+      sessionId: record.handle.sessionId,
+      attempt: record.attempts.length + 1,
+      activePrompt: record.activePrompt,
+      queuedPrompts: record.queue,
+    })
+    const updatedAt = record.lastRunningWorkKey === workKey && record.lastRunningUpdatedAt
+      ? record.lastRunningUpdatedAt
+      : now
+    record.lastRunningWorkKey = workKey
+    record.lastRunningUpdatedAt = updatedAt
     const artifact = attachRecordHmac({
       schemaVersion: 5 as const,
       mode: "explicit_child" as const,
@@ -804,7 +840,7 @@ export class ExplicitChildAdapter implements ReviewChildExecutor {
       ownerEpoch: record.ownerEpoch,
       resumeState: record.resumeState,
       heartbeatAt: now,
-      updatedAt: now,
+      updatedAt,
     }, this.recordHmacKey)
     validateRunningArtifact(artifact)
     durableWriteFile(this.runningPath(record), `${JSON.stringify(artifact, null, 2)}\n`)

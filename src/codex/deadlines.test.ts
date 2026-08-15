@@ -17,6 +17,21 @@ test("only semantic progress resets the warning and terminal clocks", () => {
   expect(deadline.check()).toEqual({ state: "terminal", semanticAgeMs: 1_200_000 })
 })
 
+test("model, sidecar, and transport events never reset the semantic clocks", () => {
+  let now = 0
+  const deadline = new ProgressDeadline({ now: () => now, warningMs: 10, terminalMs: 20 })
+  now = 9
+  deadline.modelEvent()
+  deadline.sidecarEvent()
+  deadline.transportEvent("reconcile")
+  expect(deadline.check()).toEqual({ state: "healthy", semanticAgeMs: 9 })
+  now = 20
+  deadline.modelEvent()
+  deadline.sidecarEvent()
+  deadline.transportEvent("heartbeat")
+  expect(deadline.check()).toEqual({ state: "terminal", semanticAgeMs: 20 })
+})
+
 test("does not emit the same warning repeatedly without a new progress epoch", () => {
   let now = 0
   const deadline = new ProgressDeadline({ now: () => now, warningMs: 10, terminalMs: 20 })
