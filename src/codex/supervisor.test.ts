@@ -560,6 +560,7 @@ test("fails no-progress early when the root never emits runtime events", async (
 
 test("fails a 0-child in-flight admission loop at the warning, not the 20m terminal", async () => {
   const workdir = mkdtempSync(join(tmpdir(), "cchp-supervisor-stuck-inflight-"))
+  const cancelledThreads: string[] = []
   const fake = {
     start: async () => ({ userAgent: "fake" }),
     request: async (method: string) => {
@@ -582,6 +583,10 @@ test("fails a 0-child in-flight admission loop at the warning, not the 20m termi
     totalTokenBudget: 1_000,
     tokenAdmissionFraction: 0.85,
     executionMode: "native_v2",
+    cancelProviderThread: async (threadId: string) => {
+      cancelledThreads.push(threadId)
+      return 1
+    },
     deadlines: {
       wholeRunMs: 2_000,
       heartbeatMs: 10,
@@ -611,6 +616,7 @@ test("fails a 0-child in-flight admission loop at the warning, not the 20m termi
   expect(readJsonl(join(workdir, "ctx", "codex", "supervisor.jsonl")).some((row) =>
     row.event === "NO_PROGRESS_TIMEOUT" && row.reason === "stuck_inflight_no_children",
   )).toBe(true)
+  expect(cancelledThreads).toEqual(["root"])
 })
 
 test("completed model output postpones the 20m terminal without counting as semantic work", async () => {

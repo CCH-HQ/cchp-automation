@@ -1928,9 +1928,11 @@ export function startProviderBridge(
     sealAndDrain,
     async close() {
       closeTask ??= (async () => {
-        sealed = true
-        await server.stop(true)
+        // Abort and drain active upstream work before stopping Bun's listener.
+        // Bun 1.3.x can crash while force-stopping a server that still owns
+        // streaming fetch bodies; sealing first makes the shutdown deterministic.
         await sealAndDrain()
+        await server.stop(true)
       })()
       await closeTask
     },
