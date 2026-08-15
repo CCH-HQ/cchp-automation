@@ -372,26 +372,34 @@ test("does not treat explicit child heartbeat or updatedAt bumps as semantic pro
 
 test("resets the semantic clock only when explicit child work identity changes", async () => {
   const workdir = mkdtempSync(join(tmpdir(), "cchp-supervisor-child-work-"))
+  const manifestPath = join(workdir, "ctx", "codex", "run-manifest.json")
+  const readManifest = () => existsSync(manifestPath)
+    ? JSON.parse(readFileSync(manifestPath, "utf8")) as { startedAt: string, lastSemanticProgressAt: string }
+    : undefined
+  let ticks = 0
   let promptSha256 = "inspect"
   const lifecycle: ExplicitChildLifecycle = {
-    reconcile: () => ({
-      active: [{
-        childId: "child-1",
-        parentId: "root",
-        spawnItemId: "explicit:child-1",
-        generation: 1,
-        state: "running",
-        sessionId: "sess-1",
-        attempt: 1,
-        promptSha256,
-        queuedPrompts: [],
-        deadlineAt: new Date(Date.now() + 60_000).toISOString(),
-        heartbeatAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
-      } as never],
-      terminal: [],
-      stale: [],
-    }),
+    reconcile: () => {
+      ticks++
+      return {
+        active: [{
+          childId: "child-1",
+          parentId: "root",
+          spawnItemId: "explicit:child-1",
+          generation: 1,
+          state: "running",
+          sessionId: "sess-1",
+          attempt: 1,
+          promptSha256,
+          queuedPrompts: [],
+          deadlineAt: new Date(Date.now() + 60_000).toISOString(),
+          heartbeatAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        } as never],
+        terminal: [],
+        stale: [],
+      }
+    },
     interruptActive: async () => undefined,
   }
   const fake = {
@@ -417,27 +425,27 @@ test("resets the semantic clock only when explicit child work identity changes",
     executionMode: "explicit_child",
     explicitChildren: lifecycle,
     deadlines: {
-      wholeRunMs: 2_000,
-      heartbeatMs: 10,
-      reconcileMs: 10,
-      noProgressWarningMs: 25,
-      noProgressTerminalMs: 70,
-      parentResumeMs: 500,
+      wholeRunMs: 8_000,
+      heartbeatMs: 20,
+      reconcileMs: 20,
+      noProgressWarningMs: 80,
+      noProgressTerminalMs: 220,
+      parentResumeMs: 2_000,
     },
   })
-  const started = Date.now()
   const running = supervisor.run()
-  await Bun.sleep(15)
-  await supervisor.handleNotification({
-    method: "thread/tokenUsage/updated",
-    params: { threadId: "root", turnId: "turn", tokenUsage: { total: {}, last: {} } },
-  })
-  await Bun.sleep(40)
+  await eventually(() => ticks >= 2 && readManifest()?.lastSemanticProgressAt === readManifest()?.startedAt, 1_000)
+  const startedAt = readManifest()?.startedAt
+  expect(startedAt).toBeDefined()
+  expect(supervisor.currentState).toBe("ROOT_RUNNING")
+
   promptSha256 = "follow-up"
-  await Bun.sleep(50)
+  await eventually(() => readManifest()?.lastSemanticProgressAt !== startedAt, 1_000)
+  const identityObservedAt = Date.now()
   expect(supervisor.currentState).not.toBe("NO_PROGRESS_TIMEOUT")
+
   expect(await running).toMatchObject({ state: "NO_PROGRESS_TIMEOUT", exitCode: 124 })
-  expect(Date.now() - started).toBeGreaterThan(100)
+  expect(Date.now() - identityObservedAt).toBeGreaterThan(150)
 })
 
 test("repeated collaboration terminals do not keep a stalled root alive", async () => {
