@@ -1340,7 +1340,7 @@ test("does not let a late continuation response overwrite a whole-run timeout", 
           }))
           return { turn: { id: "initial-turn" } }
         }
-        await Bun.sleep(80)
+        await Bun.sleep(550)
         return { turn: { id: "continuation-turn" } }
       }
       if (method === "thread/read") return { thread: { id: "root", turns: [{ id: "initial-turn", status: "completed" }] } }
@@ -1355,7 +1355,7 @@ test("does not let a late continuation response overwrite a whole-run timeout", 
     model: "gpt-5.6-sol", modelProvider: "cchp", totalTokenBudget: 1_000,
     executionMode: "explicit_child", reviewRequired: true,
     deadlines: {
-      wholeRunMs: 30,
+      wholeRunMs: 500,
       interruptGraceMs: 5,
       heartbeatMs: 100,
       reconcileMs: 5,
@@ -1365,6 +1365,7 @@ test("does not let a late continuation response overwrite a whole-run timeout", 
 
   expect(await supervisor.run()).toMatchObject({ state: "TIMED_OUT", terminalReason: "whole run deadline exceeded" })
   await Bun.sleep(100)
+  expect(turnStarts).toBe(2)
   expect(supervisor.currentState).toBe("TIMED_OUT")
   expect(JSON.parse(readFileSync(join(workdir, "ctx", "codex", "run-manifest.json"), "utf8"))).toMatchObject({
     state: "TIMED_OUT",
