@@ -1,9 +1,15 @@
-import { existsSync } from "node:fs"
+import { randomBytes } from "node:crypto"
+import { existsSync, readdirSync, readFileSync } from "node:fs"
 import { spawnSync } from "node:child_process"
 import { resolve } from "node:path"
 import { attachRecordHmac, validateRecordHmacKey } from "./authenticated-record"
 import { durableCreateFile } from "./durable-file"
-import { processIdentity, sameProcessIdentity, type ProcessIdentity, type RunFence } from "./run-lock"
+import { processIdentity, type ProcessIdentity, type RunFence } from "./run-lock"
+
+function processGone(error: unknown): boolean {
+  const code = (error as NodeJS.ErrnoException | undefined)?.code
+  return code === "ENOENT" || code === "ESRCH"
+}
 
 export interface JsonRpcNotification {
   method: string
@@ -186,11 +192,12 @@ export interface CodexAppServerOptions {
 }
 
 export interface AppServerProcessRecord {
-  schemaVersion: 2
+  schemaVersion: 3
   pid: number
   pgid: number
   startTicks: string
   bootId: string
+  sessionToken: string
   codexHome: string
   runId?: string
   writerId?: string
@@ -247,6 +254,7 @@ export class CodexAppServer {
   private pidRecord?: { path: string; record: AppServerProcessRecord }
   private processRecordRemovalError?: Error
   private launchedIdentity?: ProcessIdentity
+  private sessionToken?: string
 
   constructor(private readonly options: CodexAppServerOptions) {}
 
@@ -255,17 +263,23 @@ export class CodexAppServer {
     this.stopping = false
     this.exitReported = false
     this.processRecordRemovalError = undefined
+    this.sessionToken = randomBytes(32).toString("hex")
     let child: ReturnType<typeof Bun.spawn>
     try {
       child = Bun.spawn([this.options.codexBin, "app-server", "--stdio", "--strict-config"], {
         cwd: this.options.cwd,
-        env: { ...this.options.env, CODEX_HOME: this.options.codexHome },
+        env: {
+          ...this.options.env,
+          CODEX_HOME: this.options.codexHome,
+          CCHP_PROCESS_SESSION_TOKEN: this.sessionToken,
+        },
         stdin: "pipe",
         stdout: "pipe",
         stderr: "pipe",
         detached: process.platform !== "win32",
       })
     } catch (error) {
+      this.sessionToken = undefined
       await this.reportExit({
         expected: false,
         reason: "spawn_error",
@@ -280,12 +294,15 @@ export class CodexAppServer {
     const processRecordPath = this.options.processRecordPath ?? process.env.CCHP_CODEX_PID_FILE
     if (processRecordPath) {
       const identity = this.launchedIdentity
+      const sessionToken = this.sessionToken
+      if (!sessionToken) throw new Error("Codex app-server session token was not initialized")
       const payload = {
-        schemaVersion: 2 as const,
+        schemaVersion: 3 as const,
         pid: child.pid,
         pgid: child.pid,
         startTicks: identity.startTicks,
         bootId: identity.bootId,
+        sessionToken,
         codexHome: this.options.codexHome,
         ...(this.options.runId ? { runId: this.options.runId } : {}),
         ...(this.options.writerFence ? { writerId: this.options.writerFence.writerId, writerGeneration: this.options.writerFence.generation } : {}),
@@ -303,6 +320,7 @@ export class CodexAppServer {
         await child.exited.catch(() => undefined)
         this.process = undefined
         this.launchedIdentity = undefined
+        this.sessionToken = undefined
         throw error
       }
       this.pidRecord = { path: processRecordPath, record }
@@ -329,7 +347,7 @@ export class CodexAppServer {
         exitCode,
         signalCode: child.signalCode,
       })
-      if (!this.processGroupAlive(child.pid)) {
+      if (!this.processSessionAlive(child.pid)) {
         try {
           this.removeOwnedPidRecord()
         } catch (error) {
@@ -430,8 +448,9 @@ export class CodexAppServer {
         this.stdoutTask = undefined
         this.stderrTask = undefined
         this.exitTask = undefined
-        this.launchedIdentity = undefined
         this.removeOwnedPidRecord()
+        this.launchedIdentity = undefined
+        this.sessionToken = undefined
       }
     }
   }
@@ -439,7 +458,7 @@ export class CodexAppServer {
   private removeOwnedPidRecord(): void {
     const record = this.pidRecord
     if (!record || !existsSync(record.path)) return
-    if (this.processGroupAlive(record.record.pgid)) throw new Error("refusing to remove a live Codex app-server process record")
+    if (this.processSessionAlive(record.record.pgid)) throw new Error("refusing to remove a live Codex app-server process record")
     this.options.beforeProcessRecordRemoval?.()
     const key = validateRecordHmacKey(this.options.processRecordHmacKey ?? process.env.CCHP_PROCESS_RECORD_HMAC_KEY)
     const helper = resolve(import.meta.dir, "../../scripts/secure-unlink.py")
@@ -535,25 +554,86 @@ export class CodexAppServer {
     if (ownership === "unproven") {
       throw new Error(`refusing to signal unproven Codex app-server process group ${child.pid}`)
     }
-    try {
-      if (process.platform === "win32") child.kill(signal)
-      else process.kill(-child.pid, signal)
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error
+    if (process.platform === "win32") {
+      child.kill(signal)
+      return
+    }
+    if (process.platform !== "linux") {
+      throw new Error(`refusing to signal Codex app-server session ${child.pid} without process-session enumeration`)
+    }
+    const identity = this.launchedIdentity
+    const sessionToken = this.sessionToken
+    if (!identity || !sessionToken) throw new Error(`refusing to signal Codex app-server session ${child.pid} without process identity`)
+    const helper = resolve(import.meta.dir, "../../scripts/process-session-signal.py")
+    const result = spawnSync("python3", [
+      helper,
+      "--session", String(child.pid),
+      "--leader-pid", String(identity.pid),
+      "--expected-start", identity.startTicks,
+      "--signal", signal,
+      "--require-env", `CCHP_PROCESS_SESSION_TOKEN=${sessionToken}`,
+    ], { encoding: "utf8" })
+    if (result.error) {
+      throw new Error(`refusing to signal Codex app-server session ${child.pid}: ${result.error.message}`)
+    }
+    if (result.status !== 0 && result.status !== 1) {
+      const detail = String(result.stderr || result.stdout || "pidfd session signal failed").trim()
+      throw new Error(`refusing to signal Codex app-server session ${child.pid}: ${detail}`)
     }
   }
 
   private processGroupOwnership(pgid: number): "live" | "absent" | "unproven" {
     if (process.platform === "win32") return this.process?.exitCode === null && this.process?.signalCode === null ? "live" : "absent"
     const identity = this.launchedIdentity
-    if (!identity || identity.pid !== pgid) return "unproven"
+    const sessionToken = this.sessionToken
+    if (!identity || identity.pid !== pgid || !sessionToken || process.platform !== "linux") return "unproven"
+    let leaderAnchored = false
     try {
-      process.kill(identity.pid, 0)
+      const leader = readFileSync(`/proc/${identity.pid}/stat`, "utf8")
+      const fields = leader.slice(leader.lastIndexOf(")") + 2).trim().split(/\s+/)
+      if (fields.length < 20 || fields[3] !== String(pgid) || fields[19] !== identity.startTicks) return "unproven"
+      leaderAnchored = true
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error
-      return this.processGroupAlive(pgid) ? "unproven" : "absent"
+      if (!processGone(error)) return "unproven"
     }
-    return sameProcessIdentity(identity, processIdentity(identity.pid)) ? "live" : "unproven"
+
+    const requiredBinding = Buffer.from(`CCHP_PROCESS_SESSION_TOKEN=${sessionToken}`)
+    let liveMembers = 0
+    let unboundMembers = 0
+    let entries: string[]
+    try {
+      entries = readdirSync("/proc")
+    } catch {
+      return "unproven"
+    }
+    for (const entry of entries) {
+      if (!/^[1-9][0-9]*$/.test(entry)) continue
+      let fields: string[]
+      try {
+        const stat = readFileSync(`/proc/${entry}/stat`, "utf8")
+        fields = stat.slice(stat.lastIndexOf(")") + 2).trim().split(/\s+/)
+      } catch (error) {
+        if (processGone(error)) continue
+        return "unproven"
+      }
+      if (fields.length < 20) return "unproven"
+      if (fields[0] === "Z" || fields[3] !== String(pgid)) continue
+      let environment: Buffer
+      try {
+        environment = readFileSync(`/proc/${entry}/environ`)
+      } catch (error) {
+        if (processGone(error)) continue
+        return "unproven"
+      }
+      const bound = environment
+        .toString("utf8")
+        .split("\0")
+        .some((value) => Buffer.from(value).equals(requiredBinding))
+      liveMembers += 1
+      if (!bound) unboundMembers += 1
+    }
+    if (unboundMembers > 0 && !leaderAnchored) return "unproven"
+    return liveMembers > 0 ? "live" : "absent"
   }
 
   private async waitForExit(child: ReturnType<typeof Bun.spawn>, timeoutMs: number): Promise<boolean> {
@@ -582,9 +662,14 @@ export class CodexAppServer {
     }
   }
 
+  private processSessionAlive(sessionId: number): boolean {
+    if (process.platform === "win32") return this.processGroupAlive(sessionId)
+    return this.processGroupOwnership(sessionId) !== "absent"
+  }
+
   private async waitForProcessGroupExit(pgid: number, timeoutMs: number): Promise<boolean> {
     const deadline = Date.now() + Math.max(0, timeoutMs)
-    while (this.processGroupAlive(pgid)) {
+    while (this.processSessionAlive(pgid)) {
       if (Date.now() >= deadline) return false
       await Bun.sleep(Math.min(25, Math.max(1, deadline - Date.now())))
     }

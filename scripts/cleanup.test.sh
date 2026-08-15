@@ -8,6 +8,9 @@ trap 'rm -rf -- "$fixture"' EXIT
 runner_temp="$fixture/runner"
 mkdir -p -- "$runner_temp"
 record_key="$(printf 'ab%.0s' {1..32})"
+session_token="$(printf 'cd%.0s' {1..32})"
+
+python3 "$repo_root/scripts/process-session-signal.test.py"
 
 process_live() {
   local pid="$1" stat state
@@ -164,10 +167,24 @@ prepare_context "$workdir"
 expect_rejected "$symlink_path" "$symlink_target/canary"
 rm -rf -- "$workdir"
 
+# A live, unrelated group must not become an ownership fallback when the
+# authenticated session leader and every member of that session are absent.
+(
+  source "$repo_root/scripts/process-group.sh"
+  ENGINE_DIR="$repo_root"
+  CCHP_PROCESS_PID=2147483646
+  CCHP_PROCESS_PGID="$(ps -o pgid= -p $$ | tr -d ' ')"
+  CCHP_PROCESS_START=missing
+  CCHP_PROCESS_SESSION_TOKEN="$session_token"
+  status=0
+  groups="$(cchp_session_process_groups)" || status=$?
+  [[ "$status" == "1" && -z "$groups" ]]
+)
+
 if command -v setsid >/dev/null 2>&1; then
-  setsid bash -c 'exec -a codex-app-server sleep 30' &
+  setsid env CCHP_PROCESS_SESSION_TOKEN="$session_token" bash -c 'exec -a codex-app-server sleep 300' &
   identity_pid=$!
-  setsid sleep 30 &
+  setsid sleep 300 &
   unrelated_pid=$!
   sleep 0.1
   identity_stat="$(<"/proc/${identity_pid}/stat")"
@@ -178,8 +195,8 @@ if command -v setsid >/dev/null 2>&1; then
   printf 'preserve\n' > "$workdir/canary"
   jq -n \
     --argjson pid "$identity_pid" --arg start "${identity_fields[19]}" --arg boot "$(<"/proc/sys/kernel/random/boot_id")" \
-    --arg home "$workdir/codex-home" \
-    '{schemaVersion: 2, pid: $pid, pgid: $pid, startTicks: $start, bootId: $boot, codexHome: $home, runId: "run", githubRunId: "123", githubRunAttempt: "2", mac: "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"}' \
+    --arg home "$workdir/codex-home" --arg session "$session_token" \
+    '{schemaVersion: 3, pid: $pid, pgid: $pid, startTicks: $start, bootId: $boot, sessionToken: $session, codexHome: $home, runId: "run", githubRunId: "123", githubRunAttempt: "2", mac: "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"}' \
     >"$process_file"
   set +e
   run_cleanup "$workdir" >"$fixture/forged-consistent-record.log" 2>&1
@@ -195,8 +212,8 @@ if command -v setsid >/dev/null 2>&1; then
   jq -n \
     --argjson pid "$identity_pid" --argjson pgid "$unrelated_pid" \
     --arg start "${identity_fields[19]}" --arg boot "$(<"/proc/sys/kernel/random/boot_id")" \
-    --arg home "$workdir/codex-home" \
-    '{schemaVersion: 2, pid: $pid, pgid: $pgid, startTicks: $start, bootId: $boot, codexHome: $home, runId: "run", githubRunId: "123", githubRunAttempt: "2"}' \
+    --arg home "$workdir/codex-home" --arg session "$session_token" \
+    '{schemaVersion: 3, pid: $pid, pgid: $pgid, startTicks: $start, bootId: $boot, sessionToken: $session, codexHome: $home, runId: "run", githubRunId: "123", githubRunAttempt: "2"}' \
     >"$process_file"
   authenticate_file "$process_file"
   set +e
@@ -211,10 +228,36 @@ if command -v setsid >/dev/null 2>&1; then
   authenticate_file "$process_file"
   run_cleanup "$workdir"
   [[ ! -e "$workdir" && ! -e "$process_file" ]]
-  ! kill -0 "$identity_pid" 2>/dev/null
+  ! process_live "$identity_pid"
   kill -0 "$unrelated_pid"
   kill -KILL "$unrelated_pid" 2>/dev/null || true
   wait "$identity_pid" "$unrelated_pid" 2>/dev/null || true
+
+  session_child_file="$fixture/session-child.pid"
+  setsid env CCHP_PROCESS_SESSION_TOKEN="$session_token" bash -c '
+    python3 -c "import os, time; os.setpgrp(); time.sleep(30)" &
+    printf "%s\n" "$!" > "$1"
+    exec -a codex-app-server sleep 30
+  ' _ "$session_child_file" &
+  session_leader_pid=$!
+  while [[ ! -s "$session_child_file" ]]; do sleep 0.01; done
+  session_child_pid="$(<"$session_child_file")"
+  session_stat="$(<"/proc/${session_leader_pid}/stat")"
+  session_stat="${session_stat##*) }"
+  read -r -a session_fields <<<"$session_stat"
+  workdir="$(mktemp -d -- "$runner_temp/cchp-bot.123.2.XXXXXX")"
+  prepare_context "$workdir"
+  jq -n \
+    --argjson pid "$session_leader_pid" --arg start "${session_fields[19]}" --arg boot "$(<"/proc/sys/kernel/random/boot_id")" \
+    --arg home "$workdir/codex-home" --arg session "$session_token" \
+    '{schemaVersion: 3, pid: $pid, pgid: $pid, startTicks: $start, bootId: $boot, sessionToken: $session, codexHome: $home, runId: "run", githubRunId: "123", githubRunAttempt: "2"}' \
+    >"$process_file"
+  authenticate_file "$process_file"
+  run_cleanup "$workdir"
+  [[ ! -e "$workdir" && ! -e "$process_file" ]]
+  ! process_live "$session_leader_pid"
+  ! process_live "$session_child_pid"
+  wait "$session_leader_pid" 2>/dev/null || true
 
   workdir="$(mktemp -d -- "$runner_temp/cchp-bot.123.2.XXXXXX")"
   prepare_context "$workdir"
@@ -266,7 +309,7 @@ if command -v setsid >/dev/null 2>&1; then
 
   release="$fixture/release-leader"
   descendant_path="$fixture/leader-descendant.pid"
-  setsid bash -c 'bash -c '\''trap "" INT TERM; while :; do sleep 1; done'\'' & echo $! >"$1"; while [[ ! -e "$2" ]]; do sleep 0.02; done' _ "$descendant_path" "$release" &
+  setsid env CCHP_PROCESS_SESSION_TOKEN="$session_token" bash -c 'bash -c '\''trap "" INT TERM; while :; do sleep 1; done'\'' & echo $! >"$1"; while [[ ! -e "$2" ]]; do sleep 0.02; done' _ "$descendant_path" "$release" &
   leader_pid=$!
   while [[ ! -s "$descendant_path" ]]; do sleep 0.02; done
   leader_stat="$(<"/proc/${leader_pid}/stat")"
@@ -276,8 +319,8 @@ if command -v setsid >/dev/null 2>&1; then
   prepare_context "$workdir"
   jq -n \
     --argjson pid "$leader_pid" --arg start "${leader_fields[19]}" --arg boot "$(<"/proc/sys/kernel/random/boot_id")" \
-    --arg home "$workdir/codex-home" \
-    '{schemaVersion: 2, pid: $pid, pgid: $pid, startTicks: $start, bootId: $boot, codexHome: $home, runId: "run", githubRunId: "123", githubRunAttempt: "2"}' \
+    --arg home "$workdir/codex-home" --arg session "$session_token" \
+    '{schemaVersion: 3, pid: $pid, pgid: $pid, startTicks: $start, bootId: $boot, sessionToken: $session, codexHome: $home, runId: "run", githubRunId: "123", githubRunAttempt: "2"}' \
     >"$process_file"
   authenticate_file "$process_file"
   touch "$release"
