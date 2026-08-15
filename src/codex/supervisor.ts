@@ -638,12 +638,20 @@ export class Supervisor {
     ].filter((value): value is string => Boolean(value))
     const warning = warnings.length ? warnings.join("; ") : undefined
     if (check.state === "warning") this.append({ event: "NO_PROGRESS_WARNING", semanticAgeMs: check.semanticAgeMs })
-    const deadAir = !this.receivedRuntimeEvent && this.graph.edges().length === 0 && this.usage.budget.consumed === 0
-    if (check.state === "terminal" || (deadAir && check.state === "stale")) {
+    const budget = this.usage.budget
+    const noChildren = this.graph.edges().length === 0
+    const inFlight = budget.responsesInFlight ?? 0
+    const deadAir = !this.receivedRuntimeEvent && noChildren && budget.consumed === 0 && inFlight === 0
+    const stuckInflight = noChildren && inFlight > 0 && budget.admissionDenials > 0 &&
+      (check.state === "warning" || check.state === "stale")
+    if (check.state === "terminal" || (deadAir && check.state === "stale") || stuckInflight) {
       this.append({
         event: "NO_PROGRESS_TIMEOUT",
         semanticAgeMs: check.semanticAgeMs,
-        reason: deadAir ? "no_runtime_events" : "semantic_idle",
+        modelAgeMs: check.modelAgeMs,
+        inFlight,
+        admissionDenials: budget.admissionDenials,
+        reason: stuckInflight ? "stuck_inflight_no_children" : deadAir ? "no_runtime_events" : "semantic_idle",
       })
       await this.abort("NO_PROGRESS_TIMEOUT", "NO_PROGRESS_TIMEOUT", 124)
       return
@@ -1441,6 +1449,7 @@ export class Supervisor {
       model: input.model,
       ...result,
     })
+    if (result.acceptedRaw && (input.outputTokens ?? 0) > 0) this.deadline.modelEvent()
     this.writeRunManifest()
     if (this.usage.hasBlockingAnomalies()) {
       const anomaly = this.usage.anomalies.at(-1)
@@ -2256,6 +2265,14 @@ export class Supervisor {
     const result = this.result(state, exitCode)
     this.terminalIntent = result
     this.signalUsageCapacityChange()
+    // Persist before app-server teardown. Bun 1.3.14 has segfaulted after abort;
+    // run-codex.sh can still honor this durable checkpoint if the process dies.
+    try {
+      this.options.assertWriterOwnership?.()
+      durableWriteFile(join(this.options.workdir, "ctx", "codex", "terminal.json"), `${JSON.stringify(result, null, 2)}\n`)
+    } catch {
+      // Best-effort pre-teardown checkpoint; settle() writes the authoritative copy.
+    }
     return result
   }
 

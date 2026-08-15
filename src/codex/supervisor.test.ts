@@ -550,6 +550,177 @@ test("fails no-progress early when the root never emits runtime events", async (
   )).toBe(true)
 })
 
+test("fails a 0-child in-flight admission loop at the warning, not the 20m terminal", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "cchp-supervisor-stuck-inflight-"))
+  const fake = {
+    start: async () => ({ userAgent: "fake" }),
+    request: async (method: string) => {
+      if (method === "thread/start") return { thread: { id: "root" } }
+      if (method === "turn/start") return { turn: { id: "turn" } }
+      return {}
+    },
+    stop: async () => 0,
+  } as unknown as CodexAppServer
+  const supervisor = new Supervisor({
+    appServer: fake,
+    codexHome: join(workdir, "codex-home"),
+    repoDir: workdir,
+    workdir,
+    task: "pr_opened",
+    runId: "run-stuck-inflight",
+    prompt: "review",
+    model: "gpt-5.6-sol",
+    modelProvider: "cchp",
+    totalTokenBudget: 1_000,
+    tokenAdmissionFraction: 0.85,
+    executionMode: "native_v2",
+    deadlines: {
+      wholeRunMs: 2_000,
+      heartbeatMs: 10,
+      reconcileMs: 1_000,
+      noProgressWarningMs: 30,
+      noProgressTerminalMs: 400,
+    },
+  })
+  const started = Date.now()
+  const running = supervisor.run()
+  await Bun.sleep(15)
+  const first = await supervisor.authorizeProviderRequest({
+    providerId: "provider", model: "model", threadId: "root", turnId: "turn", contextWindow: 400,
+  })
+  const second = await supervisor.authorizeProviderRequest({
+    providerId: "provider", model: "model", threadId: "root", turnId: "turn", contextWindow: 400,
+  })
+  expect(first.allowed).toBe(true)
+  expect(second.allowed).toBe(true)
+  void supervisor.authorizeProviderRequest({
+    providerId: "provider", model: "model", threadId: "root", turnId: "turn", contextWindow: 400,
+  })
+  await eventually(() => (supervisor.currentUsage.admissionDenials ?? 0) >= 1)
+  expect(supervisor.currentUsage.responsesInFlight).toBeGreaterThanOrEqual(2)
+  expect(await running).toMatchObject({ state: "NO_PROGRESS_TIMEOUT", exitCode: 124 })
+  expect(Date.now() - started).toBeLessThan(250)
+  expect(readJsonl(join(workdir, "ctx", "codex", "supervisor.jsonl")).some((row) =>
+    row.event === "NO_PROGRESS_TIMEOUT" && row.reason === "stuck_inflight_no_children",
+  )).toBe(true)
+})
+
+test("completed model output postpones the 20m terminal without counting as semantic work", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "cchp-supervisor-model-output-"))
+  const fake = {
+    start: async () => ({ userAgent: "fake" }),
+    request: async (method: string) => {
+      if (method === "thread/start") return { thread: { id: "root" } }
+      if (method === "turn/start") return { turn: { id: "turn" } }
+      return {}
+    },
+    stop: async () => 0,
+  } as unknown as CodexAppServer
+  const supervisor = new Supervisor({
+    appServer: fake,
+    codexHome: join(workdir, "codex-home"),
+    repoDir: workdir,
+    workdir,
+    task: "pr_opened",
+    runId: "run-model-output",
+    prompt: "review",
+    model: "gpt-5.6-sol",
+    modelProvider: "cchp",
+    totalTokenBudget: 10_000,
+    executionMode: "native_v2",
+    deadlines: {
+      wholeRunMs: 2_000,
+      heartbeatMs: 10,
+      reconcileMs: 1_000,
+      noProgressWarningMs: 25,
+      noProgressTerminalMs: 70,
+    },
+  })
+  const started = Date.now()
+  const running = supervisor.run()
+  await Bun.sleep(15)
+  await supervisor.handleNotification({
+    method: "thread/tokenUsage/updated",
+    params: { threadId: "root", turnId: "turn", tokenUsage: { total: {}, last: {} } },
+  })
+  await Bun.sleep(20)
+  await supervisor.recordProviderUsage({
+    providerId: "provider",
+    model: "model",
+    responseId: "response-output",
+    threadId: "root",
+    turnId: "turn",
+    inputTokens: 80,
+    cachedInputTokens: 0,
+    cacheWriteInputTokens: 0,
+    outputTokens: 40,
+    reasoningOutputTokens: 0,
+    totalTokens: 120,
+  })
+  await Bun.sleep(60)
+  expect(supervisor.currentState).not.toBe("NO_PROGRESS_TIMEOUT")
+  expect(await running).toMatchObject({ state: "NO_PROGRESS_TIMEOUT", exitCode: 124 })
+  expect(Date.now() - started).toBeGreaterThan(90)
+  expect(readJsonl(join(workdir, "ctx", "codex", "supervisor.jsonl")).some((row) =>
+    row.event === "NO_PROGRESS_TIMEOUT" && row.reason === "semantic_idle",
+  )).toBe(true)
+})
+
+test("input-only provider usage does not postpone the no-progress terminal", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "cchp-supervisor-input-only-"))
+  const fake = {
+    start: async () => ({ userAgent: "fake" }),
+    request: async (method: string) => {
+      if (method === "thread/start") return { thread: { id: "root" } }
+      if (method === "turn/start") return { turn: { id: "turn" } }
+      return {}
+    },
+    stop: async () => 0,
+  } as unknown as CodexAppServer
+  const supervisor = new Supervisor({
+    appServer: fake,
+    codexHome: join(workdir, "codex-home"),
+    repoDir: workdir,
+    workdir,
+    task: "pr_opened",
+    runId: "run-input-only",
+    prompt: "review",
+    model: "gpt-5.6-sol",
+    modelProvider: "cchp",
+    totalTokenBudget: 10_000,
+    executionMode: "native_v2",
+    deadlines: {
+      wholeRunMs: 2_000,
+      heartbeatMs: 10,
+      reconcileMs: 1_000,
+      noProgressWarningMs: 20,
+      noProgressTerminalMs: 50,
+    },
+  })
+  const started = Date.now()
+  const running = supervisor.run()
+  await Bun.sleep(10)
+  await supervisor.handleNotification({
+    method: "thread/tokenUsage/updated",
+    params: { threadId: "root", turnId: "turn", tokenUsage: { total: {}, last: {} } },
+  })
+  await supervisor.recordProviderUsage({
+    providerId: "provider",
+    model: "model",
+    responseId: "response-input",
+    threadId: "root",
+    turnId: "turn",
+    inputTokens: 500,
+    cachedInputTokens: 0,
+    cacheWriteInputTokens: 0,
+    outputTokens: 0,
+    reasoningOutputTokens: 0,
+    totalTokens: 500,
+  })
+  expect(await running).toMatchObject({ state: "NO_PROGRESS_TIMEOUT", exitCode: 124 })
+  expect(Date.now() - started).toBeLessThan(200)
+})
+
 test("freezes durable state after terminal settlement despite late runtime callbacks", async () => {
   const workdir = mkdtempSync(join(tmpdir(), "cchp-supervisor-terminal-freeze-"))
   let supervisor!: Supervisor
