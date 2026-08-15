@@ -2405,6 +2405,20 @@ export class Supervisor {
     shutdownDeadlineAt: number,
   ): Promise<SupervisorResult> {
     const failures: unknown[] = []
+    if (this.rootThreadId && this.options.cancelProviderThread) {
+      try {
+        let cancelled = 0
+        await this.withShutdownBudget(
+          Promise.resolve(this.options.cancelProviderThread(this.rootThreadId)).then((count) => {
+            cancelled = typeof count === "number" ? count : 0
+          }),
+          shutdownDeadlineAt,
+        )
+        this.append({ event: "root_provider_streams_cancelled", threadId: this.rootThreadId, count: cancelled, reason })
+      } catch (error) {
+        failures.push(error)
+      }
+    }
     try {
       await this.withShutdownBudget(this.interruptExplicitChildren(reason), shutdownDeadlineAt)
     } catch (error) {
