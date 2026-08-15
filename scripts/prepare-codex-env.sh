@@ -30,7 +30,19 @@ git remote set-url origin "https://github.com/${GH_REPO}.git"
 log "sanitized git remote"
 unset BOT_TOKEN GH_TOKEN HEROUI_AUTH_TOKEN
 
-if [[ "${BOT_SKIP_SKILLS:-0}" != "1" ]]; then
+# Only workspace-write tasks can mutate or validate a prepared web checkout.
+# In particular, `pr_opened` always has a read-only sandbox even though it is
+# intentionally routed with BOT_CAN_WRITE=1 so it can publish review results.
+# Installing web dependencies for that task delays every review before Codex
+# starts and provides no usable capability.
+workspace_write_task=0
+if [[ "${BOT_CAN_WRITE:-0}" == "1" && "${BOT_PR_IS_FORK:-0}" != "1" ]]; then
+  case "${BOT_TASK:-}" in
+    engage|lgtm_merge|ci_fix|reaction_execute|manual|dispatch) workspace_write_task=1 ;;
+  esac
+fi
+
+if [[ "${BOT_SKIP_SKILLS:-0}" != "1" && "$workspace_write_task" == "1" ]]; then
   env -i \
     PATH="${PATH}" HOME="${HOME}" TMPDIR="${TMPDIR:-/tmp}" LANG="${LANG:-C.UTF-8}" \
     BOT_WORKDIR="${BOT_WORKDIR}" \
@@ -38,18 +50,12 @@ if [[ "${BOT_SKIP_SKILLS:-0}" != "1" ]]; then
     CCHP_SKILLS_INSTALL_HOME="${BOT_WORKDIR}/skills-install-home" \
     bash "${SCRIPT_DIR}/install-skills.sh"
 else
-  log "skipping skills installation"
+  log "skipping skills installation (no workspace-write task)"
 fi
 
 # HeroUI Pro's private packages require the auth token only during this trusted
 # preparation subprocess. It is deliberately not exported to Codex/runtime.
-# A read-only manual smoke has no write-capable web task to prepare, so avoid
-# spending runner time on application dependencies that Codex cannot use there.
-read_only_manual=0
-if [[ "${BOT_TASK:-}" == "manual" && "${BOT_CAN_WRITE:-1}" == "0" ]]; then
-  read_only_manual=1
-fi
-if [[ "${BOT_SKIP_WEB_DEPS:-0}" != "1" && "$read_only_manual" != "1" && -f "${REPO_DIR}/web/package.json" ]]; then
+if [[ "${BOT_SKIP_WEB_DEPS:-0}" != "1" && "$workspace_write_task" == "1" && -f "${REPO_DIR}/web/package.json" ]]; then
   log "installing web deps (HeroUI Pro)"
   if ! (
     cd "${REPO_DIR}/web"
@@ -67,12 +73,12 @@ if [[ "${BOT_SKIP_WEB_DEPS:-0}" != "1" && "$read_only_manual" != "1" && -f "${RE
     warn "web deps install failed/timed out; web tasks may not be runnable (continuing)"
   fi
 else
-  log "skipping web deps"
+  log "skipping web deps (no workspace-write task)"
 fi
 
 # Tooling is best-effort and read-only from Codex's perspective. No provider
 # keys or App credentials are exported here.
-if [[ "${BOT_SKIP_AGENT_TOOLCHAIN:-0}" != "1" ]]; then
+if [[ "${BOT_SKIP_AGENT_TOOLCHAIN:-0}" != "1" && "$workspace_write_task" == "1" ]]; then
   if command -v uv >/dev/null 2>&1 && ! command -v serena >/dev/null 2>&1; then
     env -i PATH="${PATH}" HOME="${HOME}" TMPDIR="${TMPDIR:-/tmp}" LANG="${LANG:-C.UTF-8}" \
       timeout --signal=TERM --kill-after=30s "${BOT_SERENA_INSTALL_TIMEOUT:-420}" uv tool install --force --python 3.13 "git+https://github.com/oraios/serena@main" >/dev/null 2>&1 || warn "serena install skipped"
@@ -83,6 +89,8 @@ if [[ "${BOT_SKIP_AGENT_TOOLCHAIN:-0}" != "1" ]]; then
       printf '%s\n' 'projects: []' 'web_dashboard: false' 'excluded_tools:' '  - execute_shell_command' '  - create_text_file' '  - replace_content' > "${HOME}/.serena/serena_config.yml"
     fi
   fi
+else
+  log "skipping optional agent toolchain (no workspace-write task)"
 fi
 
 install_see_cli() {
@@ -122,9 +130,11 @@ install_see_cli() {
   chmod 600 "${target_dir}/provenance.json"
 }
 
-if [[ "${BOT_SKIP_SEE:-0}" != "1" ]]; then
+if [[ "${BOT_SKIP_SEE:-0}" != "1" && "$workspace_write_task" == "1" ]]; then
   install_see_cli || true
   [[ -x "${BOT_WORKDIR}/ctx/tools/see/see" ]] || warn "see-cli is not installed; image upload remains unavailable"
+else
+  log "skipping see-cli installation (no workspace-write task)"
 fi
 if [[ "${BOT_SKIP_ATARAXY:-0}" != "1" ]]; then
   command -v sem >/dev/null 2>&1 || warn "sem CLI unavailable"
