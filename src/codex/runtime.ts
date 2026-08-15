@@ -223,14 +223,14 @@ export function resolveRuntimePermission(env: RuntimeEnv = process.env): TaskPer
   })
 }
 
-const SHORT_READ_ONLY_TASKS = new Set<Task>(["engage", "manual", "dispatch"])
+const SHORT_READ_ONLY_TASKS = new Set<Task>(["engage", "manual", "dispatch", "pr_opened"])
 
 export function resolveRuntimeUsageGuardrails(
-  permission: Pick<TaskPermissionProfile, "task" | "hasWriteToken">,
+  permission: Pick<TaskPermissionProfile, "task" | "allowRepositoryMutation">,
   configuredBudget: number,
 ): { totalTokenBudget: number; maxResponsesPerTurn?: number; maxOutputTokens?: number } {
   const budget = Number.isSafeInteger(configuredBudget) && configuredBudget > 0 ? configuredBudget : 2_000_000
-  if (permission.hasWriteToken || !SHORT_READ_ONLY_TASKS.has(permission.task)) {
+  if (permission.allowRepositoryMutation || !SHORT_READ_ONLY_TASKS.has(permission.task)) {
     return { totalTokenBudget: budget }
   }
   return {
