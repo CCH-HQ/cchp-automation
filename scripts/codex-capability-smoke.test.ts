@@ -1,8 +1,18 @@
 import { expect, test } from "bun:test"
-import { capabilityEngineRoot, classifyCapabilityNetworkEvidence, closeAgentCatalogMatchesCodex, collaborationLifecycleObserved, customToolCall, deferredExecArguments, extractToolRefs, interruptCapabilityObserved, isChildProviderRequest, isCollaborationToolName, metadataProbeProtected, parentObservedChildOutput, parentObservedNativeChildOutput, parseNetworkProbeEvidence, shellBoundaryExecProgram, toolCall, toolOutputText, waitAgentArguments, waitForProgressingCompletion, workspaceEnforcement } from "./codex-capability-smoke"
+import { tmpdir } from "node:os"
+import { capabilityEngineRoot, capabilityScratchParent, classifyCapabilityNetworkEvidence, closeAgentCatalogMatchesCodex, collaborationLifecycleObserved, customToolCall, deferredExecArguments, extractToolRefs, interruptCapabilityObserved, isChildProviderRequest, isCollaborationToolName, metadataProbeProtected, parentObservedChildOutput, parentObservedNativeChildOutput, parseNetworkProbeEvidence, shellBoundaryExecProgram, toolCall, toolOutputText, waitAgentArguments, waitForProgressingCompletion, workspaceEnforcement } from "./codex-capability-smoke"
 
 test("resolves the engine root from the smoke script instead of the caller working directory", () => {
   expect(capabilityEngineRoot("/opt/cchp-engine/scripts")).toBe("/opt/cchp-engine")
+})
+
+test("keeps capability scratch state inside the run-owned work directory", () => {
+  expect(capabilityScratchParent({
+    BOT_WORKDIR: "/runner/_work/cchp-bot",
+    RUNNER_TEMP: "/runner/_temp",
+  })).toBe("/runner/_work/cchp-bot/ctx/codex")
+  expect(capabilityScratchParent({ RUNNER_TEMP: "/runner/_temp" })).toBe("/runner/_temp")
+  expect(capabilityScratchParent({})).toBe(tmpdir())
 })
 
 test("maps wait_agent arguments to the selected collaboration ABI", () => {

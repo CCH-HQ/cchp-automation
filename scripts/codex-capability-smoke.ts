@@ -118,6 +118,12 @@ export function capabilityEngineRoot(scriptDirectory = import.meta.dir): string 
   return resolve(scriptDirectory, "..")
 }
 
+export function capabilityScratchParent(env: NodeJS.ProcessEnv = process.env): string {
+  if (env.BOT_WORKDIR) return resolve(env.BOT_WORKDIR, "ctx", "codex")
+  if (env.RUNNER_TEMP) return resolve(env.RUNNER_TEMP)
+  return tmpdir()
+}
+
 export function waitAgentArguments(
   mode: "explicit-exec" | "native-v2",
   target: string,
@@ -364,7 +370,9 @@ async function main(): Promise<void> {
     if (!capability.multiAgentV2) throw new Error("multi_agent_v2 is not stable/enabled")
   }
 
-  const root = mkdtempSync(join(tmpdir(), "cchp-capability-"))
+  const scratchParent = capabilityScratchParent()
+  mkdirSync(scratchParent, { recursive: true })
+  const root = mkdtempSync(join(scratchParent, "cchp-capability-"))
   const rootAdmission: CollaborationAdmissionIdentity = {
     runId: "capability-smoke",
     writerId: "capability-smoke-writer",
