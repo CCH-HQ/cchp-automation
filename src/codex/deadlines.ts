@@ -19,6 +19,7 @@ export type ProgressDeadlineState = "healthy" | "warning" | "stale" | "terminal"
 export interface ProgressDeadlineResult {
   state: ProgressDeadlineState
   semanticAgeMs: number
+  modelAgeMs: number
 }
 
 export interface ProgressDeadlineOptions {
@@ -77,16 +78,22 @@ export class ProgressDeadline {
   }
 
   check(): ProgressDeadlineResult {
-    const age = Math.max(0, this.now() - this.semanticAt)
-    if (age >= this.terminalMs) return { state: "terminal", semanticAgeMs: age }
-    if (age >= this.warningMs) {
+    const now = this.now()
+    const semanticAge = Math.max(0, now - this.semanticAt)
+    const modelAge = Math.max(0, now - this.modelAt)
+    // Terminal requires both clocks. Completed model output can keep a healthy
+    // long review alive past 20m of plan/item silence; heartbeats cannot.
+    if (semanticAge >= this.terminalMs && modelAge >= this.terminalMs) {
+      return { state: "terminal", semanticAgeMs: semanticAge, modelAgeMs: modelAge }
+    }
+    if (semanticAge >= this.warningMs) {
       if (this.warnedEpoch !== this.epoch) {
         this.warnedEpoch = this.epoch
-        return { state: "warning", semanticAgeMs: age }
+        return { state: "warning", semanticAgeMs: semanticAge, modelAgeMs: modelAge }
       }
-      return { state: "stale", semanticAgeMs: age }
+      return { state: "stale", semanticAgeMs: semanticAge, modelAgeMs: modelAge }
     }
-    return { state: "healthy", semanticAgeMs: age }
+    return { state: "healthy", semanticAgeMs: semanticAge, modelAgeMs: modelAge }
   }
 
   snapshot() {
@@ -97,6 +104,7 @@ export class ProgressDeadline {
       lastModelEventMs: this.modelAt,
       lastSidecarEventMs: this.sidecarAt,
       semanticAgeMs: Math.max(0, now - this.semanticAt),
+      modelAgeMs: Math.max(0, now - this.modelAt),
     }
   }
 }

@@ -17,6 +17,7 @@ import {
   type SupervisorResumeState,
 } from "./run-manifest"
 import { parseReviewTaskIdentity, ReviewAdmissionLedger, type ReviewPassKind, type ReviewResultBinding } from "./review-admission"
+import { explicitChildWorkKey } from "./child-adapter"
 import { ArtifactExplicitChildLifecycle, type ExplicitChildLifecycle, type ExplicitChildSnapshot } from "./explicit-lifecycle"
 
 export type SupervisorState =
@@ -389,6 +390,7 @@ export class Supervisor {
   private terminalReason?: string
   private rootFinalMessage?: string
   private lastEventAt = Date.now()
+  private receivedRuntimeEvent = false
   private runTimer?: ReturnType<typeof setTimeout>
   private noProgressTimer?: ReturnType<typeof setInterval>
   private reconcileTimer?: ReturnType<typeof setInterval>
@@ -636,7 +638,21 @@ export class Supervisor {
     ].filter((value): value is string => Boolean(value))
     const warning = warnings.length ? warnings.join("; ") : undefined
     if (check.state === "warning") this.append({ event: "NO_PROGRESS_WARNING", semanticAgeMs: check.semanticAgeMs })
-    if (check.state === "terminal") {
+    const budget = this.usage.budget
+    const noChildren = this.graph.edges().length === 0
+    const inFlight = budget.responsesInFlight ?? 0
+    const deadAir = !this.receivedRuntimeEvent && noChildren && budget.consumed === 0 && inFlight === 0
+    const stuckInflight = noChildren && inFlight > 0 && budget.admissionDenials > 0 &&
+      (check.state === "warning" || check.state === "stale")
+    if (check.state === "terminal" || (deadAir && check.state === "stale") || stuckInflight) {
+      this.append({
+        event: "NO_PROGRESS_TIMEOUT",
+        semanticAgeMs: check.semanticAgeMs,
+        modelAgeMs: check.modelAgeMs,
+        inFlight,
+        admissionDenials: budget.admissionDenials,
+        reason: stuckInflight ? "stuck_inflight_no_children" : deadAir ? "no_runtime_events" : "semantic_idle",
+      })
       await this.abort("NO_PROGRESS_TIMEOUT", "NO_PROGRESS_TIMEOUT", 124)
       return
     }
@@ -674,6 +690,7 @@ export class Supervisor {
   public async handleNotification(notification: JsonRpcNotification): Promise<void> {
     const normalized = normalizeAppServerNotification(notification)
     this.lastEventAt = Date.now()
+    this.receivedRuntimeEvent = true
     await this.handleEvent(normalized)
   }
 
@@ -1432,6 +1449,7 @@ export class Supervisor {
       model: input.model,
       ...result,
     })
+    if (result.acceptedRaw && (input.outputTokens ?? 0) > 0) this.deadline.modelEvent()
     this.writeRunManifest()
     if (this.usage.hasBlockingAnomalies()) {
       const anomaly = this.usage.anomalies.at(-1)
@@ -1519,7 +1537,14 @@ export class Supervisor {
       }
     } else {
       const childSemantic = Boolean(event.threadId && event.threadId !== this.rootThreadId && this.graph.edge(event.threadId))
-      rootSemantic = Boolean(event.semantic && (event.threadId === this.rootThreadId || childSemantic))
+      // Collaboration terminals only advance the clock when an open edge closes.
+      // Re-emitted item/completed events, or mixed running+terminal agent maps,
+      // must not keep a stalled review alive past the no-progress terminal.
+      rootSemantic = Boolean(
+        event.semantic &&
+        event.kind !== "collaboration" &&
+        (event.threadId === this.rootThreadId || childSemantic),
+      )
     }
     if (rootSemantic) {
       this.deadline.semanticProgress(event.source)
@@ -1920,17 +1945,14 @@ export class Supervisor {
         const runningChild = snapshot.active.find((candidate) => candidate === child)
         if (runningChild) {
           if (edge.state !== "open") throw new Error(`explicit child ${child.childId} active generation is already closed`)
-          const progressKey = `${runningChild.generation}\0${runningChild.updatedAt}\0${runningChild.heartbeatAt}`
+          const progressKey = explicitChildWorkKey(runningChild)
           const previousProgress = this.explicitProgressByChild.get(child.childId)
-          if (previousProgress !== progressKey) {
-            const previousTimestamp = previousProgress?.split("\0")[1]
-            if (!previousTimestamp || Date.parse(runningChild.updatedAt) > Date.parse(previousTimestamp)) {
-              this.deadline.semanticProgress("explicit child running artifact progress")
-              this.lastSemanticProgressAt = new Date().toISOString()
-              this.writeRunManifest()
-            }
-            this.explicitProgressByChild.set(child.childId, progressKey)
+          if (previousProgress !== undefined && previousProgress !== progressKey) {
+            this.deadline.semanticProgress("explicit child running work identity changed")
+            this.lastSemanticProgressAt = new Date().toISOString()
+            this.writeRunManifest()
           }
+          this.explicitProgressByChild.set(child.childId, progressKey)
           continue
         }
         const terminal = child.state as ChildTerminalState
@@ -2243,6 +2265,14 @@ export class Supervisor {
     const result = this.result(state, exitCode)
     this.terminalIntent = result
     this.signalUsageCapacityChange()
+    // Persist before app-server teardown. Bun 1.3.14 has segfaulted after abort;
+    // run-codex.sh can still honor this durable checkpoint if the process dies.
+    try {
+      this.options.assertWriterOwnership?.()
+      durableWriteFile(join(this.options.workdir, "ctx", "codex", "terminal.json"), `${JSON.stringify(result, null, 2)}\n`)
+    } catch {
+      // Best-effort pre-teardown checkpoint; settle() writes the authoritative copy.
+    }
     return result
   }
 

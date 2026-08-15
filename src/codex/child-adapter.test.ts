@@ -2,7 +2,7 @@ import { expect, test } from "bun:test"
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
-import { ExplicitChildAdapter, stopProvenProcessGroup } from "./child-adapter"
+import { ExplicitChildAdapter, explicitChildWorkKey, stopProvenProcessGroup } from "./child-adapter"
 import { attachRecordHmac } from "./authenticated-record"
 import type { ExecRunResult } from "./exec-adapter"
 import { ReviewAdmissionLedger } from "./review-admission"
@@ -12,6 +12,20 @@ const fakeCodex = resolve(import.meta.dir, "../../scripts/fixtures/fake-codex-ex
 chmodSync(fakeCodex, 0o755)
 const RECORD_HMAC_KEY = "1".repeat(64)
 process.env.CCHP_PROCESS_RECORD_HMAC_KEY = RECORD_HMAC_KEY
+
+test("running-child work identity ignores heartbeat and updatedAt", () => {
+  const first = explicitChildWorkKey({
+    generation: 1, state: "running", sessionId: "sess", attempt: 1, promptSha256: "abc", queuedPrompts: [],
+  })
+  const heartbeatOnly = explicitChildWorkKey({
+    generation: 1, state: "running", sessionId: "sess", attempt: 1, promptSha256: "abc", queuedPrompts: [],
+  })
+  const newPrompt = explicitChildWorkKey({
+    generation: 1, state: "running", sessionId: "sess", attempt: 1, promptSha256: "def", queuedPrompts: [],
+  })
+  expect(heartbeatOnly).toBe(first)
+  expect(newPrompt).not.toBe(first)
+})
 
 test("stops a proven process group after its leader has already exited", async () => {
   let groupLive = true
