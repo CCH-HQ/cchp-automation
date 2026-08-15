@@ -14,14 +14,19 @@ function send(value: unknown): void {
   process.stdout.write(`${JSON.stringify(value)}\n`)
 }
 
-if (scenario === "ignore_signals" || scenario === "leader_exits") {
+if (scenario === "ignore_signals" || scenario === "leader_exits" || scenario === "separate_process_group") {
   process.on("SIGINT", () => trace("SIGINT"))
   process.on("SIGTERM", () => trace("SIGTERM"))
-  const descendant = Bun.spawn(["sh", "-c", "trap '' INT TERM; while :; do sleep 1; done"], {
+  const descendant = Bun.spawn(
+    scenario === "separate_process_group"
+      ? ["python3", "-c", "import os, time; os.setpgrp(); time.sleep(3600)"]
+      : ["sh", "-c", "trap '' INT TERM; while :; do sleep 1; done"],
+    {
     stdin: "ignore",
     stdout: "ignore",
     stderr: "ignore",
-  })
+    },
+  )
   if (descendantPidPath) writeFileSync(descendantPidPath, `${descendant.pid}\n`, "utf8")
 }
 
@@ -91,6 +96,6 @@ while (true) {
 
 if (buffer.trim()) await accept(buffer.trim())
 
-if (scenario === "ignore_signals" || scenario === "leader_exits") {
+if (scenario === "ignore_signals" || scenario === "leader_exits" || scenario === "separate_process_group") {
   await new Promise<never>(() => undefined)
 }

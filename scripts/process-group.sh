@@ -25,6 +25,7 @@ cchp_load_process_record() {
   CCHP_PROCESS_PGID="$(jq -er '.pgid | numbers' <<<"$record_json" 2>/dev/null || true)"
   CCHP_PROCESS_START="$(jq -er '.startTicks | strings' <<<"$record_json" 2>/dev/null || true)"
   CCHP_PROCESS_BOOT="$(jq -er '.bootId | strings' <<<"$record_json" 2>/dev/null || true)"
+  CCHP_PROCESS_SESSION_TOKEN="$(jq -er '.sessionToken | strings' <<<"$record_json" 2>/dev/null || true)"
   CCHP_PROCESS_HOME="$(jq -er '.codexHome | strings' <<<"$record_json" 2>/dev/null || true)"
   CCHP_PROCESS_GITHUB_RUN="$(jq -er '.githubRunId | strings' <<<"$record_json" 2>/dev/null || true)"
   CCHP_PROCESS_GITHUB_ATTEMPT="$(jq -er '.githubRunAttempt | strings' <<<"$record_json" 2>/dev/null || true)"
@@ -34,16 +35,30 @@ cchp_load_process_record() {
   CCHP_PROCESS_RECORD_PATH="$record_path"
   current_boot="$(<"/proc/sys/kernel/random/boot_id")"
 
-  [[ "$CCHP_PROCESS_SCHEMA" == "2" && "$CCHP_PROCESS_RECORD_MAC" == "$expected_mac" ]] || return 2
+  [[ "$CCHP_PROCESS_SCHEMA" == "3" && "$CCHP_PROCESS_RECORD_MAC" == "$expected_mac" ]] || return 2
   [[ "$CCHP_PROCESS_PID" =~ ^[1-9][0-9]*$ && "$CCHP_PROCESS_PGID" == "$CCHP_PROCESS_PID" ]] || return 2
   [[ -n "$CCHP_PROCESS_START" && "$CCHP_PROCESS_BOOT" == "$current_boot" ]] || return 2
+  [[ "$CCHP_PROCESS_SESSION_TOKEN" =~ ^[a-f0-9]{64}$ ]] || return 2
   [[ "$CCHP_PROCESS_HOME" == "${BOT_WORKDIR}/codex-home" ]] || return 2
   [[ "$CCHP_PROCESS_GITHUB_RUN" == "$GITHUB_RUN_ID" && "$CCHP_PROCESS_GITHUB_ATTEMPT" == "$GITHUB_RUN_ATTEMPT" ]] || return 2
   [[ -n "${BOT_RUN_ID:-}" && "$CCHP_PROCESS_RUN_ID" == "$BOT_RUN_ID" ]] || return 2
 }
 
 cchp_process_group_alive() {
-  kill -0 -- "-${CCHP_PROCESS_PGID}" 2>/dev/null
+  local status=0
+  python3 "${ENGINE_DIR:?}/scripts/process-session-signal.py" \
+    --session "$CCHP_PROCESS_PID" \
+    --leader-pid "$CCHP_PROCESS_PID" \
+    --expected-start "$CCHP_PROCESS_START" \
+    --require-env "CCHP_PROCESS_SESSION_TOKEN=${CCHP_PROCESS_SESSION_TOKEN}" \
+    >/dev/null || status=$?
+  (( status == 0 || status == 1 )) && return "$status"
+  return 2
+}
+
+cchp_session_process_groups() {
+  cchp_process_group_alive || return $?
+  printf '%s\n' "$CCHP_PROCESS_PGID"
 }
 
 # 0 = original leader still owns the group, 1 = leader exited, 2 = identity drift.
@@ -62,22 +77,31 @@ cchp_process_leader_status() {
 
 cchp_wait_process_group() {
   local iterations="$1" delay="$2"
-  local index
+  local index status
   for ((index = 0; index < iterations; index++)); do
-    cchp_process_group_alive || return 0
+    status=0
+    cchp_process_group_alive || status=$?
+    (( status == 1 )) && return 0
+    (( status == 2 )) && return 2
     sleep "$delay"
   done
-  ! cchp_process_group_alive
+  status=0
+  cchp_process_group_alive || status=$?
+  (( status == 1 )) && return 0
+  (( status == 2 )) && return 2
+  return 1
 }
 
 cchp_signal_process_group() {
-  local signal="$1" status=0
-  cchp_process_group_alive || return 0
-  cchp_process_leader_status || status=$?
-  [[ "$status" -ne 2 ]] || return 2
-  kill "-$signal" -- "-${CCHP_PROCESS_PGID}" 2>/dev/null || {
-    cchp_process_group_alive && return 2
-  }
+  local signal="$1" status=0 signal_output
+  signal_output="$(python3 "${ENGINE_DIR:?}/scripts/process-session-signal.py" \
+    --session "$CCHP_PROCESS_PID" \
+    --leader-pid "$CCHP_PROCESS_PID" \
+    --expected-start "$CCHP_PROCESS_START" \
+    --signal "$signal" \
+    --require-env "CCHP_PROCESS_SESSION_TOKEN=${CCHP_PROCESS_SESSION_TOKEN}")" || status=$?
+  (( status == 0 || status == 1 )) && return 0
+  return 2
 }
 
 cchp_remove_owned_process_record() {
@@ -97,16 +121,27 @@ cchp_remove_owned_process_record() {
 
 cchp_stop_process_group() {
   local interrupt_loops="${1:-20}" term_loops="${2:-20}" kill_loops="${3:-20}" delay="${4:-0.1}"
-  if ! cchp_process_group_alive; then
+  local status=0
+  cchp_process_group_alive || status=$?
+  if (( status == 1 )); then
     cchp_remove_owned_process_record
     return
   fi
+  (( status == 0 )) || return 2
   cchp_signal_process_group INT || return 2
-  if ! cchp_wait_process_group "$interrupt_loops" "$delay"; then
+  status=0
+  cchp_wait_process_group "$interrupt_loops" "$delay" || status=$?
+  (( status == 2 )) && return 2
+  if (( status == 1 )); then
     cchp_signal_process_group TERM || return 2
-    if ! cchp_wait_process_group "$term_loops" "$delay"; then
+    status=0
+    cchp_wait_process_group "$term_loops" "$delay" || status=$?
+    (( status == 2 )) && return 2
+    if (( status == 1 )); then
       cchp_signal_process_group KILL || return 2
-      cchp_wait_process_group "$kill_loops" "$delay" || return 2
+      status=0
+      cchp_wait_process_group "$kill_loops" "$delay" || status=$?
+      (( status == 0 )) || return 2
     fi
   fi
   cchp_remove_owned_process_record

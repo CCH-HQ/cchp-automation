@@ -90,8 +90,9 @@ test("drives typed app-server thread lifecycle requests through a real stdio pro
   try {
     expect(await app.start()).toEqual({ userAgent: "fake-codex-app-server" })
     const processRecord = JSON.parse(readFileSync(processRecordPath, "utf8")) as Record<string, unknown>
-    expect(processRecord).toMatchObject({ schemaVersion: 2, pid: app.pid, pgid: app.pid, runId: "run-app-server", writerId: "writer-1", writerGeneration: 3 })
+    expect(processRecord).toMatchObject({ schemaVersion: 3, pid: app.pid, pgid: app.pid, runId: "run-app-server", writerId: "writer-1", writerGeneration: 3 })
     expect(processRecord.mac).toMatch(/^[a-f0-9]{64}$/)
+    expect(processRecord.sessionToken).toMatch(/^[a-f0-9]{64}$/)
     expect(typeof processRecord.startTicks).toBe("string")
     expect(typeof processRecord.bootId).toBe("string")
     expect(await app.threadRead("thread-1", true)).toEqual({
@@ -242,6 +243,50 @@ test("escalates from INT to TERM to KILL for the whole detached process group", 
   }
 })
 
+test("stops an MCP-like descendant moved to another process group in the owned session", async () => {
+  if (process.platform !== "linux") return
+  const root = mkdtempSync(join(tmpdir(), "cchp-app-server-session-"))
+  const descendantPath = join(root, "descendant.pid")
+  let descendantPid: number | undefined
+  const app = new CodexAppServer({
+    codexBin: fakeCodex,
+    codexHome: root,
+    cwd: root,
+    env: {
+      PATH: process.env.PATH ?? "",
+      FAKE_CODEX_SCENARIO: "separate_process_group",
+      FAKE_CODEX_DESCENDANT_PID: descendantPath,
+    },
+    onNotification: () => undefined,
+    requestTimeoutMs: 1_000,
+  })
+  try {
+    await app.start()
+    await eventually(() => existsSync(descendantPath))
+    descendantPid = Number(readFileSync(descendantPath, "utf8").trim())
+    await eventually(() => {
+      const stat = readFileSync(`/proc/${descendantPid}/stat`, "utf8")
+      const fields = stat.slice(stat.lastIndexOf(")") + 2).trim().split(/\s+/)
+      return Number(fields[2]) === descendantPid && Number(fields[3]) === app.pid
+    })
+    await app.stop({ interruptGraceMs: 100, termGraceMs: 100, killGraceMs: 1_000 })
+    await eventually(() => {
+      try {
+        process.kill(descendantPid!, 0)
+        return false
+      } catch (error) {
+        return (error as NodeJS.ErrnoException).code === "ESRCH"
+      }
+    })
+  } finally {
+    if (descendantPid) {
+      try { process.kill(descendantPid, "SIGKILL") } catch { /* already stopped */ }
+    }
+    await app.stop({ interruptGraceMs: 10, termGraceMs: 10, killGraceMs: 100 }).catch(() => undefined)
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
 test("refuses to signal an app-server process after its recorded identity drifts", async () => {
   const root = mkdtempSync(join(tmpdir(), "cchp-app-server-identity-drift-"))
   const processRecordPath = join(root, "app-server-process.json")
@@ -277,7 +322,27 @@ test("refuses to signal an app-server process after its recorded identity drifts
   }
 })
 
-test("keeps the process record when the app-server leader exits before group cleanup", async () => {
+test("does not synthesize an owned process group for an absent Linux session", () => {
+  if (process.platform !== "linux") return
+  const app = new CodexAppServer({
+    codexBin: fakeCodex,
+    codexHome: tmpdir(),
+    cwd: tmpdir(),
+    env: { PATH: process.env.PATH ?? "" },
+    onNotification: () => undefined,
+  })
+  const missingSession = 2_147_483_646
+  const internals = app as unknown as {
+    launchedIdentity?: ProcessIdentity
+    sessionToken?: string
+    processGroupOwnership(pgid: number): "live" | "absent" | "unproven"
+  }
+  internals.launchedIdentity = { pid: missingSession, startTicks: "missing", bootId: "missing" }
+  internals.sessionToken = "ef".repeat(32)
+  expect(internals.processGroupOwnership(missingSession)).toBe("absent")
+})
+
+test("cleans up descendants and the process record after the app-server leader exits", async () => {
   const root = mkdtempSync(join(tmpdir(), "cchp-app-server-leader-exit-"))
   const processRecordPath = join(root, "app-server-process.json")
   const descendantPath = join(root, "descendant.pid")
@@ -301,15 +366,28 @@ test("keeps the process record when the app-server leader exits before group cle
     await app.start().catch(() => undefined)
     await eventually(() => existsSync(descendantPath))
     await eventually(() => existsSync(processRecordPath))
+    const leaderPid = app.pid!
     descendantPid = Number(readFileSync(descendantPath, "utf8").trim())
-    await expect(app.stop({ interruptGraceMs: 25, termGraceMs: 25, killGraceMs: 1_000 }))
-      .rejects.toThrow("refusing to signal unproven Codex app-server process group")
-    expect(existsSync(processRecordPath)).toBeTrue()
-    expect(() => process.kill(descendantPid!, 0)).not.toThrow()
+    await eventually(() => {
+      try {
+        const stat = readFileSync(`/proc/${leaderPid}/stat`, "utf8")
+        return stat.slice(stat.lastIndexOf(")") + 2).trim().split(/\s+/)[0] === "Z"
+      } catch (error) {
+        return (error as NodeJS.ErrnoException).code === "ENOENT"
+      }
+    })
+    await app.stop({ interruptGraceMs: 25, termGraceMs: 25, killGraceMs: 1_000 })
+    expect(existsSync(processRecordPath)).toBeFalse()
+    await eventually(() => {
+      try {
+        process.kill(descendantPid!, 0)
+        return false
+      } catch (error) {
+        return (error as NodeJS.ErrnoException).code === "ESRCH"
+      }
+    })
   } finally {
-    if (app.pid) {
-      try { process.kill(-app.pid, "SIGKILL") } catch { /* the test group may already be gone */ }
-    }
+    if (app.pid) try { process.kill(-app.pid, "SIGKILL") } catch { /* the test group may already be gone */ }
     await eventually(() => {
       if (!descendantPid) return true
       try {

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Stop detached explicit Codex child groups before deleting their run evidence."""
+"""Stop detached explicit Codex child sessions before deleting their run evidence."""
 
 from __future__ import annotations
 
@@ -11,6 +11,7 @@ import json
 import os
 import signal
 import stat
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -52,7 +53,7 @@ def has_valid_mac(artifact: dict[str, object], key: str) -> bool:
     return hmac.compare_digest(mac, expected)
 
 
-def process_snapshot(pid: int) -> tuple[str, str, str] | None:
+def process_snapshot(pid: int) -> tuple[str, str, str, str] | None:
     try:
         value = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
     except OSError as error:
@@ -62,7 +63,7 @@ def process_snapshot(pid: int) -> tuple[str, str, str] | None:
     suffix = value[value.rfind(")") + 2 :].split()
     if len(suffix) < 20:
         raise CleanupError(f"process {pid} has an invalid stat record")
-    return suffix[0], suffix[2], suffix[19]
+    return suffix[0], suffix[2], suffix[3], suffix[19]
 
 
 def process_environment(pid: int) -> set[bytes]:
@@ -74,7 +75,7 @@ def process_environment(pid: int) -> set[bytes]:
         raise CleanupError(f"cannot inspect process {pid} environment: {error}") from error
 
 
-def process_group_members(pgid: int) -> list[tuple[int, str, str]]:
+def session_members(session_id: int) -> list[tuple[int, str, str]]:
     members: list[tuple[int, str, str]] = []
     for entry in os.scandir("/proc"):
         if not entry.name.isdigit():
@@ -83,14 +84,14 @@ def process_group_members(pgid: int) -> list[tuple[int, str, str]]:
         snapshot = process_snapshot(pid)
         if snapshot is None:
             continue
-        state, process_group, start_ticks = snapshot
-        if process_group == str(pgid):
+        state, _, session, start_ticks = snapshot
+        if session == str(session_id):
             members.append((pid, state, start_ticks))
     return members
 
 
-def group_has_live_work(pgid: int) -> bool:
-    return any(state != "Z" for _, state, _ in process_group_members(pgid))
+def session_has_live_work(session_id: int) -> bool:
+    return any(state != "Z" for _, state, _ in session_members(session_id))
 
 
 def has_run_binding(pid: int, workdir: str, run_id: str) -> bool:
@@ -102,40 +103,60 @@ def has_run_binding(pid: int, workdir: str, run_id: str) -> bool:
     }.issubset(environment)
 
 
-def assert_group_binding(pgid: int, workdir: str, run_id: str) -> None:
-    members = [(pid, state) for pid, state, _ in process_group_members(pgid) if state != "Z"]
+def assert_session_binding(session_id: int, workdir: str, run_id: str) -> None:
+    members = [(pid, state) for pid, state, _ in session_members(session_id) if state != "Z"]
     if not members:
         return
     if not any(has_run_binding(pid, workdir, run_id) for pid, _ in members):
-        raise CleanupError(f"process group {pgid} is not bound to this explicit child run")
+        raise CleanupError(f"process session {session_id} is not bound to this explicit child run")
 
 
-def signal_group(pgid: int, sig: signal.Signals, workdir: str, run_id: str) -> None:
-    if not group_has_live_work(pgid):
+def signal_session(session_id: int, start_ticks: str, sig: signal.Signals, workdir: str, run_id: str) -> None:
+    if not session_has_live_work(session_id):
         return
-    assert_group_binding(pgid, workdir, run_id)
+    assert_session_binding(session_id, workdir, run_id)
+    helper = Path(__file__).with_name("process-session-signal.py")
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(helper),
+            "--session", str(session_id),
+            "--leader-pid", str(session_id),
+            "--expected-start", start_ticks,
+            "--signal", sig.name,
+            "--require-env", f"BOT_WORKDIR={workdir}",
+            "--require-env", f"BOT_RUN_ID={run_id}",
+            "--require-env", "CCHP_EXPLICIT_AGENT_DEPTH=1",
+        ],
+        capture_output=True,
+        text=True,
+    )
     try:
-        os.killpg(pgid, sig)
-    except ProcessLookupError:
+        report = json.loads(result.stdout.rsplit("\n", 2)[-2])
+    except (IndexError, json.JSONDecodeError):
+        report = {}
+    if result.returncode == 0 and report.get("status") == "signaled":
         return
-    except OSError as error:
-        raise CleanupError(f"cannot signal process group {pgid}: {error}") from error
+    if result.returncode == 1 and report.get("status") == "absent":
+        return
+    detail = (result.stderr or result.stdout).strip().replace("\n", " ")[:500]
+    raise CleanupError(f"cannot pidfd-signal explicit child session {session_id}: {detail}")
 
 
-def wait_group(pgid: int, iterations: int, delay: float) -> bool:
+def wait_session(session_id: int, iterations: int, delay: float) -> bool:
     for _ in range(iterations):
-        if not group_has_live_work(pgid):
+        if not session_has_live_work(session_id):
             return True
         time.sleep(delay)
-    return not group_has_live_work(pgid)
+    return not session_has_live_work(session_id)
 
 
-def stop_group(pgid: int, workdir: str, run_id: str) -> None:
+def stop_session(session_id: int, start_ticks: str, workdir: str, run_id: str) -> None:
     for sig, iterations in ((signal.SIGINT, 100), (signal.SIGTERM, 100), (signal.SIGKILL, 200)):
-        signal_group(pgid, sig, workdir, run_id)
-        if wait_group(pgid, iterations, 0.05):
+        signal_session(session_id, start_ticks, sig, workdir, run_id)
+        if wait_session(session_id, iterations, 0.05):
             return
-    raise CleanupError(f"explicit child process group {pgid} did not stop after SIGKILL")
+    raise CleanupError(f"explicit child process session {session_id} did not stop after SIGKILL")
 
 
 def read_artifact(directory_fd: int, name: str) -> dict[str, object]:
@@ -168,7 +189,7 @@ def read_artifact(directory_fd: int, name: str) -> dict[str, object]:
     return value
 
 
-def checkpointed_group(artifact: dict[str, object], name: str, run_id: str, boot_id: str, hmac_key: str) -> int | None:
+def checkpointed_session(artifact: dict[str, object], name: str, run_id: str, boot_id: str, hmac_key: str) -> tuple[int, str] | None:
     if (
         artifact.get("schemaVersion") != 5
         or artifact.get("mode") != "explicit_child"
@@ -205,10 +226,10 @@ def checkpointed_group(artifact: dict[str, object], name: str, run_id: str, boot
         return None
     snapshot = process_snapshot(pid)
     if snapshot is not None and snapshot[0] != "Z":
-        _, current_pgid, current_start = snapshot
-        if current_pgid != str(pgid) or current_start != start_ticks:
+        _, current_pgid, current_session, current_start = snapshot
+        if current_pgid != str(pgid) or current_session != str(pid) or current_start != start_ticks:
             raise CleanupError(f"explicit child artifact {name} process identity drifted")
-    return pgid
+    return pid, start_ticks
 
 
 def cleanup(workdir: str, expected_workdir: str, run_id: str) -> int:
@@ -227,16 +248,16 @@ def cleanup(workdir: str, expected_workdir: str, run_id: str) -> int:
         names = sorted(name for name in os.listdir(directory_fd) if name.endswith(".running.json"))
         hmac_key = validate_hmac_key() if names else ""
         boot_id = Path("/proc/sys/kernel/random/boot_id").read_text(encoding="utf-8").strip()
-        groups: set[int] = set()
+        sessions: set[tuple[int, str]] = set()
         for name in names:
             artifact = read_artifact(directory_fd, name)
-            pgid = checkpointed_group(artifact, name, run_id, boot_id, hmac_key)
-            if pgid is not None:
-                groups.add(pgid)
-        for pgid in sorted(groups):
-            assert_group_binding(pgid, expected_workdir, run_id)
-            stop_group(pgid, expected_workdir, run_id)
-        return len(groups)
+            session = checkpointed_session(artifact, name, run_id, boot_id, hmac_key)
+            if session is not None:
+                sessions.add(session)
+        for session_id, start_ticks in sorted(sessions):
+            assert_session_binding(session_id, expected_workdir, run_id)
+            stop_session(session_id, start_ticks, expected_workdir, run_id)
+        return len(sessions)
     finally:
         os.close(directory_fd)
 
@@ -250,7 +271,7 @@ def main() -> int:
     if not os.path.isabs(args.workdir) or not os.path.isabs(args.expected_workdir) or not args.run_id:
         raise CleanupError("workdir bindings must be absolute and run id must be non-empty")
     stopped = cleanup(os.path.realpath(args.workdir), args.expected_workdir, args.run_id)
-    print(f"[cleanup-explicit-children] verified {stopped} detached process group(s)")
+    print(f"[cleanup-explicit-children] verified {stopped} detached process session(s)")
     return 0
 
 
