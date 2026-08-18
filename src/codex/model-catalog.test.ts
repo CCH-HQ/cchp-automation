@@ -87,6 +87,19 @@ const realVersion = realCodexBin
   : ""
 
 if (realCodexBin && realVersion === "codex-cli 0.147.0") {
+  function isolatedDebugModels(home: string, args: string[] = ["debug", "models"]) {
+    return spawnSync(realCodexBin, args, {
+      cwd: home,
+      env: {
+        PATH: process.env.PATH ?? "",
+        HOME: home,
+        CODEX_HOME: home,
+      },
+      encoding: "utf8",
+      maxBuffer: 8 * 1024 * 1024,
+    })
+  }
+
   test("real Codex 0.147 debug models reads patched sol windows as 1000000", () => {
     const exportHome = mkdtempSync(join(tmpdir(), "cchp-real-catalog-export-"))
     const exported = exportBundledModelCatalog({
@@ -100,27 +113,18 @@ if (realCodexBin && realVersion === "codex-cli 0.147.0") {
       max_context_window: 272000,
     })
     const patched = patchBundledModelWindows(exported, "gpt-5.6-sol", 1_000_000)
+    expect(patched.models.slice(1)).toEqual(exported.models.slice(1))
     const runtimeHome = mkdtempSync(join(tmpdir(), "cchp-real-catalog-home-"))
     const catalogPath = join(runtimeHome, "model_catalog.json")
-    const configPath = join(runtimeHome, "config.toml")
     Bun.write(catalogPath, `${JSON.stringify(patched, null, 2)}\n`)
-    Bun.write(configPath, [
+    Bun.write(join(runtimeHome, "config.toml"), [
       'model = "gpt-5.6-sol"',
       `model_catalog_json = ${JSON.stringify(catalogPath)}`,
       "model_context_window = 1000000",
       "model_auto_compact_token_limit = 900000",
       "",
     ].join("\n"))
-    const observed = spawnSync(realCodexBin, ["debug", "models"], {
-      cwd: runtimeHome,
-      env: {
-        PATH: process.env.PATH ?? "",
-        HOME: runtimeHome,
-        CODEX_HOME: runtimeHome,
-      },
-      encoding: "utf8",
-      maxBuffer: 8 * 1024 * 1024,
-    })
+    const observed = isolatedDebugModels(runtimeHome)
     expect(observed.status).toBe(0)
     const catalog = parseBundledModelCatalog(observed.stdout)
     expect(catalog.models.map((model) => model.slug)).toEqual(builtinSlugs)
@@ -128,6 +132,26 @@ if (realCodexBin && realVersion === "codex-cli 0.147.0") {
       slug: "gpt-5.6-sol",
       context_window: 1_000_000,
       max_context_window: 1_000_000,
+    })
+  })
+
+  test("real Codex 0.147 still clamps sol to 272000 when only -c window flags are set", () => {
+    const controlHome = mkdtempSync(join(tmpdir(), "cchp-real-catalog-control-"))
+    const observed = isolatedDebugModels(controlHome, [
+      "debug",
+      "models",
+      "-c",
+      "model_context_window=1000000",
+      "-c",
+      "model_auto_compact_token_limit=900000",
+    ])
+    expect(observed.status).toBe(0)
+    const catalog = parseBundledModelCatalog(observed.stdout)
+    expect(catalog.models.map((model) => model.slug)).toEqual(builtinSlugs)
+    expect(catalog.models.find((model) => model.slug === "gpt-5.6-sol")).toMatchObject({
+      slug: "gpt-5.6-sol",
+      context_window: 272000,
+      max_context_window: 272000,
     })
   })
 }
