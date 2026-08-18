@@ -20,6 +20,7 @@ import { parseCallerContract } from "./caller-contract"
 import { decideCollaborationMode, writeCapabilityDecision } from "./capability"
 import { initializeCollaborationAdmission, sealCollaborationAdmission } from "./collaboration-admission"
 import { prepareCodexHome } from "./config"
+import { autoCompactTokenLimit } from "./model-catalog"
 import { redactRuntimeDiagnostic } from "./diagnostic-redaction"
 import { exitCodeFor } from "./exit"
 import { loadExtraInstructions, renderCallerOverlay, renderInstructionOverlay } from "./instructions"
@@ -640,6 +641,7 @@ export async function main(): Promise<number> {
       seeServer: seeUpload ? join(engineDir, "src", "mcp", "see-server.ts") : undefined,
       seeCliBin: seeUpload ? seeCliBin : undefined,
       baseInstructions: system,
+      codexBin: process.env.CODEX_BIN ?? "codex",
     })
     process.env.CODEX_HOME = prepared.codexHome
     supervisor = createSupervisor({
@@ -652,6 +654,9 @@ export async function main(): Promise<number> {
       model: providerSet.main.modelKey,
       modelProvider: providerSet.providers.find((provider) => provider.id === providerSet.main.providerId)!.codexId,
       contextWindow: providerSet.main.context,
+      compactTokenLimit: providerSet.main.context === undefined
+        ? undefined
+        : autoCompactTokenLimit(providerSet.main.context, providerSet.main.compactThreshold),
       totalTokenBudget: usageGuardrails.totalTokenBudget,
       maxResponsesPerTurn: usageGuardrails.maxResponsesPerTurn,
       tokenAdmissionFraction: 0.85,

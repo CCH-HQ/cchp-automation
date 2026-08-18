@@ -1,5 +1,11 @@
 import { mkdirSync, writeFileSync } from "node:fs"
 import { isAbsolute, join } from "node:path"
+import {
+  autoCompactTokenLimit,
+  exportBundledModelCatalog,
+  patchBundledModelWindows,
+  type BundledModelCatalog,
+} from "./model-catalog"
 import type { ProviderSet } from "./providers"
 
 export type CodexSandboxMode = "read-only" | "workspace-write"
@@ -22,6 +28,8 @@ export interface PrepareCodexHomeInput {
   seeServer?: string
   seeCliBin?: string
   baseInstructions?: string
+  codexBin?: string
+  bundledCatalog?: BundledModelCatalog
 }
 
 export interface PreparedCodexHome {
@@ -117,57 +125,6 @@ function agentFile(input: {
   ].join("\n")
 }
 
-function modelInfo(input: {
-  slug: string
-  displayName: string
-  context?: number
-  vision: boolean
-  effort: "low" | "xhigh"
-  applyPatch: boolean
-  multiAgentVersion: "v2" | "disabled"
-  reasoning: boolean
-  baseInstructions: string
-}): Record<string, unknown> {
-  const context = input.context ?? 272_000
-  return {
-    slug: input.slug,
-    display_name: input.displayName,
-    description: "CCHP internal leaf model alias",
-    default_reasoning_level: input.reasoning ? input.effort : null,
-    supported_reasoning_levels: input.reasoning
-      ? [
-          { effort: "low", description: "Low reasoning effort" },
-          { effort: "medium", description: "Medium reasoning effort" },
-          { effort: "high", description: "High reasoning effort" },
-          { effort: "xhigh", description: "Extra-high reasoning effort" },
-          { effort: "max", description: "Maximum reasoning effort" },
-        ]
-      : [],
-    shell_type: "shell_command",
-    visibility: "none",
-    supported_in_api: true,
-    priority: 99,
-    availability_nux: null,
-    upgrade: null,
-    base_instructions: input.baseInstructions,
-    model_messages: null,
-    support_verbosity: true,
-    default_verbosity: "low",
-    apply_patch_tool_type: input.applyPatch ? "freeform" : null,
-    web_search_tool_type: "text_and_image",
-    truncation_policy: { mode: "tokens", limit: 10_000 },
-    supports_parallel_tool_calls: true,
-    supports_image_detail_original: input.vision,
-    context_window: context,
-    max_context_window: context,
-    experimental_supported_tools: [],
-    input_modalities: input.vision ? ["text", "image"] : ["text"],
-    use_responses_lite: true,
-    tool_mode: "code_mode_only",
-    multi_agent_version: input.multiAgentVersion,
-  }
-}
-
 function githubMcpConfig(input: PrepareCodexHomeInput, enabledTools?: readonly string[]): string[] {
   return [
     "[mcp_servers.cchp_github]",
@@ -252,44 +209,15 @@ export function prepareCodexHome(input: PrepareCodexHomeInput): PreparedCodexHom
   const allowShell = input.allowShell !== false
   const baseInstructions = input.baseInstructions?.trim() ||
     "You are Codex running inside the CCHP automation runtime. Follow the selected agent role and task instructions."
-  const modelCatalogPath = join(codexHome, "models.json")
-  writePrivate(modelCatalogPath, JSON.stringify({
-    models: [
-      modelInfo({
-        slug: input.providerSet.main.modelKey,
-        displayName: "CCHP root model",
-        context: input.providerSet.main.context,
-        vision: input.providerSet.main.vision,
-        effort: "xhigh",
-        applyPatch: true,
-        multiAgentVersion: "v2",
-        reasoning: input.providerSet.main.reasoning,
-        baseInstructions,
-      }),
-      modelInfo({
-        slug: input.providerSet.reviewModelKey,
-        displayName: "CCHP review leaf",
-        context: input.providerSet.small.context,
-        vision: input.providerSet.small.vision,
-        effort: "low",
-        applyPatch: false,
-        multiAgentVersion: "disabled",
-        reasoning: input.providerSet.small.reasoning,
-        baseInstructions,
-      }),
-      modelInfo({
-        slug: input.providerSet.workerModelKey,
-        displayName: "CCHP worker leaf",
-        context: input.providerSet.main.context,
-        vision: input.providerSet.main.vision,
-        effort: "xhigh",
-        applyPatch: true,
-        multiAgentVersion: "disabled",
-        reasoning: input.providerSet.main.reasoning,
-        baseInstructions,
-      }),
-    ],
-  }, null, 2))
+  const bundled = input.bundledCatalog ?? exportBundledModelCatalog({
+    codexBin: input.codexBin ?? process.env.CODEX_BIN ?? "codex",
+    exportHome: join(input.botWorkdir, "codex-debug-export"),
+  })
+  const modelCatalog = input.providerSet.main.context === undefined
+    ? bundled
+    : patchBundledModelWindows(bundled, input.providerSet.main.modelKey, input.providerSet.main.context)
+  const modelCatalogPath = join(codexHome, "model_catalog.json")
+  writePrivate(modelCatalogPath, JSON.stringify(modelCatalog, null, 2))
   const readOnlyMcpConfig = [
     ...githubMcpConfig(input, READ_ONLY_GITHUB_TOOLS),
     ...fffMcpConfig(input, READ_ONLY_FFF_TOOLS),
@@ -305,10 +233,10 @@ export function prepareCodexHome(input: PrepareCodexHomeInput): PreparedCodexHom
     `allow_login_shell = false`,
     `sandbox_mode = ${toml(input.sandboxMode)}`,
     ...(input.providerSet.main.context
-      ? [`model_context_window = ${input.providerSet.main.context}`]
-      : []),
-    ...(input.providerSet.main.context && input.providerSet.main.compactThreshold !== undefined
-      ? [`model_auto_compact_token_limit = ${Math.round(input.providerSet.main.context * input.providerSet.main.compactThreshold)}`]
+      ? [
+          `model_context_window = ${input.providerSet.main.context}`,
+          `model_auto_compact_token_limit = ${autoCompactTokenLimit(input.providerSet.main.context, input.providerSet.main.compactThreshold)}`,
+        ]
       : []),
     "",
     "[shell_environment_policy]",

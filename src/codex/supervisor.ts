@@ -19,6 +19,7 @@ import {
 import { parseReviewTaskIdentity, ReviewAdmissionLedger, type ReviewPassKind, type ReviewResultBinding } from "./review-admission"
 import { explicitChildWorkKey } from "./child-adapter"
 import { ArtifactExplicitChildLifecycle, type ExplicitChildLifecycle, type ExplicitChildSnapshot } from "./explicit-lifecycle"
+import { threadStartConfigOverrides } from "./model-catalog"
 
 export type SupervisorState =
   | "INIT"
@@ -46,6 +47,7 @@ export interface SupervisorOptions {
   model: string
   modelProvider: string
   contextWindow?: number
+  compactTokenLimit?: number
   totalTokenBudget: number
   tokenAdmissionFraction?: number
   maxResponsesPerTurn?: number
@@ -558,6 +560,10 @@ export class Supervisor {
       }
       // Codex 0.146.0 gates exact per-response usage IDs behind this internal
       // field. The pinned-binary capability smoke guards the wire contract.
+      const threadConfig = threadStartConfigOverrides({
+        modelContextWindow: this.options.contextWindow,
+        modelAutoCompactTokenLimit: this.options.compactTokenLimit,
+      })
       const thread = await this.options.appServer.request<Record<string, unknown>>("thread/start", {
         model: this.options.model,
         modelProvider: this.options.modelProvider,
@@ -565,6 +571,7 @@ export class Supervisor {
         approvalPolicy: this.options.approvalPolicy ?? "never",
         sandbox: this.options.sandboxMode ?? "read-only",
         experimentalRawEvents: true,
+        ...(threadConfig ? { config: threadConfig } : {}),
       })
       const threadRecord = record(thread.thread)
       this.rootThreadId = text(threadRecord.id) ?? text(thread.id)
@@ -2516,6 +2523,8 @@ export function createSupervisor(options: Omit<SupervisorOptions, "appServer"> &
     processRecordHmacKey: options.processRecordHmacKey,
     runId: options.runId,
     writerFence: options.writerFence,
+    modelContextWindow: options.contextWindow,
+    modelAutoCompactTokenLimit: options.compactTokenLimit,
   })
   supervisor = new Supervisor({ ...options, appServer })
   return supervisor

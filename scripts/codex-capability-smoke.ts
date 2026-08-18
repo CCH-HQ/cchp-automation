@@ -718,6 +718,7 @@ async function main(): Promise<void> {
     baseInstructions: "You are the CCHP capability smoke root coordinator.",
     fffCommand: join(engineRoot, "scripts", "fixtures", "readonly-mcp-fixture.ts"),
     serenaCommand: join(engineRoot, "scripts", "fixtures", "readonly-mcp-fixture.ts"),
+    codexBin: process.env.CODEX_BIN ?? "codex",
   })
   const notifications: JsonRpcNotification[] = []
   const appServerStderr: string[] = []
@@ -727,6 +728,10 @@ async function main(): Promise<void> {
   const app = new CodexAppServer({
     codexBin: process.env.CODEX_BIN ?? "codex",
     codexHome: prepared.codexHome,
+    modelContextWindow: providers.main.context,
+    modelAutoCompactTokenLimit: providers.main.context === undefined
+      ? undefined
+      : Math.round(providers.main.context * (providers.main.compactThreshold ?? 0.9)),
     cwd: repo,
     env: {
       ...buildCodexEnvironment({
@@ -934,6 +939,7 @@ async function main(): Promise<void> {
       baseInstructions: "You are the CCHP workspace-write capability probe.",
       fffCommand: join(engineRoot, "scripts", "fixtures", "readonly-mcp-fixture.ts"),
       serenaCommand: join(engineRoot, "scripts", "fixtures", "readonly-mcp-fixture.ts"),
+      codexBin: process.env.CODEX_BIN ?? "codex",
     })
     const workspaceNotifications: JsonRpcNotification[] = []
     const workspaceStderr: string[] = []
@@ -984,6 +990,10 @@ async function main(): Promise<void> {
     workspaceApp = new CodexAppServer({
       codexBin: process.env.CODEX_BIN ?? "codex",
       codexHome: workspacePrepared.codexHome,
+      modelContextWindow: providers.main.context,
+      modelAutoCompactTokenLimit: providers.main.context === undefined
+        ? undefined
+        : Math.round(providers.main.context * (providers.main.compactThreshold ?? 0.9)),
       cwd: repo,
       env: workspaceCodexEnv,
       onNotification(notification) {

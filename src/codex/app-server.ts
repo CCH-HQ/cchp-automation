@@ -4,6 +4,7 @@ import { spawnSync } from "node:child_process"
 import { resolve } from "node:path"
 import { attachRecordHmac, validateRecordHmacKey } from "./authenticated-record"
 import { durableCreateFile } from "./durable-file"
+import { buildAppServerArgs } from "./model-catalog"
 import { processIdentity, type ProcessIdentity, type RunFence } from "./run-lock"
 
 function processGone(error: unknown): boolean {
@@ -189,6 +190,8 @@ export interface CodexAppServerOptions {
   runId?: string
   writerFence?: Pick<RunFence, "writerId" | "generation">
   beforeProcessRecordRemoval?: () => void
+  modelContextWindow?: number
+  modelAutoCompactTokenLimit?: number
 }
 
 export interface AppServerProcessRecord {
@@ -266,7 +269,10 @@ export class CodexAppServer {
     this.sessionToken = randomBytes(32).toString("hex")
     let child: ReturnType<typeof Bun.spawn>
     try {
-      child = Bun.spawn([this.options.codexBin, "app-server", "--stdio", "--strict-config"], {
+      child = Bun.spawn([this.options.codexBin, ...buildAppServerArgs({
+        modelContextWindow: this.options.modelContextWindow,
+        modelAutoCompactTokenLimit: this.options.modelAutoCompactTokenLimit,
+      })], {
         cwd: this.options.cwd,
         env: {
           ...this.options.env,

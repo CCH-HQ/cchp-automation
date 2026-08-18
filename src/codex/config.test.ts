@@ -1,9 +1,15 @@
 import { expect, test } from "bun:test"
-import { mkdirSync, mkdtempSync, readFileSync } from "node:fs"
+import { existsSync, mkdirSync, mkdtempSync, readFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { prepareCodexHome } from "./config"
+import type { BundledModelCatalog } from "./model-catalog"
 import { parseProviders } from "./providers"
+
+const bundledCatalog = JSON.parse(
+  readFileSync(join(import.meta.dir, "../../scripts/fixtures/bundled-model-catalog.json"), "utf8"),
+) as BundledModelCatalog
+const builtinSlugs = bundledCatalog.models.map((model) => model.slug)
 
 test("writes an isolated strict Codex config with loopback providers and no caller secrets", () => {
   const botWorkdir = mkdtempSync(join(tmpdir(), "cchp-codex-"))
@@ -39,6 +45,7 @@ test("writes an isolated strict Codex config with loopback providers and no call
     serenaCommand: "serena",
     seeServer: "/opt/cchp-engine/src/mcp/see-server.ts",
     seeCliBin: "/home/runner/.local/lib/see-cli/see",
+    bundledCatalog,
   })
   const config = readFileSync(result.configPath, "utf8")
   const reviewer = readFileSync(join(result.codexHome, "agents", "reviewer.toml"), "utf8")
@@ -47,17 +54,21 @@ test("writes an isolated strict Codex config with loopback providers and no call
   const implementer = readFileSync(join(result.codexHome, "agents", "implementer.toml"), "utf8")
   const defaultAgent = readFileSync(join(result.codexHome, "agents", "default.toml"), "utf8")
   const worker = readFileSync(join(result.codexHome, "agents", "worker.toml"), "utf8")
-  const modelCatalog = JSON.parse(readFileSync(join(result.codexHome, "models.json"), "utf8")) as {
+  const modelCatalogPath = join(result.codexHome, "model_catalog.json")
+  const modelCatalog = JSON.parse(readFileSync(modelCatalogPath, "utf8")) as {
     models: Array<Record<string, unknown>>
   }
 
   expect(result.codexHome).toBe(join(botWorkdir, "codex-home"))
+  expect(existsSync(join(result.codexHome, "models.json"))).toBe(false)
   expect(config).toContain('model = "gpt-5.6-sol"')
   expect(config).toContain('allow_login_shell = false')
   expect(config).toContain('model_provider = "cchp_gpt_cchp_')
   expect(config).toContain('base_url = "http://127.0.0.1:43123/providers/gpt-cchp/v1"')
   expect(config).toContain('env_key = "CCHP_CODEX_BRIDGE_TOKEN"')
-  expect(config).toContain(`model_catalog_json = "${join(result.codexHome, "models.json")}"`)
+  expect(config).toContain(`model_catalog_json = "${modelCatalogPath}"`)
+  expect(config).toContain("model_context_window = 372000")
+  expect(config).toContain("model_auto_compact_token_limit = 334800")
   expect(config).toContain("[features.multi_agent_v2]")
   expect(config).not.toContain("use_legacy_landlock = true")
   expect(config).not.toContain("[permissions.cchp-workspace]")
@@ -97,27 +108,14 @@ test("writes an isolated strict Codex config with loopback providers and no call
     expect(role).toContain(`model = "${providerSet.workerModelKey}"`)
     expect(role).toContain('model_provider = "cchp_gpt_cchp_')
   }
-  expect(modelCatalog.models).toEqual([
-    expect.objectContaining({
-      slug: providerSet.main.modelKey,
-      multi_agent_version: "v2",
-      tool_mode: "code_mode_only",
-      apply_patch_tool_type: "freeform",
-    }),
-    expect.objectContaining({
-      slug: providerSet.reviewModelKey,
-      multi_agent_version: "disabled",
-      tool_mode: "code_mode_only",
-      apply_patch_tool_type: null,
-    }),
-    expect.objectContaining({
-      slug: providerSet.workerModelKey,
-      multi_agent_version: "disabled",
-      tool_mode: "code_mode_only",
-      apply_patch_tool_type: "freeform",
-    }),
-  ])
-  expect(modelCatalog.models.every((model) => typeof model.base_instructions === "string")).toBe(true)
+  expect(modelCatalog.models.map((model) => model.slug)).toEqual(builtinSlugs)
+  expect(modelCatalog.models).toHaveLength(8)
+  expect(modelCatalog.models[0]).toMatchObject({
+    slug: "gpt-5.6-sol",
+    context_window: 372000,
+    max_context_window: 372000,
+  })
+  expect(modelCatalog.models.slice(1)).toEqual(bundledCatalog.models.slice(1))
   expect(config).toContain('[mcp_servers.fff]\ncommand = "fff-mcp"\nenv_vars =')
   expect(config).not.toContain('args = ["--stdio"]')
   expect(config).toContain('[mcp_servers.see_upload]')
@@ -185,6 +183,7 @@ test("explicit fallback disables native collaboration and registers exactly one 
     providerSet,
     sandboxMode: "workspace-write",
     collaborationMode: "explicit-exec",
+    bundledCatalog,
   })
   const config = readFileSync(result.configPath, "utf8")
   expect(config).toContain("multi_agent = false")
@@ -226,6 +225,7 @@ test("non-reasoning small models do not advertise or force reasoning", () => {
     bridgeTokenEnv: "CCHP_CODEX_BRIDGE_TOKEN",
     providerSet,
     sandboxMode: "read-only",
+    bundledCatalog,
   })
   const reviewer = readFileSync(join(result.codexHome, "agents", "reviewer.toml"), "utf8")
   const explorer = readFileSync(join(result.codexHome, "agents", "explorer.toml"), "utf8")
@@ -235,9 +235,46 @@ test("non-reasoning small models do not advertise or force reasoning", () => {
   expect(config).not.toContain("[features.network_proxy]")
   expect(reviewer).not.toContain("model_reasoning_effort")
   expect(explorer).not.toContain("model_reasoning_effort")
-  const models = JSON.parse(readFileSync(join(result.codexHome, "models.json"), "utf8")) as { models: Array<Record<string, unknown>> }
-  expect(models.models.find((model) => model.slug === providerSet.reviewModelKey)).toMatchObject({
-    default_reasoning_level: null,
-    supported_reasoning_levels: [],
+  const models = JSON.parse(readFileSync(join(result.codexHome, "model_catalog.json"), "utf8")) as { models: Array<Record<string, unknown>> }
+  expect(models.models.map((model) => model.slug)).toEqual(builtinSlugs)
+  expect(models.models.find((model) => model.slug === "gpt-5.6-sol")).toMatchObject({
+    context_window: 272000,
+    max_context_window: 272000,
   })
+})
+
+test("overwrites only gpt-5.6-sol catalog windows to the caller 1M context", () => {
+  const botWorkdir = mkdtempSync(join(tmpdir(), "cchp-codex-1m-"))
+  const providerSet = parseProviders({
+    providerJson: JSON.stringify({
+      main: {
+        format: "openai-responses",
+        base_url: "https://main.example/v1",
+        models: { "gpt-5.6-sol": { context: 1_000_000, compact_threshold: 0.9 } },
+      },
+    }),
+    model: "main/gpt-5.6-sol",
+  })
+  const result = prepareCodexHome({
+    botWorkdir,
+    engineDir: "/opt/cchp-engine",
+    repoDir: join(botWorkdir, "repo"),
+    bridgeBaseUrl: "http://127.0.0.1:43123",
+    bridgeTokenEnv: "CCHP_CODEX_BRIDGE_TOKEN",
+    providerSet,
+    sandboxMode: "workspace-write",
+    bundledCatalog,
+  })
+  const config = readFileSync(result.configPath, "utf8")
+  const catalog = JSON.parse(readFileSync(join(result.codexHome, "model_catalog.json"), "utf8")) as BundledModelCatalog
+  expect(config).toContain(`model_catalog_json = "${join(result.codexHome, "model_catalog.json")}"`)
+  expect(config).toContain("model_context_window = 1000000")
+  expect(config).toContain("model_auto_compact_token_limit = 900000")
+  expect(catalog.models.map((model) => model.slug)).toEqual(builtinSlugs)
+  expect(catalog.models[0]).toMatchObject({
+    slug: "gpt-5.6-sol",
+    context_window: 1_000_000,
+    max_context_window: 1_000_000,
+  })
+  expect(catalog.models.slice(1)).toEqual(bundledCatalog.models.slice(1))
 })

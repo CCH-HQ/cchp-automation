@@ -5,6 +5,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { parseCallerContract } from "./caller-contract"
 import { prepareCodexHome } from "./config"
+import type { BundledModelCatalog } from "./model-catalog"
 import { startProviderBridge } from "./provider-bridge"
 import { parseProviders } from "./providers"
 import { buildCodexEnvironment } from "./supervisor"
@@ -101,6 +102,9 @@ test("uses the production caller provider and key formats without caller-side co
       bridgeTokenEnv: "CCHP_CODEX_BRIDGE_TOKEN",
       providerSet,
       sandboxMode: "read-only",
+      bundledCatalog: JSON.parse(
+        readFileSync(join(import.meta.dir, "../../scripts/fixtures/bundled-model-catalog.json"), "utf8"),
+      ) as BundledModelCatalog,
     })
     const config = readFileSync(prepared.configPath, "utf8")
     expect(config).toContain('model = "gpt-5.6-sol"')
