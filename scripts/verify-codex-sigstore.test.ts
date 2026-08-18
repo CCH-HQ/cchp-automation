@@ -2,7 +2,7 @@ import { expect, test } from "bun:test"
 import type { Bundle, VerifyOptions } from "sigstore"
 import { verifyCodexSigstoreDocuments } from "./verify-codex-sigstore"
 
-const workflowIdentity = "https://github.com/openai/codex/.github/workflows/rust-release.yml@refs/tags/rust-v0.146.0"
+const workflowIdentity = "https://github.com/openai/codex/.github/workflows/rust-release.yml@refs/tags/rust-v0.147.0"
 
 test("verifies every provenance bundle with Fulcio, CT log and Rekor thresholds", async () => {
   const bundles = [{ mediaType: "wrapper" }, { mediaType: "platform" }] as unknown as Bundle[]

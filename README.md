@@ -1,6 +1,6 @@
 # cchp-automation
 
-Runner-native GitHub App automation engine built on pinned Codex CLI 0.146.0,
+Runner-native GitHub App automation engine built on pinned Codex CLI 0.147.0,
 Codex app-server, and multi-agent v2. One isolated supervisor runs **per GitHub
 event inside a GitHub Actions runner** and is distributed as a reusable workflow.
 TypeScript + Octokit; no standalone server and no external durable-workflow engine.

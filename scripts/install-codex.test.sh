@@ -19,11 +19,11 @@ real_node_bin="$(command -v node)"
 cat >"$fixtures/wrapper/package/package.json" <<'EOF'
 {
   "name": "@openai/codex",
-  "version": "0.146.0",
+  "version": "0.147.0",
   "bin": { "codex": "bin/codex.js" },
   "optionalDependencies": {
-    "@openai/codex-linux-x64": "npm:@openai/codex@0.146.0-linux-x64",
-    "@openai/codex-linux-arm64": "npm:@openai/codex@0.146.0-linux-arm64"
+    "@openai/codex-linux-x64": "npm:@openai/codex@0.147.0-linux-x64",
+    "@openai/codex-linux-arm64": "npm:@openai/codex@0.147.0-linux-arm64"
   }
 }
 EOF
@@ -31,40 +31,44 @@ cat >"$fixtures/wrapper/package/bin/codex.js" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 printf 'installed\n' >>"${FAKE_INSTALLED_MARKER:?}"
-printf '%s\n' "${FAKE_INSTALLED_CODEX_VERSION:-codex-cli 0.146.0}"
+printf '%s\n' "${FAKE_INSTALLED_CODEX_VERSION:-codex-cli 0.147.0}"
 EOF
 chmod +x "$fixtures/wrapper/package/bin/codex.js"
 cat >"$fixtures/platform/package/package.json" <<'EOF'
-{"name":"@openai/codex","version":"0.146.0-linux-x64"}
+{"name":"@openai/codex","version":"0.147.0-linux-x64"}
 EOF
 cat >"$fixtures/platform-arm64/package/package.json" <<'EOF'
-{"name":"@openai/codex","version":"0.146.0-linux-arm64"}
+{"name":"@openai/codex","version":"0.147.0-linux-arm64"}
 EOF
 printf '#!/usr/bin/env bash\n[[ "$(basename "$0")" == "codex-linux-sandbox" ]] && printf "Linux sandbox helper\\n"\nexit 0\n' >"$fixtures/platform/package/vendor/x86_64-unknown-linux-musl/bin/codex"
 printf '#!/usr/bin/env bash\n[[ "$(basename "$0")" == "codex-linux-sandbox" ]] && printf "Linux sandbox helper\\n"\nexit 0\n' >"$fixtures/platform-arm64/package/vendor/aarch64-unknown-linux-musl/bin/codex"
+printf '#!/usr/bin/env bash\nprintf "code-mode host\\n"\nexit 0\n' >"$fixtures/platform/package/vendor/x86_64-unknown-linux-musl/bin/codex-code-mode-host"
+printf '#!/usr/bin/env bash\nprintf "code-mode host\\n"\nexit 0\n' >"$fixtures/platform-arm64/package/vendor/aarch64-unknown-linux-musl/bin/codex-code-mode-host"
 printf '#!/usr/bin/env bash\nexit 0\n' >"$fixtures/platform/package/vendor/x86_64-unknown-linux-musl/codex-resources/bwrap"
 printf '#!/usr/bin/env bash\nexit 0\n' >"$fixtures/platform-arm64/package/vendor/aarch64-unknown-linux-musl/codex-resources/bwrap"
 chmod +x \
   "$fixtures/platform/package/vendor/x86_64-unknown-linux-musl/bin/codex" \
   "$fixtures/platform-arm64/package/vendor/aarch64-unknown-linux-musl/bin/codex" \
+  "$fixtures/platform/package/vendor/x86_64-unknown-linux-musl/bin/codex-code-mode-host" \
+  "$fixtures/platform-arm64/package/vendor/aarch64-unknown-linux-musl/bin/codex-code-mode-host" \
   "$fixtures/platform/package/vendor/x86_64-unknown-linux-musl/codex-resources/bwrap" \
   "$fixtures/platform-arm64/package/vendor/aarch64-unknown-linux-musl/codex-resources/bwrap"
 tar -czf "$fixtures/wrapper.tgz" -C "$fixtures/wrapper" package
 tar -czf "$fixtures/platform.tgz" -C "$fixtures/platform" package
 tar -czf "$fixtures/platform-arm64.tgz" -C "$fixtures/platform-arm64" package
 cat >"$fixtures/wrapper-metadata.json" <<'EOF'
-{"repository":{"url":"git+https://github.com/openai/codex.git","directory":"codex-cli"},"dist":{"integrity":"sha512-yG3sPWNda/2YAIQIDq9MrrjoCTIQ7rxYM5IasrG3VBcuhCLTkgeg/JzqmJq1V98RE4MJ5jCxDXXQlOjrditFRw==","attestations":{"provenance":{"predicateType":"https://slsa.dev/provenance/v1"}}}}
+{"repository":{"url":"git+https://github.com/openai/codex.git","directory":"codex-cli"},"dist":{"integrity":"sha512-EQLEXecAG2ptxI7UpBMo2TR/ga5596/c/OsYF/0LoUDh5JANZ7IoGqlzBEWbuEVQ76JePIbtTW/ihCkp1a7Z3w==","attestations":{"provenance":{"predicateType":"https://slsa.dev/provenance/v1"}}}}
 EOF
 cat >"$fixtures/platform-metadata.json" <<'EOF'
-{"repository":{"url":"git+https://github.com/openai/codex.git","directory":"codex-cli"},"dist":{"integrity":"sha512-fswvyGprAPCMiOEue/7MKMk7pCjh9kZIJfJX5i9atmfnmGYbYCcUhZsEH9LEP0+0t5xyPqDbfNXY7NSxIVuXxA==","attestations":{"provenance":{"predicateType":"https://slsa.dev/provenance/v1"}}}}
+{"repository":{"url":"git+https://github.com/openai/codex.git","directory":"codex-cli"},"dist":{"integrity":"sha512-0W9MBxPpWW0cSkNqrTDN2jR7rzzT7oNMhQY5446lT2Lw5cz5yhDTck4Va9rjkQEm+HlFzP/dmEMSZbXfJsINmw==","attestations":{"provenance":{"predicateType":"https://slsa.dev/provenance/v1"}}}}
 EOF
 cat >"$fixtures/platform-arm64-metadata.json" <<'EOF'
-{"repository":{"url":"git+https://github.com/openai/codex.git","directory":"codex-cli"},"dist":{"integrity":"sha512-qiYDxkkEFnXG7joadJW6Q+XcgyDXCpGdpa9nk/c+i0gEomur1j7bHvx12NfWWCF/y8Tqri6ay+FLuC2MjdehtA==","attestations":{"provenance":{"predicateType":"https://slsa.dev/provenance/v1"}}}}
+{"repository":{"url":"git+https://github.com/openai/codex.git","directory":"codex-cli"},"dist":{"integrity":"sha512-SLC1JXw2TYfr/c3HhrJubyyLelq7vTOLWVmiThFA+z0+WgzCPmaseJ/kzDD3Gge/TO7fCnnj7UcPmC0d2c8XAg==","attestations":{"provenance":{"predicateType":"https://slsa.dev/provenance/v1"}}}}
 EOF
 openssl ecparam -name prime256v1 -genkey -noout -out "$fixture_root/provenance-key.pem"
 openssl req -new -x509 -key "$fixture_root/provenance-key.pem" -days 3650 \
   -subj '/O=sigstore.dev/CN=sigstore-intermediate' \
-  -addext 'subjectAltName=URI:https://github.com/openai/codex/.github/workflows/rust-release.yml@refs/tags/rust-v0.146.0' \
+  -addext 'subjectAltName=URI:https://github.com/openai/codex/.github/workflows/rust-release.yml@refs/tags/rust-v0.147.0' \
   -out "$fixture_root/provenance-cert.pem"
 cert_b64="$(openssl x509 -in "$fixture_root/provenance-cert.pem" -outform DER | base64 -w0)"
 node - "$fixtures" "$fixture_root/provenance-key.pem" "$cert_b64" <<'NODE'
@@ -72,8 +76,8 @@ const fs = require("node:fs")
 const crypto = require("node:crypto")
 const [root, keyPath, certB64] = process.argv.slice(2)
 const type = "application/vnd.in-toto+json"
-const tag = "rust-v0.146.0"
-const commit = "e363b08c9175ac1cbe5893615dd2cb9ddf95043b"
+const tag = "rust-v0.147.0"
+const commit = "be6e8eac029b183056b7e4402879f15d2c85f61b"
 const workflow = {
   repository: "https://github.com/openai/codex",
   path: ".github/workflows/rust-release.yml",
@@ -127,25 +131,25 @@ function attestation(name, digest, mutate) {
   }
 }
 fs.writeFileSync(`${root}/wrapper-attestation.json`, JSON.stringify(attestation(
-  "pkg:npm/%40openai/codex@0.146.0",
-  "c86dec3d635d6bfd980084080eaf4caeb8e8093210eebc5833921ab2b1b754172e8422d39207a0fc9cea989ab557df11138309e630b10d75d094e8eb762b4547",
+  "pkg:npm/%40openai/codex@0.147.0",
+  "1102c45de7001b6a6dc48ed4a41328d9347f81ae79f7afdcfceb1817fd0ba140e1e4900d67b2281aa97304459bb84550efa25e3c86ed4d6fe2842929d5aed9df",
 )))
 fs.writeFileSync(`${root}/platform-attestation.json`, JSON.stringify(attestation(
-  "pkg:npm/%40openai/codex@0.146.0-linux-x64",
-  "7ecc2fc86a6b00f08c88e12e7bfecc28c93ba428e1f6464825f257e62f5ab667e798661b602714859b041fd2c43f4fb4b79c723ea0db7cd5d8ecd4b1215b97c4",
+  "pkg:npm/%40openai/codex@0.147.0-linux-x64",
+  "d16f4c0713e9596d1c4a436aad30cdda347baf3cd3ee834c850639e38ea54f62f0e5ccf9ca10d3724e156bdae3910126f87945ccffdd98431265b5df26c20d9b",
 )))
 fs.writeFileSync(`${root}/platform-arm64-attestation.json`, JSON.stringify(attestation(
-  "pkg:npm/%40openai/codex@0.146.0-linux-arm64",
-  "aa2603c649041675c6ee3a1a7495ba43e5dc8320d70a919da5af6793f73e8b4804a26babd63edb1efc75d8d7d658217fcbc4eaae2e9acbe14bb82d8c8dd7a1b4",
+  "pkg:npm/%40openai/codex@0.147.0-linux-arm64",
+  "48b0b5257c364d87ebfdcdc786b26e6f2c8b7a5abbbd338b5959a24e1140fb3d3e5a0cc23e66ac789fe4cc30f71a07bf4ceedf0a79e3ed470f982d1dd9cf1702",
 )))
 const bad = JSON.parse(fs.readFileSync(`${root}/wrapper-attestation.json`, "utf8"))
 bad.attestations[0].bundle.dsseEnvelope.signatures[0].sig = Buffer.from("invalid").toString("base64")
 fs.writeFileSync(`${root}/bad-attestation.json`, JSON.stringify(bad))
-const wrapperName = "pkg:npm/%40openai/codex@0.146.0"
-const wrapperDigest = "c86dec3d635d6bfd980084080eaf4caeb8e8093210eebc5833921ab2b1b754172e8422d39207a0fc9cea989ab557df11138309e630b10d75d094e8eb762b4547"
+const wrapperName = "pkg:npm/%40openai/codex@0.147.0"
+const wrapperDigest = "1102c45de7001b6a6dc48ed4a41328d9347f81ae79f7afdcfceb1817fd0ba140e1e4900d67b2281aa97304459bb84550efa25e3c86ed4d6fe2842929d5aed9df"
 const variants = {
   "wrong-subject-digest": (statement) => { statement.subject[0].digest.sha512 = "0".repeat(128) },
-  "wrong-package": (statement) => { statement.subject[0].name = "pkg:npm/%40openai/other@0.146.0" },
+  "wrong-package": (statement) => { statement.subject[0].name = "pkg:npm/%40openai/other@0.147.0" },
   "wrong-repository": (statement) => { statement.predicate.buildDefinition.externalParameters.workflow.repository = "https://github.com/other/codex" },
   "wrong-workflow": (statement) => { statement.predicate.buildDefinition.externalParameters.workflow.path = ".github/workflows/other.yml" },
   "wrong-ref": (statement) => { statement.predicate.buildDefinition.externalParameters.workflow.ref = "refs/tags/rust-v0.145.0" },
@@ -175,10 +179,10 @@ done
 [[ -n "$output" && -n "$url" ]]
 printf '%s\n' "$url" >>"${FAKE_CURL_TRACE:?}"
 case "$url" in
-  */@openai%2fcodex/0.146.0) cp "${FAKE_FIXTURES:?}/wrapper-metadata.json" "$output" ;;
-  */@openai%2fcodex/0.146.0-linux-x64) cp "${FAKE_FIXTURES:?}/platform-metadata.json" "$output" ;;
-  */@openai%2fcodex/0.146.0-linux-arm64) cp "${FAKE_FIXTURES:?}/platform-arm64-metadata.json" "$output" ;;
-  *attestations/@openai%2fcodex@0.146.0)
+  */@openai%2fcodex/0.147.0) cp "${FAKE_FIXTURES:?}/wrapper-metadata.json" "$output" ;;
+  */@openai%2fcodex/0.147.0-linux-x64) cp "${FAKE_FIXTURES:?}/platform-metadata.json" "$output" ;;
+  */@openai%2fcodex/0.147.0-linux-arm64) cp "${FAKE_FIXTURES:?}/platform-arm64-metadata.json" "$output" ;;
+  *attestations/@openai%2fcodex@0.147.0)
     if [[ "${FAKE_BAD_ATTESTATION:-0}" == 1 ]]; then
       cp "${FAKE_FIXTURES:?}/bad-attestation.json" "$output"
     elif [[ -n "${FAKE_ATTESTATION_VARIANT:-}" ]]; then
@@ -187,26 +191,26 @@ case "$url" in
       cp "${FAKE_FIXTURES:?}/wrapper-attestation.json" "$output"
     fi
     ;;
-  *attestations/@openai%2fcodex@0.146.0-linux-x64) cp "${FAKE_FIXTURES:?}/platform-attestation.json" "$output" ;;
-  *attestations/@openai%2fcodex@0.146.0-linux-arm64) cp "${FAKE_FIXTURES:?}/platform-arm64-attestation.json" "$output" ;;
-  *codex-0.146.0.tgz) cp "${FAKE_FIXTURES:?}/wrapper.tgz" "$output" ;;
-  *codex-0.146.0-linux-x64.tgz) cp "${FAKE_FIXTURES:?}/platform.tgz" "$output" ;;
-  *codex-0.146.0-linux-arm64.tgz) cp "${FAKE_FIXTURES:?}/platform-arm64.tgz" "$output" ;;
+  *attestations/@openai%2fcodex@0.147.0-linux-x64) cp "${FAKE_FIXTURES:?}/platform-attestation.json" "$output" ;;
+  *attestations/@openai%2fcodex@0.147.0-linux-arm64) cp "${FAKE_FIXTURES:?}/platform-arm64-attestation.json" "$output" ;;
+  *codex-0.147.0.tgz) cp "${FAKE_FIXTURES:?}/wrapper.tgz" "$output" ;;
+  *codex-0.147.0-linux-x64.tgz) cp "${FAKE_FIXTURES:?}/platform.tgz" "$output" ;;
+  *codex-0.147.0-linux-arm64.tgz) cp "${FAKE_FIXTURES:?}/platform-arm64.tgz" "$output" ;;
   *) exit 91 ;;
 esac
 EOF
 
 cat >"$fake_bin/sha256sum" <<'EOF'
 #!/usr/bin/env bash
-printf '%s  %s\n' "${FAKE_WRAPPER_SHA:-8050af14387e23b8d46026f023f0c1d33a2eefb39267bf36abe8cec2cec17b49}" "$1"
+printf '%s  %s\n' "${FAKE_WRAPPER_SHA:-d28b4fd4bd9f07ea71083d0cc40c579595cebbd4c10bc8ca98a6d385432e7255}" "$1"
 EOF
 
 cat >"$fake_bin/sha512sum" <<'EOF'
 #!/usr/bin/env bash
 case "$1" in
-  *codex-0.146.0-linux-x64.tgz) printf '%s  %s\n' "${FAKE_PLATFORM_SHA:-7ecc2fc86a6b00f08c88e12e7bfecc28c93ba428e1f6464825f257e62f5ab667e798661b602714859b041fd2c43f4fb4b79c723ea0db7cd5d8ecd4b1215b97c4}" "$1" ;;
-  *codex-0.146.0-linux-arm64.tgz) printf '%s  %s\n' "${FAKE_PLATFORM_SHA:-aa2603c649041675c6ee3a1a7495ba43e5dc8320d70a919da5af6793f73e8b4804a26babd63edb1efc75d8d7d658217fcbc4eaae2e9acbe14bb82d8c8dd7a1b4}" "$1" ;;
-  *codex-0.146.0.tgz) printf '%s  %s\n' "c86dec3d635d6bfd980084080eaf4caeb8e8093210eebc5833921ab2b1b754172e8422d39207a0fc9cea989ab557df11138309e630b10d75d094e8eb762b4547" "$1" ;;
+  *codex-0.147.0-linux-x64.tgz) printf '%s  %s\n' "${FAKE_PLATFORM_SHA:-d16f4c0713e9596d1c4a436aad30cdda347baf3cd3ee834c850639e38ea54f62f0e5ccf9ca10d3724e156bdae3910126f87945ccffdd98431265b5df26c20d9b}" "$1" ;;
+  *codex-0.147.0-linux-arm64.tgz) printf '%s  %s\n' "${FAKE_PLATFORM_SHA:-48b0b5257c364d87ebfdcdc786b26e6f2c8b7a5abbbd338b5959a24e1140fb3d3e5a0cc23e66ac789fe4cc30f71a07bf4ceedf0a79e3ed470f982d1dd9cf1702}" "$1" ;;
+  *codex-0.147.0.tgz) printf '%s  %s\n' "1102c45de7001b6a6dc48ed4a41328d9347f81ae79f7afdcfceb1817fd0ba140e1e4900d67b2281aa97304459bb84550efa25e3c86ed4d6fe2842929d5aed9df" "$1" ;;
   *) exit 2 ;;
 esac
 EOF
@@ -223,7 +227,7 @@ EOF
 cat >"$fake_bin/codex" <<'EOF'
 #!/usr/bin/env bash
 printf 'poison\n' >>"${FAKE_POISON_MARKER:?}"
-printf 'codex-cli 0.146.0\n'
+printf 'codex-cli 0.147.0\n'
 EOF
 
 cat >"$fake_bin/npm" <<'EOF'
@@ -270,18 +274,22 @@ if ! run_install >"$success_log" 2>&1; then
   exit 1
 fi
 codex_bin="$fixture_root/work/codex-install/npm/bin/codex"
-grep -F '[codex-install] package=@openai/codex version=0.146.0 source_tag=rust-v0.146.0 source_commit=e363b08c9175ac1cbe5893615dd2cb9ddf95043b' "$success_log" >/dev/null
-grep -F '[codex-install] target=linux-x64 platform_package=@openai/codex@0.146.0-linux-x64' "$success_log" >/dev/null
-grep -F "[codex-install] codex-cli 0.146.0 ($codex_bin)" "$success_log" >/dev/null
+grep -F '[codex-install] package=@openai/codex version=0.147.0 source_tag=rust-v0.147.0 source_commit=be6e8eac029b183056b7e4402879f15d2c85f61b' "$success_log" >/dev/null
+grep -F '[codex-install] target=linux-x64 platform_package=@openai/codex@0.147.0-linux-x64' "$success_log" >/dev/null
+grep -F "[codex-install] codex-cli 0.147.0 ($codex_bin)" "$success_log" >/dev/null
 grep -Fx "CODEX_BIN=$codex_bin" "$fixture_root/github-env" >/dev/null
 grep -Fx "$fixture_root/work/codex-install/npm/bin" "$fixture_root/github-path" >/dev/null
 [[ "$(wc -l <"$fixture_root/curl.trace")" -eq 6 ]]
 [[ -x "$codex_bin" ]]
 [[ -x "$fixture_root/work/codex-install/npm/bin/bwrap" ]]
 [[ -x "$fixture_root/work/codex-install/npm/bin/codex-linux-sandbox" ]]
+[[ -x "$fixture_root/work/codex-install/npm/bin/codex-code-mode-host" ]]
 [[ "$("$fixture_root/work/codex-install/npm/bin/codex-linux-sandbox" --help)" == "Linux sandbox helper" ]]
+[[ "$("$fixture_root/work/codex-install/npm/bin/codex-code-mode-host")" == "code-mode host" ]]
 [[ "$(readlink -f "$fixture_root/work/codex-install/npm/bin/codex-linux-sandbox")" == \
   "$fixture_root/work/codex-install/npm/lib/node_modules/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl/bin/codex" ]]
+[[ "$(readlink -f "$fixture_root/work/codex-install/npm/bin/codex-code-mode-host")" == \
+  "$fixture_root/work/codex-install/npm/lib/node_modules/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl/bin/codex-code-mode-host" ]]
 [[ -f "$fixture_root/work/codex-install/npm/lib/node_modules/@openai/codex-linux-x64/package.json" ]]
 [[ -s "$fixture_root/installed.marker" ]]
 [[ ! -e "$fixture_root/poison.marker" ]]
@@ -295,7 +303,7 @@ if ! FAKE_UNAME_M=aarch64 run_install >"$arm_log" 2>&1; then
   sed -n '1,200p' "$arm_log" >&2
   exit 1
 fi
-grep -F '[codex-install] target=linux-arm64 platform_package=@openai/codex@0.146.0-linux-arm64' "$arm_log" >/dev/null
+grep -F '[codex-install] target=linux-arm64 platform_package=@openai/codex@0.147.0-linux-arm64' "$arm_log" >/dev/null
 [[ "$(wc -l <"$fixture_root/curl.trace")" -eq 6 ]]
 [[ -f "$fixture_root/work/codex-install/npm/lib/node_modules/@openai/codex-linux-arm64/package.json" ]]
 [[ "$("$fixture_root/work/codex-install/npm/bin/codex-linux-sandbox" --help)" == "Linux sandbox helper" ]]
@@ -316,7 +324,7 @@ FAKE_WRAPPER_SHA=deadbeef run_install >"$fixture_root/wrapper-sha-failure.log" 2
 wrapper_status=$?
 FAKE_PLATFORM_SHA=deadbeef run_install >"$fixture_root/platform-sha-failure.log" 2>&1
 platform_status=$?
-FAKE_INSTALLED_CODEX_VERSION='codex-cli 0.146.0-malicious' run_install >"$fixture_root/version-failure.log" 2>&1
+FAKE_INSTALLED_CODEX_VERSION='codex-cli 0.147.0-malicious' run_install >"$fixture_root/version-failure.log" 2>&1
 version_status=$?
 FAKE_UNAME_M=s390x run_install >"$fixture_root/target-failure.log" 2>&1
 target_status=$?

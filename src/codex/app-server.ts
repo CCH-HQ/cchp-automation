@@ -4,11 +4,17 @@ import { spawnSync } from "node:child_process"
 import { resolve } from "node:path"
 import { attachRecordHmac, validateRecordHmacKey } from "./authenticated-record"
 import { durableCreateFile } from "./durable-file"
+import { buildAppServerArgs } from "./model-catalog"
 import { processIdentity, type ProcessIdentity, type RunFence } from "./run-lock"
 
 function processGone(error: unknown): boolean {
   const code = (error as NodeJS.ErrnoException | undefined)?.code
   return code === "ENOENT" || code === "ESRCH"
+}
+
+function processEnvironUnreadable(error: unknown): boolean {
+  const code = (error as NodeJS.ErrnoException | undefined)?.code
+  return code === "EACCES" || code === "EPERM"
 }
 
 export interface JsonRpcNotification {
@@ -189,6 +195,8 @@ export interface CodexAppServerOptions {
   runId?: string
   writerFence?: Pick<RunFence, "writerId" | "generation">
   beforeProcessRecordRemoval?: () => void
+  modelContextWindow?: number
+  modelAutoCompactTokenLimit?: number
 }
 
 export interface AppServerProcessRecord {
@@ -266,7 +274,10 @@ export class CodexAppServer {
     this.sessionToken = randomBytes(32).toString("hex")
     let child: ReturnType<typeof Bun.spawn>
     try {
-      child = Bun.spawn([this.options.codexBin, "app-server", "--stdio", "--strict-config"], {
+      child = Bun.spawn([this.options.codexBin, ...buildAppServerArgs({
+        modelContextWindow: this.options.modelContextWindow,
+        modelAutoCompactTokenLimit: this.options.modelAutoCompactTokenLimit,
+      })], {
         cwd: this.options.cwd,
         env: {
           ...this.options.env,
@@ -364,7 +375,14 @@ export class CodexAppServer {
       await this.peer.notify("initialized")
       return initialized
     } catch (error) {
-      await this.stop({ interruptGraceMs: 100, termGraceMs: 100, killGraceMs: 1_000 })
+      try {
+        await this.stop({ interruptGraceMs: 100, termGraceMs: 100, killGraceMs: 1_000 })
+      } catch (stopError) {
+        throw new AggregateError(
+          [error, stopError],
+          error instanceof Error ? error.message : String(error),
+        )
+      }
       throw error
     }
   }
@@ -623,6 +641,17 @@ export class CodexAppServer {
         environment = readFileSync(`/proc/${entry}/environ`)
       } catch (error) {
         if (processGone(error)) continue
+        // Codex 0.147 code-mode host and some bwrap children stay in the
+        // app-server session (new PGID, same SID). Their environ can be
+        // unreadable (dumpable=0 / user-ns) even while the launched leader
+        // is still identity-anchored. Treat that like a readable unbound
+        // member: do not block signaling a proven live leader, but still
+        // fail closed once the leader is gone.
+        if (processEnvironUnreadable(error)) {
+          liveMembers += 1
+          unboundMembers += 1
+          continue
+        }
         return "unproven"
       }
       const bound = environment

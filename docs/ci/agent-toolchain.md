@@ -6,17 +6,17 @@ audits the following engine-owned pin:
 | Field | Value |
 | --- | --- |
 | npm package | `@openai/codex` |
-| version | `0.146.0` |
-| source tag | `rust-v0.146.0` |
-| source commit | `e363b08c9175ac1cbe5893615dd2cb9ddf95043b` |
-| wrapper tarball SHA-256 | `8050af14387e23b8d46026f023f0c1d33a2eefb39267bf36abe8cec2cec17b49` |
-| Linux x64 native tarball SHA-512 | `7ecc2fc86a6b00f08c88e12e7bfecc28c93ba428e1f6464825f257e62f5ab667e798661b602714859b041fd2c43f4fb4b79c723ea0db7cd5d8ecd4b1215b97c4` |
-| Linux arm64 native tarball SHA-512 | `aa2603c649041675c6ee3a1a7495ba43e5dc8320d70a919da5af6793f73e8b4804a26babd63edb1efc75d8d7d658217fcbc4eaae2e9acbe14bb82d8c8dd7a1b4` |
+| version | `0.147.0` |
+| source tag | `rust-v0.147.0` |
+| source commit | `be6e8eac029b183056b7e4402879f15d2c85f61b` |
+| wrapper tarball SHA-256 | `d28b4fd4bd9f07ea71083d0cc40c579595cebbd4c10bc8ca98a6d385432e7255` |
+| Linux x64 native tarball SHA-512 | `d16f4c0713e9596d1c4a436aad30cdda347baf3cd3ee834c850639e38ea54f62f0e5ccf9ca10d3724e156bdae3910126f87945ccffdd98431265b5df26c20d9b` |
+| Linux arm64 native tarball SHA-512 | `48b0b5257c364d87ebfdcdc786b26e6f2c8b7a5abbbd338b5959a24e1140fb3d3e5a0cc23e66ac789fe4cc30f71a07bf4ceedf0a79e3ed470f982d1dd9cf1702` |
 
 `scripts/install-codex.sh` owns this pin. It verifies both the npm wrapper and
 the platform-native package, extracts them into the engine-owned
 `$BOT_WORKDIR/codex-install/npm` prefix, checks the exact
-`codex-cli 0.146.0` version, and exports the verified absolute `CODEX_BIN` path.
+`codex-cli 0.147.0` version, and exports the verified absolute `CODEX_BIN` path.
 It never selects a pre-existing PATH binary. Caller inputs, secrets, and
 variables cannot override it. Production supports the workflow's Linux x64
 target and a pinned Linux arm64 target; every other OS/architecture fails
@@ -94,7 +94,7 @@ bash scripts/install-skills.test.sh
 bash scripts/refresh-skills-backup.test.sh
 bash scripts/codex-removal-gate.sh
 
-CCHP_CODEX_VERSION=0.146.0 \
+CCHP_CODEX_VERSION=0.147.0 \
   TMPDIR=/tmp/cchp-automation-tests \
   bash scripts/codex-capability-smoke.sh
 

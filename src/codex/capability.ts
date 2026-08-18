@@ -23,7 +23,7 @@ export interface CapabilityDecisionOptions {
 
 export function decideCollaborationMode(options: CapabilityDecisionOptions = {}): CollaborationDecision {
   const env = options.env ?? process.env
-  const expectedVersion = options.expectedVersion ?? env.CCHP_CODEX_VERSION ?? "0.146.0"
+  const expectedVersion = options.expectedVersion ?? env.CCHP_CODEX_VERSION ?? "0.147.0"
   const forced = env.CCHP_FORCE_EXPLICIT_CHILD === "1"
   let capability: CodexCapability | undefined
   try {

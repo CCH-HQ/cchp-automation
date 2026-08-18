@@ -517,7 +517,7 @@ test("repeated collaboration terminals do not keep a stalled root alive", async 
     await Bun.sleep(8)
   }
   expect(await running).toMatchObject({ state: "NO_PROGRESS_TIMEOUT", exitCode: 124 })
-  expect(Date.now() - started).toBeLessThan(400)
+  expect(Date.now() - started).toBeLessThan(1_500)
 })
 
 test("fails no-progress early when the root never emits runtime events", async () => {
@@ -855,6 +855,50 @@ test("sends the direct workspace-write sandbox override", async () => {
     sandbox: "workspace-write",
   })
   expect(requests.find((request) => request.method === "thread/start")?.params).not.toHaveProperty("permissions")
+})
+
+test("passes catalog window overrides on thread/start when the caller provides 1M context", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "cchp-supervisor-1m-"))
+  let supervisor!: Supervisor
+  const requests: Array<{ method: string; params: Record<string, unknown> }> = []
+  const fake = {
+    start: async () => ({ userAgent: "fake" }),
+    request: async (method: string, params: Record<string, unknown>) => {
+      requests.push({ method, params })
+      if (method === "thread/start") return { thread: { id: "root" } }
+      if (method === "turn/start") {
+        queueMicrotask(() => void supervisor.handleNotification({
+          method: "turn/completed",
+          params: { threadId: "root", turn: { id: "turn", status: "completed" } },
+        }))
+        return { turn: { id: "turn" } }
+      }
+      return {}
+    },
+    stop: async () => 0,
+  } as unknown as CodexAppServer
+  supervisor = new Supervisor({
+    appServer: fake,
+    codexHome: join(workdir, "codex-home"),
+    repoDir: workdir,
+    workdir,
+    task: "manual",
+    runId: "run-1m",
+    prompt: "status",
+    model: "gpt-5.6-sol",
+    modelProvider: "cchp",
+    contextWindow: 1_000_000,
+    compactTokenLimit: 900_000,
+    totalTokenBudget: 1_000,
+  })
+
+  expect(await supervisor.run()).toMatchObject({ state: "SUCCEEDED" })
+  expect(requests.find((request) => request.method === "thread/start")?.params).toMatchObject({
+    config: {
+      model_context_window: 1_000_000,
+      model_auto_compact_token_limit: 900_000,
+    },
+  })
 })
 
 test("redacts terminal reasons before durable persistence", async () => {

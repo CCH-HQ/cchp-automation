@@ -5,25 +5,25 @@ script_dir="$(cd -- "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 
 # Engine-owned Codex pin. Caller variables/secrets never select or override it.
 CODEX_PACKAGE="@openai/codex"
-CODEX_VERSION="0.146.0"
-CODEX_SOURCE_TAG="rust-v0.146.0"
-CODEX_SOURCE_COMMIT="e363b08c9175ac1cbe5893615dd2cb9ddf95043b"
-EXPECTED_WRAPPER_SHA256="8050af14387e23b8d46026f023f0c1d33a2eefb39267bf36abe8cec2cec17b49"
-EXPECTED_WRAPPER_SHA512="c86dec3d635d6bfd980084080eaf4caeb8e8093210eebc5833921ab2b1b754172e8422d39207a0fc9cea989ab557df11138309e630b10d75d094e8eb762b4547"
-WRAPPER_REGISTRY_INTEGRITY="sha512-yG3sPWNda/2YAIQIDq9MrrjoCTIQ7rxYM5IasrG3VBcuhCLTkgeg/JzqmJq1V98RE4MJ5jCxDXXQlOjrditFRw=="
+CODEX_VERSION="0.147.0"
+CODEX_SOURCE_TAG="rust-v0.147.0"
+CODEX_SOURCE_COMMIT="be6e8eac029b183056b7e4402879f15d2c85f61b"
+EXPECTED_WRAPPER_SHA256="d28b4fd4bd9f07ea71083d0cc40c579595cebbd4c10bc8ca98a6d385432e7255"
+EXPECTED_WRAPPER_SHA512="1102c45de7001b6a6dc48ed4a41328d9347f81ae79f7afdcfceb1817fd0ba140e1e4900d67b2281aa97304459bb84550efa25e3c86ed4d6fe2842929d5aed9df"
+WRAPPER_REGISTRY_INTEGRITY="sha512-EQLEXecAG2ptxI7UpBMo2TR/ga5596/c/OsYF/0LoUDh5JANZ7IoGqlzBEWbuEVQ76JePIbtTW/ihCkp1a7Z3w=="
 
 case "$(uname -s):$(uname -m)" in
   Linux:x86_64|Linux:amd64)
     CODEX_TARGET="linux-x64"
     CODEX_TARGET_TRIPLE="x86_64-unknown-linux-musl"
-    EXPECTED_PLATFORM_SHA512="7ecc2fc86a6b00f08c88e12e7bfecc28c93ba428e1f6464825f257e62f5ab667e798661b602714859b041fd2c43f4fb4b79c723ea0db7cd5d8ecd4b1215b97c4"
-    PLATFORM_REGISTRY_INTEGRITY="sha512-fswvyGprAPCMiOEue/7MKMk7pCjh9kZIJfJX5i9atmfnmGYbYCcUhZsEH9LEP0+0t5xyPqDbfNXY7NSxIVuXxA=="
+    EXPECTED_PLATFORM_SHA512="d16f4c0713e9596d1c4a436aad30cdda347baf3cd3ee834c850639e38ea54f62f0e5ccf9ca10d3724e156bdae3910126f87945ccffdd98431265b5df26c20d9b"
+    PLATFORM_REGISTRY_INTEGRITY="sha512-0W9MBxPpWW0cSkNqrTDN2jR7rzzT7oNMhQY5446lT2Lw5cz5yhDTck4Va9rjkQEm+HlFzP/dmEMSZbXfJsINmw=="
     ;;
   Linux:aarch64|Linux:arm64)
     CODEX_TARGET="linux-arm64"
     CODEX_TARGET_TRIPLE="aarch64-unknown-linux-musl"
-    EXPECTED_PLATFORM_SHA512="aa2603c649041675c6ee3a1a7495ba43e5dc8320d70a919da5af6793f73e8b4804a26babd63edb1efc75d8d7d658217fcbc4eaae2e9acbe14bb82d8c8dd7a1b4"
-    PLATFORM_REGISTRY_INTEGRITY="sha512-qiYDxkkEFnXG7joadJW6Q+XcgyDXCpGdpa9nk/c+i0gEomur1j7bHvx12NfWWCF/y8Tqri6ay+FLuC2MjdehtA=="
+    EXPECTED_PLATFORM_SHA512="48b0b5257c364d87ebfdcdc786b26e6f2c8b7a5abbbd338b5959a24e1140fb3d3e5a0cc23e66ac789fe4cc30f71a07bf4ceedf0a79e3ed470f982d1dd9cf1702"
+    PLATFORM_REGISTRY_INTEGRITY="sha512-SLC1JXw2TYfr/c3HhrJubyyLelq7vTOLWVmiThFA+z0+WgzCPmaseJ/kzDD3Gge/TO7fCnnj7UcPmC0d2c8XAg=="
     ;;
   *)
     printf '[codex-install] unsupported Codex target: %s/%s\n' "$(uname -s)" "$(uname -m)" >&2
@@ -77,7 +77,7 @@ const crypto = require("node:crypto")
 const [wrapperMetadataPath, platformMetadataPath, wrapperAttestationPath, platformAttestationPath, wrapperIntegrity, platformIntegrity, sourceTag, sourceCommit, wrapperDigest, platformDigest, target] = process.argv.slice(2)
 const metadata = [JSON.parse(fs.readFileSync(wrapperMetadataPath, "utf8")), JSON.parse(fs.readFileSync(platformMetadataPath, "utf8"))]
 const expectedIntegrities = [wrapperIntegrity, platformIntegrity]
-const expectedPackages = ["pkg:npm/%40openai/codex@0.146.0", `pkg:npm/%40openai/codex@0.146.0-${target}`]
+const expectedPackages = ["pkg:npm/%40openai/codex@0.147.0", `pkg:npm/%40openai/codex@0.147.0-${target}`]
 const expectedDigests = [wrapperDigest, platformDigest]
 const workflowRepository = "https://github.com/openai/codex"
 const workflowPath = ".github/workflows/rust-release.yml"
@@ -178,7 +178,7 @@ const fs = require("node:fs")
 const [wrapperPath, platformPath, alias, platformVersion] = process.argv.slice(2)
 const wrapper = JSON.parse(fs.readFileSync(wrapperPath, "utf8"))
 const platform = JSON.parse(fs.readFileSync(platformPath, "utf8"))
-if (wrapper.name !== "@openai/codex" || wrapper.version !== "0.146.0" || wrapper.bin?.codex !== "bin/codex.js") {
+if (wrapper.name !== "@openai/codex" || wrapper.version !== "0.147.0" || wrapper.bin?.codex !== "bin/codex.js") {
   throw new Error("Codex wrapper package metadata drift")
 }
 if (wrapper.optionalDependencies?.[alias] !== `npm:@openai/codex@${platformVersion}`) {
@@ -196,6 +196,14 @@ bwrap_bin="$(find "$platform_dir/vendor" -type f -path '*/codex-resources/bwrap'
 }
 bwrap_target="$(realpath --relative-to="$stage/bin" "$bwrap_bin")"
 ln -s "$bwrap_target" "$stage/bin/bwrap"
+
+code_mode_host_bin="$(find "$platform_dir/vendor" -type f -path '*/bin/codex-code-mode-host' -print -quit)"
+[[ -n "$code_mode_host_bin" && -x "$code_mode_host_bin" ]] || {
+  printf '[codex-install] bundled codex-code-mode-host is missing from the verified platform package\n' >&2
+  exit 2
+}
+code_mode_host_target="$(realpath --relative-to="$stage/bin" "$code_mode_host_bin")"
+ln -s "$code_mode_host_target" "$stage/bin/codex-code-mode-host"
 
 native_codex="$platform_dir/vendor/$CODEX_TARGET_TRIPLE/bin/codex"
 [[ -x "$native_codex" ]] || {
@@ -217,6 +225,8 @@ bwrap_bin="$PREFIX/bin/bwrap"
 [[ -x "$bwrap_bin" ]] || { printf '[codex-install] installed bundled bubblewrap is missing: %s\n' "$bwrap_bin" >&2; exit 2; }
 sandbox_bin="$PREFIX/bin/codex-linux-sandbox"
 [[ -x "$sandbox_bin" ]] || { printf '[codex-install] installed Codex Linux sandbox is missing: %s\n' "$sandbox_bin" >&2; exit 2; }
+code_mode_host_bin="$PREFIX/bin/codex-code-mode-host"
+[[ -x "$code_mode_host_bin" ]] || { printf '[codex-install] installed Codex code-mode host is missing: %s\n' "$code_mode_host_bin" >&2; exit 2; }
 version_output="$("$codex_bin" --version)"
 [[ "$version_output" == "codex-cli ${CODEX_VERSION}" ]] || {
   printf '[codex-install] version mismatch: %s\n' "$version_output" >&2
@@ -228,4 +238,4 @@ fi
 if [[ -n "${GITHUB_PATH:-}" ]]; then
   printf '%s\n' "$PREFIX/bin" >>"$GITHUB_PATH"
 fi
-printf '[codex-install] %s (%s) bundled_bwrap=%s linux_sandbox=%s\n' "$version_output" "$codex_bin" "$bwrap_bin" "$sandbox_bin"
+printf '[codex-install] %s (%s) bundled_bwrap=%s linux_sandbox=%s code_mode_host=%s\n' "$version_output" "$codex_bin" "$bwrap_bin" "$sandbox_bin" "$code_mode_host_bin"
