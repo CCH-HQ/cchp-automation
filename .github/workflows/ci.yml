@@ -65,7 +65,7 @@ jobs:
           bash refresh-skills-backup.test.sh
 
   codex-contract:
-    name: Codex 0.146.0 native + explicit contract
+    name: Codex 0.147.0 native + explicit contract
     # Keep the protocol/capability contract on a hosted runner so an unavailable
     # ARC pool cannot leave the required CI check queued for a day. The actual
     # reusable workflow remains pinned to the protected self-hosted runner in
@@ -95,7 +95,7 @@ jobs:
       - name: Capability, strict-config, collaboration and credential smoke
         working-directory: ${{ runner.temp }}
         env:
-          CCHP_CODEX_VERSION: "0.146.0"
+          CCHP_CODEX_VERSION: "0.147.0"
           CCHP_ARTIFACT_RUN_ID: ${{ github.run_id }}-${{ github.run_attempt }}
           CCHP_SMOKE_ARTIFACT_DIR: artifacts/codex-capability/${{ github.run_id }}-${{ github.run_attempt }}
         run: bash ${{ github.workspace }}/scripts/codex-capability-smoke.sh

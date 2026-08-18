@@ -361,7 +361,7 @@ function assertFixtureEnvironment(rows: Json[], fixture: "fff" | "serena", repo:
 
 async function main(): Promise<void> {
   hideProcEnviron((message) => process.stderr.write(`[codex-capability] ${message}\n`))
-  const expected = process.env.CCHP_CODEX_VERSION ?? "0.146.0"
+  const expected = process.env.CCHP_CODEX_VERSION ?? "0.147.0"
   const selectedMode = collaborationMode()
   const engineRoot = capabilityEngineRoot()
   const capability = probeCapabilities(process.env.CODEX_BIN ?? "codex")
