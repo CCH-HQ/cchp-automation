@@ -12,6 +12,11 @@ function processGone(error: unknown): boolean {
   return code === "ENOENT" || code === "ESRCH"
 }
 
+function processEnvironUnreadable(error: unknown): boolean {
+  const code = (error as NodeJS.ErrnoException | undefined)?.code
+  return code === "EACCES" || code === "EPERM"
+}
+
 export interface JsonRpcNotification {
   method: string
   params: unknown
@@ -370,7 +375,14 @@ export class CodexAppServer {
       await this.peer.notify("initialized")
       return initialized
     } catch (error) {
-      await this.stop({ interruptGraceMs: 100, termGraceMs: 100, killGraceMs: 1_000 })
+      try {
+        await this.stop({ interruptGraceMs: 100, termGraceMs: 100, killGraceMs: 1_000 })
+      } catch (stopError) {
+        throw new AggregateError(
+          [error, stopError],
+          error instanceof Error ? error.message : String(error),
+        )
+      }
       throw error
     }
   }
@@ -629,6 +641,17 @@ export class CodexAppServer {
         environment = readFileSync(`/proc/${entry}/environ`)
       } catch (error) {
         if (processGone(error)) continue
+        // Codex 0.147 code-mode host and some bwrap children stay in the
+        // app-server session (new PGID, same SID). Their environ can be
+        // unreadable (dumpable=0 / user-ns) even while the launched leader
+        // is still identity-anchored. Treat that like a readable unbound
+        // member: do not block signaling a proven live leader, but still
+        // fail closed once the leader is gone.
+        if (processEnvironUnreadable(error)) {
+          liveMembers += 1
+          unboundMembers += 1
+          continue
+        }
         return "unproven"
       }
       const bound = environment

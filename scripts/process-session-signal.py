@@ -43,6 +43,9 @@ def session_members(session_id: int):
     return members
 
 
+UNREADABLE_ENVIRONMENT = object()
+
+
 def read_environment(pid: int):
     try:
         with open(f"/proc/{pid}/environ", "rb") as handle:
@@ -50,6 +53,8 @@ def read_environment(pid: int):
     except OSError as error:
         if error.errno in (errno.ENOENT, errno.ESRCH):
             return None
+        if error.errno in (errno.EACCES, errno.EPERM):
+            return UNREADABLE_ENVIRONMENT
         raise RuntimeError(f"cannot read /proc/{pid}/environ: {error}") from error
 
 
@@ -75,6 +80,10 @@ def bound_pidfds(session_id: int, required_environment: set[bytes]):
                 continue
             environment = read_environment(pid)
             if environment is None:
+                os.close(pidfd)
+                continue
+            if environment is UNREADABLE_ENVIRONMENT:
+                unbound += 1
                 os.close(pidfd)
                 continue
             bound = required_environment.issubset(environment)

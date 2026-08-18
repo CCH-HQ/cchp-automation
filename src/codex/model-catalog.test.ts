@@ -114,8 +114,9 @@ const realVersion = realCodexBin
   : ""
 
 if (realCodexBin && realVersion === "codex-cli 0.147.0") {
+  const bin: string = realCodexBin
   function isolatedDebugModels(home: string, args: string[] = ["debug", "models"]) {
-    return spawnSync(realCodexBin, args, {
+    return spawnSync(bin, args, {
       cwd: home,
       env: {
         PATH: process.env.PATH ?? "",
@@ -130,7 +131,7 @@ if (realCodexBin && realVersion === "codex-cli 0.147.0") {
   test("real Codex 0.147 debug models reads patched sol windows as 1000000", () => {
     const exportHome = mkdtempSync(join(tmpdir(), "cchp-real-catalog-export-"))
     const exported = exportBundledModelCatalog({
-      codexBin: realCodexBin,
+      codexBin: bin,
       exportHome,
     })
     expect(exported.models.map((model) => model.slug)).toEqual(builtinSlugs)

@@ -30,6 +30,21 @@ if (scenario === "ignore_signals" || scenario === "leader_exits" || scenario ===
   if (descendantPidPath) writeFileSync(descendantPidPath, `${descendant.pid}\n`, "utf8")
 }
 
+if (scenario === "hidden_environ") {
+  const descendant = Bun.spawn(
+    ["python3", "-c", "import ctypes, os, time; ctypes.CDLL('libc.so.6').prctl(4, 0, 0, 0, 0); os.setpgrp(); time.sleep(3600)"],
+    { stdin: "ignore", stdout: "ignore", stderr: "ignore" },
+  )
+  if (descendantPidPath) writeFileSync(descendantPidPath, `${descendant.pid}\n`, "utf8")
+  const reap = (signalName: string) => {
+    trace(signalName)
+    try { descendant.kill("SIGKILL") } catch { /* already stopped */ }
+    process.exit(0)
+  }
+  process.on("SIGINT", () => reap("SIGINT"))
+  process.on("SIGTERM", () => reap("SIGTERM"))
+}
+
 const reader = Bun.stdin.stream().getReader()
 const decoder = new TextDecoder()
 let buffer = ""
@@ -96,6 +111,6 @@ while (true) {
 
 if (buffer.trim()) await accept(buffer.trim())
 
-if (scenario === "ignore_signals" || scenario === "leader_exits" || scenario === "separate_process_group") {
+if (scenario === "ignore_signals" || scenario === "leader_exits" || scenario === "separate_process_group" || scenario === "hidden_environ") {
   await new Promise<never>(() => undefined)
 }

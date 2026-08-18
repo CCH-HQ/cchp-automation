@@ -243,6 +243,57 @@ test("escalates from INT to TERM to KILL for the whole detached process group", 
   }
 })
 
+test("signals a proven live session even when a same-session descendant hides its environ", async () => {
+  if (process.platform !== "linux") return
+  const root = mkdtempSync(join(tmpdir(), "cchp-app-server-hidden-environ-"))
+  const descendantPath = join(root, "descendant.pid")
+  let descendantPid: number | undefined
+  const app = new CodexAppServer({
+    codexBin: fakeCodex,
+    codexHome: root,
+    cwd: root,
+    env: {
+      PATH: process.env.PATH ?? "",
+      FAKE_CODEX_SCENARIO: "hidden_environ",
+      FAKE_CODEX_DESCENDANT_PID: descendantPath,
+    },
+    onNotification: () => undefined,
+    requestTimeoutMs: 1_000,
+  })
+  const internals = app as unknown as {
+    processGroupOwnership(pgid: number): "live" | "absent" | "unproven"
+  }
+  try {
+    await app.start()
+    await eventually(() => existsSync(descendantPath))
+    descendantPid = Number(readFileSync(descendantPath, "utf8").trim())
+    await eventually(() => {
+      try {
+        readFileSync(`/proc/${descendantPid}/environ`)
+        return false
+      } catch (error) {
+        return (error as NodeJS.ErrnoException).code === "EACCES"
+      }
+    })
+    expect(internals.processGroupOwnership(app.pid!)).toBe("live")
+    await app.stop({ interruptGraceMs: 200, termGraceMs: 200, killGraceMs: 1_000 })
+    await eventually(() => {
+      try {
+        process.kill(descendantPid!, 0)
+        return false
+      } catch (error) {
+        return (error as NodeJS.ErrnoException).code === "ESRCH"
+      }
+    })
+  } finally {
+    if (descendantPid) {
+      try { process.kill(descendantPid, "SIGKILL") } catch { /* already stopped */ }
+    }
+    await app.stop({ interruptGraceMs: 10, termGraceMs: 10, killGraceMs: 100 }).catch(() => undefined)
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
 test("stops an MCP-like descendant moved to another process group in the owned session", async () => {
   if (process.platform !== "linux") return
   const root = mkdtempSync(join(tmpdir(), "cchp-app-server-session-"))

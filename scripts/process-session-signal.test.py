@@ -67,6 +67,25 @@ class ProcessSessionSignalTest(unittest.TestCase):
         self.assertEqual(unbound, 1)
         close.assert_not_called()
 
+    def test_bound_pidfds_counts_unreadable_environ_as_unbound(self):
+        current = {"state": "S", "session": 123, "start_ticks": "45"}
+        with (
+            patch.object(MODULE, "session_members", return_value=[(123, "45")]),
+            patch.object(MODULE.os, "pidfd_open", return_value=9),
+            patch.object(MODULE, "read_stat", return_value=current),
+            patch.object(MODULE, "read_environment", return_value=MODULE.UNREADABLE_ENVIRONMENT),
+            patch.object(MODULE.os, "close") as close,
+        ):
+            held, unbound = MODULE.bound_pidfds(123, {b"RUN=expected"})
+        self.assertEqual(held, [])
+        self.assertEqual(unbound, 1)
+        close.assert_called_once_with(9)
+
+    def test_read_environment_treats_eacces_as_unreadable(self):
+        failure = OSError(errno.EACCES, "simulated dumpable process")
+        with patch("builtins.open", side_effect=failure):
+            self.assertIs(MODULE.read_environment(123), MODULE.UNREADABLE_ENVIRONMENT)
+
     def test_pidfd_einval_is_absent_only_when_proc_identity_disappeared(self):
         failure = OSError(errno.EINVAL, "simulated reaped process")
         with (
