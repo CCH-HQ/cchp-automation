@@ -256,14 +256,18 @@ export function prepareCodexHome(input: PrepareCodexHomeInput): PreparedCodexHom
     "enabled = false",
     "",
     "[features]",
-    // Codex 0.146 shell snapshots are created from the app-server bootstrap
+    // Codex 0.146+ shell snapshots are created from the app-server bootstrap
     // environment before shell_environment_policy is applied. They can
     // therefore persist run-scoped bridge/broker capabilities and restore
     // them into later login-shell commands. Keep command execution on the
-    // policy-filtered non-login path and use the in-process code-mode runtime
-    // so no auxiliary host process inherits the bootstrap capabilities.
+    // policy-filtered non-login path.
     "shell_snapshot = false",
-    "code_mode_host = false",
+    // Codex 0.147 CodeModeHost is Stage::Stable and default-on. gpt-5.6-sol
+    // is tool_mode=code_mode_only; with the host disabled, 0.147 uses
+    // DisabledCodeModeSessionProvider and hard-errors "code-mode host is
+    // disabled" with no 0.146-style in-process fallback. Keep the host on
+    // and install codex-code-mode-host next to the CLI.
+    "code_mode_host = true",
     // Codex 0.146 legacy Landlock cannot subtract protected metadata paths from
     // a writable repository root. Workspace-write must therefore keep direct
     // bubblewrap enforcement; read-only mode can safely use the legacy backend.

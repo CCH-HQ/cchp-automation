@@ -197,6 +197,14 @@ bwrap_bin="$(find "$platform_dir/vendor" -type f -path '*/codex-resources/bwrap'
 bwrap_target="$(realpath --relative-to="$stage/bin" "$bwrap_bin")"
 ln -s "$bwrap_target" "$stage/bin/bwrap"
 
+code_mode_host_bin="$(find "$platform_dir/vendor" -type f -path '*/bin/codex-code-mode-host' -print -quit)"
+[[ -n "$code_mode_host_bin" && -x "$code_mode_host_bin" ]] || {
+  printf '[codex-install] bundled codex-code-mode-host is missing from the verified platform package\n' >&2
+  exit 2
+}
+code_mode_host_target="$(realpath --relative-to="$stage/bin" "$code_mode_host_bin")"
+ln -s "$code_mode_host_target" "$stage/bin/codex-code-mode-host"
+
 native_codex="$platform_dir/vendor/$CODEX_TARGET_TRIPLE/bin/codex"
 [[ -x "$native_codex" ]] || {
   printf '[codex-install] native Codex binary is missing from the verified platform package: %s\n' "$native_codex" >&2
@@ -217,6 +225,8 @@ bwrap_bin="$PREFIX/bin/bwrap"
 [[ -x "$bwrap_bin" ]] || { printf '[codex-install] installed bundled bubblewrap is missing: %s\n' "$bwrap_bin" >&2; exit 2; }
 sandbox_bin="$PREFIX/bin/codex-linux-sandbox"
 [[ -x "$sandbox_bin" ]] || { printf '[codex-install] installed Codex Linux sandbox is missing: %s\n' "$sandbox_bin" >&2; exit 2; }
+code_mode_host_bin="$PREFIX/bin/codex-code-mode-host"
+[[ -x "$code_mode_host_bin" ]] || { printf '[codex-install] installed Codex code-mode host is missing: %s\n' "$code_mode_host_bin" >&2; exit 2; }
 version_output="$("$codex_bin" --version)"
 [[ "$version_output" == "codex-cli ${CODEX_VERSION}" ]] || {
   printf '[codex-install] version mismatch: %s\n' "$version_output" >&2
@@ -228,4 +238,4 @@ fi
 if [[ -n "${GITHUB_PATH:-}" ]]; then
   printf '%s\n' "$PREFIX/bin" >>"$GITHUB_PATH"
 fi
-printf '[codex-install] %s (%s) bundled_bwrap=%s linux_sandbox=%s\n' "$version_output" "$codex_bin" "$bwrap_bin" "$sandbox_bin"
+printf '[codex-install] %s (%s) bundled_bwrap=%s linux_sandbox=%s code_mode_host=%s\n' "$version_output" "$codex_bin" "$bwrap_bin" "$sandbox_bin" "$code_mode_host_bin"

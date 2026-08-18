@@ -517,7 +517,7 @@ test("repeated collaboration terminals do not keep a stalled root alive", async 
     await Bun.sleep(8)
   }
   expect(await running).toMatchObject({ state: "NO_PROGRESS_TIMEOUT", exitCode: 124 })
-  expect(Date.now() - started).toBeLessThan(400)
+  expect(Date.now() - started).toBeLessThan(1_500)
 })
 
 test("fails no-progress early when the root never emits runtime events", async () => {

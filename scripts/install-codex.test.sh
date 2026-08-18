@@ -42,11 +42,15 @@ cat >"$fixtures/platform-arm64/package/package.json" <<'EOF'
 EOF
 printf '#!/usr/bin/env bash\n[[ "$(basename "$0")" == "codex-linux-sandbox" ]] && printf "Linux sandbox helper\\n"\nexit 0\n' >"$fixtures/platform/package/vendor/x86_64-unknown-linux-musl/bin/codex"
 printf '#!/usr/bin/env bash\n[[ "$(basename "$0")" == "codex-linux-sandbox" ]] && printf "Linux sandbox helper\\n"\nexit 0\n' >"$fixtures/platform-arm64/package/vendor/aarch64-unknown-linux-musl/bin/codex"
+printf '#!/usr/bin/env bash\nprintf "code-mode host\\n"\nexit 0\n' >"$fixtures/platform/package/vendor/x86_64-unknown-linux-musl/bin/codex-code-mode-host"
+printf '#!/usr/bin/env bash\nprintf "code-mode host\\n"\nexit 0\n' >"$fixtures/platform-arm64/package/vendor/aarch64-unknown-linux-musl/bin/codex-code-mode-host"
 printf '#!/usr/bin/env bash\nexit 0\n' >"$fixtures/platform/package/vendor/x86_64-unknown-linux-musl/codex-resources/bwrap"
 printf '#!/usr/bin/env bash\nexit 0\n' >"$fixtures/platform-arm64/package/vendor/aarch64-unknown-linux-musl/codex-resources/bwrap"
 chmod +x \
   "$fixtures/platform/package/vendor/x86_64-unknown-linux-musl/bin/codex" \
   "$fixtures/platform-arm64/package/vendor/aarch64-unknown-linux-musl/bin/codex" \
+  "$fixtures/platform/package/vendor/x86_64-unknown-linux-musl/bin/codex-code-mode-host" \
+  "$fixtures/platform-arm64/package/vendor/aarch64-unknown-linux-musl/bin/codex-code-mode-host" \
   "$fixtures/platform/package/vendor/x86_64-unknown-linux-musl/codex-resources/bwrap" \
   "$fixtures/platform-arm64/package/vendor/aarch64-unknown-linux-musl/codex-resources/bwrap"
 tar -czf "$fixtures/wrapper.tgz" -C "$fixtures/wrapper" package
@@ -279,9 +283,13 @@ grep -Fx "$fixture_root/work/codex-install/npm/bin" "$fixture_root/github-path" 
 [[ -x "$codex_bin" ]]
 [[ -x "$fixture_root/work/codex-install/npm/bin/bwrap" ]]
 [[ -x "$fixture_root/work/codex-install/npm/bin/codex-linux-sandbox" ]]
+[[ -x "$fixture_root/work/codex-install/npm/bin/codex-code-mode-host" ]]
 [[ "$("$fixture_root/work/codex-install/npm/bin/codex-linux-sandbox" --help)" == "Linux sandbox helper" ]]
+[[ "$("$fixture_root/work/codex-install/npm/bin/codex-code-mode-host")" == "code-mode host" ]]
 [[ "$(readlink -f "$fixture_root/work/codex-install/npm/bin/codex-linux-sandbox")" == \
   "$fixture_root/work/codex-install/npm/lib/node_modules/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl/bin/codex" ]]
+[[ "$(readlink -f "$fixture_root/work/codex-install/npm/bin/codex-code-mode-host")" == \
+  "$fixture_root/work/codex-install/npm/lib/node_modules/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl/bin/codex-code-mode-host" ]]
 [[ -f "$fixture_root/work/codex-install/npm/lib/node_modules/@openai/codex-linux-x64/package.json" ]]
 [[ -s "$fixture_root/installed.marker" ]]
 [[ ! -e "$fixture_root/poison.marker" ]]

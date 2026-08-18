@@ -74,7 +74,7 @@ test("writes an isolated strict Codex config with loopback providers and no call
   expect(config).not.toContain("[permissions.cchp-workspace]")
   expect(config).not.toContain("[sandbox_workspace_write]")
   expect(config).not.toContain("[features.network_proxy]")
-  expect(config).toContain('[features]\nshell_snapshot = false\ncode_mode_host = false')
+  expect(config).toContain('[features]\nshell_snapshot = false\ncode_mode_host = true')
   expect(config).toContain('[shell_environment_policy]\ninherit = "all"\nignore_default_excludes = false')
   for (const name of [
     "CCHP_CODEX_BRIDGE_TOKEN",

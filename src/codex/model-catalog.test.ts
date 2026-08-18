@@ -54,6 +54,33 @@ test("export+patch keeps 8 bundled slugs and only raises gpt-5.6-sol windows", (
   })
 })
 
+test("patch keeps every extra sol field including tool_mode=code_mode_only", () => {
+  const catalog: BundledModelCatalog = {
+    models: bundledCatalog.models.map((model, index) =>
+      index === 0
+        ? {
+            ...model,
+            display_name: "GPT-5.6-Sol",
+            tool_mode: "code_mode_only",
+            multi_agent_version: "v2",
+            visibility: "list",
+          }
+        : model,
+    ),
+  }
+  const patched = patchBundledModelWindows(catalog, "gpt-5.6-sol", 1_000_000)
+  expect(patched.models[0]).toMatchObject({
+    slug: "gpt-5.6-sol",
+    tool_mode: "code_mode_only",
+    display_name: "GPT-5.6-Sol",
+    multi_agent_version: "v2",
+    visibility: "list",
+    context_window: 1_000_000,
+    max_context_window: 1_000_000,
+  })
+  expect(patched.models.slice(1)).toEqual(catalog.models.slice(1))
+})
+
 test("parses debug models JSON even when Codex prints a warning first", () => {
   const catalog = parseBundledModelCatalog(`WARNING: proceeding\n${JSON.stringify(bundledCatalog)}\n`)
   expect(catalog.models).toHaveLength(8)
@@ -130,6 +157,7 @@ if (realCodexBin && realVersion === "codex-cli 0.147.0") {
     expect(catalog.models.map((model) => model.slug)).toEqual(builtinSlugs)
     expect(catalog.models.find((model) => model.slug === "gpt-5.6-sol")).toMatchObject({
       slug: "gpt-5.6-sol",
+      tool_mode: "code_mode_only",
       context_window: 1_000_000,
       max_context_window: 1_000_000,
     })
