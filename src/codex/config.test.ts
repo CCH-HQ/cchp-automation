@@ -1,20 +1,9 @@
 import { expect, test } from "bun:test"
-import { existsSync, mkdirSync, mkdtempSync, readFileSync } from "node:fs"
+import { mkdirSync, mkdtempSync, readFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { prepareCodexHome } from "./config"
 import { parseProviders } from "./providers"
-
-const BUILTIN_MODEL_SLUGS = [
-  "gpt-5.6-sol",
-  "gpt-5.6-terra",
-  "gpt-5.6-luna",
-  "gpt-5.5",
-  "gpt-5.4",
-  "gpt-5.4-mini",
-  "gpt-5.2",
-  "codex-auto-review",
-] as const
 
 test("writes an isolated strict Codex config with loopback providers and no caller secrets", () => {
   const botWorkdir = mkdtempSync(join(tmpdir(), "cchp-codex-"))
@@ -58,21 +47,17 @@ test("writes an isolated strict Codex config with loopback providers and no call
   const implementer = readFileSync(join(result.codexHome, "agents", "implementer.toml"), "utf8")
   const defaultAgent = readFileSync(join(result.codexHome, "agents", "default.toml"), "utf8")
   const worker = readFileSync(join(result.codexHome, "agents", "worker.toml"), "utf8")
-  const modelCatalogPath = join(result.codexHome, "model_catalog.json")
-  const modelCatalog = JSON.parse(readFileSync(modelCatalogPath, "utf8")) as {
+  const modelCatalog = JSON.parse(readFileSync(join(result.codexHome, "models.json"), "utf8")) as {
     models: Array<Record<string, unknown>>
   }
 
   expect(result.codexHome).toBe(join(botWorkdir, "codex-home"))
-  expect(existsSync(join(result.codexHome, "models.json"))).toBe(false)
   expect(config).toContain('model = "gpt-5.6-sol"')
   expect(config).toContain('allow_login_shell = false')
   expect(config).toContain('model_provider = "cchp_gpt_cchp_')
   expect(config).toContain('base_url = "http://127.0.0.1:43123/providers/gpt-cchp/v1"')
   expect(config).toContain('env_key = "CCHP_CODEX_BRIDGE_TOKEN"')
-  expect(config).toContain(`model_catalog_json = "${modelCatalogPath}"`)
-  expect(config).toContain("model_context_window = 372000")
-  expect(config).not.toContain("model_auto_compact_token_limit")
+  expect(config).toContain(`model_catalog_json = "${join(result.codexHome, "models.json")}"`)
   expect(config).toContain("[features.multi_agent_v2]")
   expect(config).not.toContain("use_legacy_landlock = true")
   expect(config).not.toContain("[permissions.cchp-workspace]")
@@ -112,23 +97,7 @@ test("writes an isolated strict Codex config with loopback providers and no call
     expect(role).toContain(`model = "${providerSet.workerModelKey}"`)
     expect(role).toContain('model_provider = "cchp_gpt_cchp_')
   }
-  expect(modelCatalog.models).toHaveLength(11)
-  expect(modelCatalog.models.slice(0, 8).map((model) => model.slug)).toEqual([...BUILTIN_MODEL_SLUGS])
-  expect(modelCatalog.models[0]).toMatchObject({
-    slug: "gpt-5.6-sol",
-    context_window: 1_000_000,
-    max_context_window: 1_000_000,
-  })
-  expect(modelCatalog.models.slice(1, 8)).toEqual([
-    expect.objectContaining({ slug: "gpt-5.6-terra", context_window: 272000, max_context_window: 272000 }),
-    expect.objectContaining({ slug: "gpt-5.6-luna", context_window: 272000, max_context_window: 272000 }),
-    expect.objectContaining({ slug: "gpt-5.5", context_window: 272000, max_context_window: 272000 }),
-    expect.objectContaining({ slug: "gpt-5.4", context_window: 272000, max_context_window: 1_000_000 }),
-    expect.objectContaining({ slug: "gpt-5.4-mini", context_window: 272000, max_context_window: 272000 }),
-    expect.objectContaining({ slug: "gpt-5.2", context_window: 272000, max_context_window: 272000 }),
-    expect.objectContaining({ slug: "codex-auto-review", context_window: 272000, max_context_window: 1_000_000 }),
-  ])
-  expect(modelCatalog.models.slice(8)).toEqual([
+  expect(modelCatalog.models).toEqual([
     expect.objectContaining({
       slug: providerSet.main.modelKey,
       multi_agent_version: "v2",
@@ -148,7 +117,7 @@ test("writes an isolated strict Codex config with loopback providers and no call
       apply_patch_tool_type: "freeform",
     }),
   ])
-  expect(modelCatalog.models.slice(8).every((model) => typeof model.base_instructions === "string")).toBe(true)
+  expect(modelCatalog.models.every((model) => typeof model.base_instructions === "string")).toBe(true)
   expect(config).toContain('[mcp_servers.fff]\ncommand = "fff-mcp"\nenv_vars =')
   expect(config).not.toContain('args = ["--stdio"]')
   expect(config).toContain('[mcp_servers.see_upload]')
@@ -266,7 +235,7 @@ test("non-reasoning small models do not advertise or force reasoning", () => {
   expect(config).not.toContain("[features.network_proxy]")
   expect(reviewer).not.toContain("model_reasoning_effort")
   expect(explorer).not.toContain("model_reasoning_effort")
-  const models = JSON.parse(readFileSync(join(result.codexHome, "model_catalog.json"), "utf8")) as { models: Array<Record<string, unknown>> }
+  const models = JSON.parse(readFileSync(join(result.codexHome, "models.json"), "utf8")) as { models: Array<Record<string, unknown>> }
   expect(models.models.find((model) => model.slug === providerSet.reviewModelKey)).toMatchObject({
     default_reasoning_level: null,
     supported_reasoning_levels: [],

@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs"
+import { mkdirSync, writeFileSync } from "node:fs"
 import { isAbsolute, join } from "node:path"
 import type { ProviderSet } from "./providers"
 
@@ -79,31 +79,6 @@ function provider(input: PrepareCodexHomeInput, providerId: string) {
 
 function writePrivate(path: string, body: string): void {
   writeFileSync(path, body.endsWith("\n") ? body : `${body}\n`, { encoding: "utf8", mode: 0o600 })
-}
-
-// Verbatim rust-v0.147.0 export of openai/codex codex-rs/models-manager/models.json.
-const BUILTIN_MODEL_CATALOG_PATH = join(import.meta.dir, "codex-builtin-model-catalog.json")
-const BUILTIN_MODEL_SLUGS = [
-  "gpt-5.6-sol",
-  "gpt-5.6-terra",
-  "gpt-5.6-luna",
-  "gpt-5.5",
-  "gpt-5.4",
-  "gpt-5.4-mini",
-  "gpt-5.2",
-  "codex-auto-review",
-] as const
-const GPT_5_6_SOL_CONTEXT_WINDOW = 1_000_000
-
-function loadBuiltinModelCatalog(): { models: Array<Record<string, unknown>> } {
-  const catalog = JSON.parse(readFileSync(BUILTIN_MODEL_CATALOG_PATH, "utf8")) as {
-    models: Array<Record<string, unknown>>
-  }
-  const slugs = catalog.models?.map((model) => model.slug)
-  if (!Array.isArray(catalog.models) || slugs.join("\0") !== BUILTIN_MODEL_SLUGS.join("\0")) {
-    throw new Error("bundled Codex model catalog drifted from rust-v0.147.0")
-  }
-  return catalog
 }
 
 function agentFile(input: {
@@ -277,48 +252,44 @@ export function prepareCodexHome(input: PrepareCodexHomeInput): PreparedCodexHom
   const allowShell = input.allowShell !== false
   const baseInstructions = input.baseInstructions?.trim() ||
     "You are Codex running inside the CCHP automation runtime. Follow the selected agent role and task instructions."
-  const modelCatalog = loadBuiltinModelCatalog()
-  const sol = modelCatalog.models.find((model) => model.slug === "gpt-5.6-sol")
-  if (!sol) throw new Error("bundled Codex model catalog missing gpt-5.6-sol")
-  sol.context_window = GPT_5_6_SOL_CONTEXT_WINDOW
-  sol.max_context_window = GPT_5_6_SOL_CONTEXT_WINDOW
-  modelCatalog.models.push(
-    modelInfo({
-      slug: input.providerSet.main.modelKey,
-      displayName: "CCHP root model",
-      context: input.providerSet.main.context,
-      vision: input.providerSet.main.vision,
-      effort: "xhigh",
-      applyPatch: true,
-      multiAgentVersion: "v2",
-      reasoning: input.providerSet.main.reasoning,
-      baseInstructions,
-    }),
-    modelInfo({
-      slug: input.providerSet.reviewModelKey,
-      displayName: "CCHP review leaf",
-      context: input.providerSet.small.context,
-      vision: input.providerSet.small.vision,
-      effort: "low",
-      applyPatch: false,
-      multiAgentVersion: "disabled",
-      reasoning: input.providerSet.small.reasoning,
-      baseInstructions,
-    }),
-    modelInfo({
-      slug: input.providerSet.workerModelKey,
-      displayName: "CCHP worker leaf",
-      context: input.providerSet.main.context,
-      vision: input.providerSet.main.vision,
-      effort: "xhigh",
-      applyPatch: true,
-      multiAgentVersion: "disabled",
-      reasoning: input.providerSet.main.reasoning,
-      baseInstructions,
-    }),
-  )
-  const modelCatalogPath = join(codexHome, "model_catalog.json")
-  writePrivate(modelCatalogPath, JSON.stringify(modelCatalog, null, 2))
+  const modelCatalogPath = join(codexHome, "models.json")
+  writePrivate(modelCatalogPath, JSON.stringify({
+    models: [
+      modelInfo({
+        slug: input.providerSet.main.modelKey,
+        displayName: "CCHP root model",
+        context: input.providerSet.main.context,
+        vision: input.providerSet.main.vision,
+        effort: "xhigh",
+        applyPatch: true,
+        multiAgentVersion: "v2",
+        reasoning: input.providerSet.main.reasoning,
+        baseInstructions,
+      }),
+      modelInfo({
+        slug: input.providerSet.reviewModelKey,
+        displayName: "CCHP review leaf",
+        context: input.providerSet.small.context,
+        vision: input.providerSet.small.vision,
+        effort: "low",
+        applyPatch: false,
+        multiAgentVersion: "disabled",
+        reasoning: input.providerSet.small.reasoning,
+        baseInstructions,
+      }),
+      modelInfo({
+        slug: input.providerSet.workerModelKey,
+        displayName: "CCHP worker leaf",
+        context: input.providerSet.main.context,
+        vision: input.providerSet.main.vision,
+        effort: "xhigh",
+        applyPatch: true,
+        multiAgentVersion: "disabled",
+        reasoning: input.providerSet.main.reasoning,
+        baseInstructions,
+      }),
+    ],
+  }, null, 2))
   const readOnlyMcpConfig = [
     ...githubMcpConfig(input, READ_ONLY_GITHUB_TOOLS),
     ...fffMcpConfig(input, READ_ONLY_FFF_TOOLS),
