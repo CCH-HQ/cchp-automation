@@ -118,24 +118,21 @@ test("maps existing BOT_* target metadata to broker bindings without caller chan
     .toThrow("exactly one trusted")
 })
 
-test("caps response count and tokens only for short read-only interactive tasks", () => {
+test("does not impose token, response, or output caps on any runtime task", () => {
   for (const task of ["engage", "manual", "dispatch", "pr_opened"] as const) {
     expect(resolveRuntimeUsageGuardrails({ task, allowRepositoryMutation: false }, 2_000_000)).toEqual({
-      totalTokenBudget: 384_000,
-      maxResponsesPerTurn: 6,
-      maxOutputTokens: 8_192,
+      totalTokenBudget: Number.MAX_SAFE_INTEGER,
+      unlimited: true,
     })
   }
   expect(resolveRuntimeUsageGuardrails({ task: "manual", allowRepositoryMutation: false }, 128_000)).toEqual({
-    totalTokenBudget: 128_000,
-    maxResponsesPerTurn: 6,
-    maxOutputTokens: 8_192,
+    totalTokenBudget: Number.MAX_SAFE_INTEGER,
+    unlimited: true,
   })
   expect(resolveRuntimeUsageGuardrails({ task: "manual", allowRepositoryMutation: true }, 2_000_000)).toEqual({
-    totalTokenBudget: 2_000_000,
+    totalTokenBudget: Number.MAX_SAFE_INTEGER,
+    unlimited: true,
   })
-  // pr_opened receives an interaction token for review publication, but its
-  // sandbox is still read-only and must retain the conservative ceiling.
   const reviewPermission = resolveRuntimePermission({
     BOT_TASK: "pr_opened",
     BOT_CAN_WRITE: "1",
@@ -143,14 +140,12 @@ test("caps response count and tokens only for short read-only interactive tasks"
   })
   expect(reviewPermission).toMatchObject({ hasWriteToken: true, allowRepositoryMutation: false })
   expect(resolveRuntimeUsageGuardrails(reviewPermission, 2_000_000)).toEqual({
-    totalTokenBudget: 384_000,
-    maxResponsesPerTurn: 6,
-    maxOutputTokens: 8_192,
+    totalTokenBudget: Number.MAX_SAFE_INTEGER,
+    unlimited: true,
   })
   expect(resolveRuntimeUsageGuardrails({ task: "engage", allowRepositoryMutation: false }, Number.NaN)).toEqual({
-    totalTokenBudget: 384_000,
-    maxResponsesPerTurn: 6,
-    maxOutputTokens: 8_192,
+    totalTokenBudget: Number.MAX_SAFE_INTEGER,
+    unlimited: true,
   })
 })
 

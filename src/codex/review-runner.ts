@@ -34,7 +34,8 @@ function validTask(value: unknown): value is ReviewTask {
   return typeof task.id === "string" && task.id.length > 0 && typeof task.role === "string" && task.role.length > 0 && isReviewPassKind(task.passKind) && typeof task.prompt === "string" && task.prompt.length > 0 && (task.admissionPrompt === undefined || typeof task.admissionPrompt === "string") && (task.agent === undefined || typeof task.agent === "string")
 }
 
-function withDeadline<T>(promise: Promise<T>, timeoutMs: number, onTimeout: () => Promise<void> | void): Promise<T> {
+function withDeadline<T>(promise: Promise<T>, timeoutMs: number | undefined, onTimeout: () => Promise<void> | void): Promise<T> {
+  if (timeoutMs === undefined) return promise
   return new Promise<T>((resolve, reject) => {
     let done = false
     const timer = setTimeout(() => {
@@ -59,6 +60,7 @@ function withDeadline<T>(promise: Promise<T>, timeoutMs: number, onTimeout: () =
 export interface ReviewRunnerOptions {
   timeoutMs?: number
   maxActive?: number
+  unlimited?: boolean
 }
 
 /** Bounded, cancellation-aware review scheduler. References are assembled before
@@ -66,14 +68,16 @@ export interface ReviewRunnerOptions {
 export class ReviewRunner {
   private readonly timeoutMs: number
   private readonly maxActive: number
+  private readonly unlimited: boolean
 
   constructor(private readonly executor: ReviewChildExecutor, options: ReviewRunnerOptions = {}) {
     this.timeoutMs = options.timeoutMs ?? REVIEW_CHILD_TIMEOUT_MS
-    this.maxActive = Math.max(1, Math.min(options.maxActive ?? REVIEW_MAX_ACTIVE, REVIEW_MAX_ACTIVE))
+    this.unlimited = options.unlimited ?? false
+    this.maxActive = this.unlimited ? Number.MAX_SAFE_INTEGER : Math.max(1, Math.min(options.maxActive ?? REVIEW_MAX_ACTIVE, REVIEW_MAX_ACTIVE))
   }
 
   async run(tasks: readonly ReviewTask[], parentSignal?: AbortSignal): Promise<ReviewResult[]> {
-    if (!Array.isArray(tasks) || tasks.length < 1 || tasks.length > REVIEW_MAX_TASKS) {
+    if (!Array.isArray(tasks) || tasks.length < 1 || (!this.unlimited && tasks.length > REVIEW_MAX_TASKS)) {
       throw new Error(`review tasks must contain 1..${REVIEW_MAX_TASKS} items`)
     }
     const results: ReviewResult[] = new Array(tasks.length)
@@ -101,7 +105,7 @@ export class ReviewRunner {
         try {
           const references = assembleReferenceContext(item.task.role, item.task.prompt)
           const prompt = `${item.task.prompt}\n\n${references.text}\n\nYou are a read-only leaf reviewer. Do not delegate, edit, run shell commands, or publish GitHub content.`
-          const response = await withDeadline(this.executor.run({ task: item.task, prompt, signal: controller.signal }), this.timeoutMs, async () => {
+          const response = await withDeadline(this.executor.run({ task: item.task, prompt, signal: controller.signal }), this.unlimited ? undefined : this.timeoutMs, async () => {
             controller.abort()
             if (sessionId && this.executor.interrupt) await this.executor.interrupt(sessionId)
           })

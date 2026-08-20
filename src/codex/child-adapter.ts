@@ -16,6 +16,7 @@ import { durableWriteFile } from "./durable-file"
 import { appendJsonl, readJsonl } from "./jsonl"
 import { processIdentity, type ProcessIdentity } from "./run-lock"
 import { attachRecordHmac, hasValidRecordHmac, validateRecordHmacKey } from "./authenticated-record"
+import { UNLIMITED_DEADLINE_AT } from "./deadlines"
 
 export type ChildState = "queued" | "running" | "completed" | "failed" | "timed_out" | "interrupted" | "lost"
 
@@ -157,6 +158,7 @@ export interface ChildAdapterOptions {
   tokenScope?: string
   timeoutMs?: number
   maxActive?: number
+  unlimited?: boolean
   graph?: ChildGraph
   startExec?: typeof startCodexExec
   admissionLedger?: ReviewAdmissionLedger
@@ -376,7 +378,7 @@ export class ExplicitChildAdapter implements ReviewChildExecutor {
 
   constructor(private readonly options: ChildAdapterOptions) {
     const maxActive = options.maxActive ?? 10
-    if (!Number.isSafeInteger(maxActive) || maxActive < 1 || maxActive > 10) {
+    if (!options.unlimited && (!Number.isSafeInteger(maxActive) || maxActive < 1 || maxActive > 10)) {
       throw new Error("explicit child maxActive must be an integer between 1 and 10")
     }
     mkdirSync(options.resultRoot, { recursive: true, mode: 0o700 })
@@ -504,7 +506,7 @@ export class ExplicitChildAdapter implements ReviewChildExecutor {
     safeChildId(task.id)
     if (this.children.has(task.id)) throw new Error(`child ${task.id} already exists`)
     const active = [...this.children.values()].filter((record) => !record.closed && !terminalState(record.handle.state)).length
-    if (active >= (this.options.maxActive ?? 10)) throw new Error(`explicit child concurrency limit exceeded: ${this.options.maxActive ?? 10}`)
+    if (!this.options.unlimited && active >= (this.options.maxActive ?? 10)) throw new Error(`explicit child concurrency limit exceeded: ${this.options.maxActive ?? 10}`)
     const parentRunId = this.options.parentRunId ?? this.runId
     const resultPath = resolve(this.options.resultRoot, `${task.id}.json`)
     const spawnItemId = `explicit:${task.id}`
@@ -514,7 +516,9 @@ export class ExplicitChildAdapter implements ReviewChildExecutor {
     if (this.options.admissionLedger && task.passKind) {
       this.options.admissionLedger.assertLaunchable(task.id, task.role, task.passKind, "explicit_child", task.admissionPrompt ?? task.prompt)
     }
-    const deadlineAt = admission?.deadlineAt ?? new Date(Date.now() + (this.options.timeoutMs ?? this.options.exec.timeoutMs ?? 1_800_000)).toISOString()
+    const deadlineAt = admission?.deadlineAt ?? (this.options.unlimited
+      ? UNLIMITED_DEADLINE_AT
+      : new Date(Date.now() + (this.options.timeoutMs ?? this.options.exec.timeoutMs ?? 1_800_000)).toISOString())
     const handle: ChildHandle = {
       runId: this.runId,
       parentRunId,
@@ -582,14 +586,15 @@ export class ExplicitChildAdapter implements ReviewChildExecutor {
 
   async waitAgent(childId: string, timeoutMs = this.options.timeoutMs ?? 1_800_000): Promise<ChildHandle> {
     await this.ready
-    if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1) throw new Error("wait timeout must be a positive integer")
+    if (!this.options.unlimited && (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1)) throw new Error("wait timeout must be a positive integer")
     const record = this.require(childId)
     const completion = record.completion
     if (completion && (!terminalState(record.handle.state) || record.active)) {
-      await Promise.race([
-        completion,
-        new Promise<never>((_, reject) => setTimeout(() => reject(new Error(`child ${childId} wait exceeded ${timeoutMs}ms`)), timeoutMs)),
-      ])
+      if (this.options.unlimited) await completion
+      else await Promise.race([
+          completion,
+          new Promise<never>((_, reject) => setTimeout(() => reject(new Error(`child ${childId} wait exceeded ${timeoutMs}ms`)), timeoutMs)),
+        ])
     }
     return clone(record.handle, record.attempts)
   }
@@ -721,7 +726,7 @@ export class ExplicitChildAdapter implements ReviewChildExecutor {
         return
       }
       const remainingMs = Date.parse(record.handle.deadlineAt) - Date.now()
-      if (!Number.isFinite(remainingMs) || remainingMs <= 0) {
+      if (!this.options.unlimited && (!Number.isFinite(remainingMs) || remainingMs <= 0)) {
         this.markRecoveryTerminal(record, "timed_out", "absolute review admission deadline exceeded during restart recovery")
         return
       }
@@ -880,7 +885,7 @@ export class ExplicitChildAdapter implements ReviewChildExecutor {
     let queued = initialQueued
     while (true) {
       const remainingMs = Date.parse(record.handle.deadlineAt) - Date.now()
-      if (!Number.isFinite(remainingMs) || remainingMs <= 0) {
+      if (!this.options.unlimited && (!Number.isFinite(remainingMs) || remainingMs <= 0)) {
         record.handle.state = "timed_out"
         record.handle.error = "absolute review admission deadline exceeded before launch"
         this.finishGraph(record)
@@ -920,7 +925,7 @@ export class ExplicitChildAdapter implements ReviewChildExecutor {
           prompt,
           env: { ...this.options.exec.env, CCHP_EXPLICIT_AGENT_DEPTH: "1" },
           ...(resume ? { resumeSessionId: record.handle.sessionId } : {}),
-          timeoutMs: Math.max(1, remainingMs),
+          ...(this.options.unlimited ? { unlimited: true } : { timeoutMs: Math.max(1, remainingMs) }),
           beforeExec: checkpointLaunch,
         })
         record.active = exec

@@ -119,6 +119,8 @@ export interface TokenAnomaly {
 export interface UsageLedgerOptions {
   path?: string
   totalBudget: number
+  /** Disable token admission while retaining usage accounting and anomaly checks. */
+  unlimited?: boolean
   assertWriterOwnership?: () => void
   admissionFraction?: number
   writerFence?: { writerId: string; generation: number }
@@ -184,7 +186,7 @@ export class UsageLedger {
   private admissionDenials = 0
 
   constructor(private readonly options: UsageLedgerOptions) {
-    if (!Number.isSafeInteger(options.totalBudget) || options.totalBudget <= 0) {
+    if (!options.unlimited && (!Number.isSafeInteger(options.totalBudget) || options.totalBudget <= 0)) {
       throw new Error("total token budget must be a positive integer")
     }
     if (options.admissionFraction !== undefined && (!Number.isFinite(options.admissionFraction) || options.admissionFraction <= 0 || options.admissionFraction > 1)) {
@@ -325,14 +327,14 @@ export class UsageLedger {
     const reservedBefore = [...this.reservations.values()].reduce((sum, reservation) => sum + reservation.estimatedTokens, 0)
     const responsesInFlightBefore = turnReservations.length
     let reason: UsageAdmission["reason"]
-    if (
+    if (!this.options.unlimited &&
       this.options.maxResponsesPerTurn !== undefined &&
       records.length + turnReservations.length + recoveredTurnReservations.length >= this.options.maxResponsesPerTurn
     ) {
       reason = "response_limit"
-    } else if (this.consumed + reservedBefore >= threshold) {
+    } else if (!this.options.unlimited && this.consumed + reservedBefore >= threshold) {
       reason = "budget_threshold"
-    } else if (this.consumed + reservedBefore + estimatedNextTokens > threshold) {
+    } else if (!this.options.unlimited && this.consumed + reservedBefore + estimatedNextTokens > threshold) {
       reason = "projected_budget"
     }
     let reservation: UsageReservationRef | undefined
@@ -504,10 +506,10 @@ export class UsageLedger {
   }
 
   private result(acceptedRaw: boolean): UsageResult {
-    const fraction = this.consumed / this.options.totalBudget
+    const fraction = this.options.unlimited ? 0 : this.consumed / this.options.totalBudget
     const reservations = [...this.reservations.values()]
     const state: TokenBudgetState =
-      fraction >= 1 ? "exceeded" : fraction >= 0.85 ? "throttled" : fraction >= 0.7 ? "warning" : "normal"
+      this.options.unlimited ? "normal" : fraction >= 1 ? "exceeded" : fraction >= 0.85 ? "throttled" : fraction >= 0.7 ? "warning" : "normal"
     const aggregate = this.rawCompletions.reduce((result, record) => ({
       inputTokens: result.inputTokens + finiteToken(record.inputTokens),
       contextInputTokens: result.contextInputTokens + finiteToken(record.contextInputTokens),

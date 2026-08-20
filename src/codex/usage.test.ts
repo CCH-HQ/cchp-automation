@@ -119,6 +119,27 @@ test("denies a projected response before the run can overshoot the admission thr
   expect(ledger.budget).toMatchObject({ responses: 2, turns: 2, admissionDenials: 1 })
 })
 
+test("unlimited admission records usage without budget or per-turn denial", () => {
+  const ledger = new UsageLedger({ totalBudget: Number.MAX_SAFE_INTEGER, unlimited: true, maxResponsesPerTurn: 1 })
+  for (let index = 0; index < 4; index++) {
+    const admission = ledger.admitNextResponse({
+      billingScopeId: "run",
+      threadId: "thread",
+      turnId: "turn",
+      estimatedTokens: Number.MAX_SAFE_INTEGER,
+    })
+    expect(admission.allowed).toBe(true)
+    ledger.recordRaw({
+      threadId: "thread",
+      turnId: "turn",
+      responseId: `response-${index}`,
+      totalTokens: 100,
+      reservation: admission.reservation,
+    })
+  }
+  expect(ledger.budget).toMatchObject({ state: "normal", admissionDenials: 0, responses: 4 })
+})
+
 test("reserves projected tokens across concurrent provider requests", () => {
   const ledger = new UsageLedger({ totalBudget: 1_000, admissionFraction: 0.85 })
   ledger.recordRaw({ threadId: "other", turnId: "other-turn", responseId: "bulk", provider: "p", model: "large", totalTokens: 760, billingScopeId: "run" })

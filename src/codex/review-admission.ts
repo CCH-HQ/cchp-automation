@@ -4,6 +4,7 @@ import { dirname, isAbsolute } from "node:path"
 import { appendJsonl, readJsonl } from "./jsonl"
 import { assembleReferenceContext } from "./references"
 import { REVIEW_CHILD_TIMEOUT_MS, REVIEW_MAX_TASKS } from "./review-runner"
+import { UNLIMITED_DEADLINE_AT } from "./deadlines"
 
 export type ReviewAdmissionState =
   | "admitted"
@@ -160,7 +161,12 @@ export class ReviewAdmissionLedger {
   private readonly byTask = new Map<string, ReviewAdmission>()
   private readonly taskByChild = new Map<string, string>()
 
-  constructor(private readonly path: string, private readonly runId: string, private readonly snapshotRows?: readonly unknown[]) {
+  constructor(
+    private readonly path: string,
+    private readonly runId: string,
+    private readonly snapshotRows?: readonly unknown[],
+    private readonly unlimited = false,
+  ) {
     if (snapshotRows) {
       for (const row of snapshotRows) this.replay(row)
     } else {
@@ -203,10 +209,12 @@ export class ReviewAdmissionLedger {
       }
       return copy(existing)
     }
-    if (this.byTask.size >= REVIEW_MAX_TASKS) throw new Error(`review admission limit exceeded: ${REVIEW_MAX_TASKS}`)
+    if (!this.unlimited && this.byTask.size >= REVIEW_MAX_TASKS) throw new Error(`review admission limit exceeded: ${REVIEW_MAX_TASKS}`)
     const now = input.now ?? Date.now()
-    const timeoutMs = Math.min(input.timeoutMs ?? REVIEW_CHILD_TIMEOUT_MS, REVIEW_CHILD_TIMEOUT_MS)
-    if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1) throw new Error("review admission timeout must be a positive integer")
+    const timeoutMs = this.unlimited
+      ? undefined
+      : Math.min(input.timeoutMs ?? REVIEW_CHILD_TIMEOUT_MS, REVIEW_CHILD_TIMEOUT_MS)
+    if (!this.unlimited && (!Number.isSafeInteger(timeoutMs) || timeoutMs! < 1)) throw new Error("review admission timeout must be a positive integer")
     const references = assembleReferenceContext(input.role, input.prompt)
     const entry: ReviewAdmission = {
       schemaVersion: 2,
@@ -216,7 +224,7 @@ export class ReviewAdmissionLedger {
       passKind: input.passKind,
       mode: input.mode,
       admittedAt: new Date(now).toISOString(),
-      deadlineAt: new Date(now + timeoutMs).toISOString(),
+      deadlineAt: this.unlimited ? UNLIMITED_DEADLINE_AT : new Date(now + timeoutMs!).toISOString(),
       reference: {
         bytes: references.bytes,
         selectedEntryIds: references.selectedEntryIds,
@@ -298,7 +306,7 @@ export class ReviewAdmissionLedger {
     }
     entry.state = state
     entry.terminalAt = new Date(now).toISOString()
-    if (state === "completed" && Date.parse(entry.terminalAt) > Date.parse(entry.deadlineAt)) {
+    if (!this.unlimited && state === "completed" && Date.parse(entry.terminalAt) > Date.parse(entry.deadlineAt)) {
       throw new Error(`review task ${taskId} completed after its deadline`)
     }
     entry.error = error
@@ -325,7 +333,7 @@ export class ReviewAdmissionLedger {
   }
 
   expired(now = Date.now()): ReviewAdmission[] {
-    return this.entries().filter((entry) => !terminal(entry.state) && Date.parse(entry.deadlineAt) <= now)
+    return this.unlimited ? [] : this.entries().filter((entry) => !terminal(entry.state) && Date.parse(entry.deadlineAt) <= now)
   }
 
   assertFinalizable(requireAdmissions: boolean): void {
@@ -362,7 +370,7 @@ export class ReviewAdmissionLedger {
     const runId = typeof row.runId === "string" ? row.runId : ""
     if (!taskId || runId !== this.runId) throw new Error("review admission ledger identity mismatch")
     if (row.event === "review_admitted") {
-      if (this.byTask.has(taskId) || this.byTask.size >= REVIEW_MAX_TASKS) throw new Error(`duplicate or excessive review admission ${taskId}`)
+      if (this.byTask.has(taskId) || (!this.unlimited && this.byTask.size >= REVIEW_MAX_TASKS)) throw new Error(`duplicate or excessive review admission ${taskId}`)
       const { event: _event, ...payload } = row
       validateAdmissionPayload(payload, this.runId)
       const entry = payload
@@ -398,7 +406,7 @@ export class ReviewAdmissionLedger {
       if (entry.state === "completed" && !sameResult(entry.result, result as ReviewResultBinding)) throw new Error(`review task ${taskId} terminal result drift`)
       const terminalAt = row.terminalAt
       if (!validIso(terminalAt)) throw new Error(`review task ${taskId} has invalid terminal timestamp`)
-      if (state === "completed" && Date.parse(terminalAt) > Date.parse(entry.deadlineAt)) throw new Error(`review task ${taskId} completed after its deadline`)
+      if (!this.unlimited && state === "completed" && Date.parse(terminalAt) > Date.parse(entry.deadlineAt)) throw new Error(`review task ${taskId} completed after its deadline`)
       entry.state = state
       entry.terminalAt = terminalAt
       entry.error = typeof row.error === "string" ? row.error : undefined

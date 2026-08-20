@@ -165,7 +165,7 @@ export function createAgentsServer(env: Record<string, string | undefined> = pro
   childEnv.REPO_DIR = repoDir
 
   const reviewAdmissions = task === "pr_opened"
-    ? new ReviewAdmissionLedger(join(workdir, "ctx", "codex", "review-admission.jsonl"), env.BOT_RUN_ID ?? "unknown")
+    ? new ReviewAdmissionLedger(join(workdir, "ctx", "codex", "review-admission.jsonl"), env.BOT_RUN_ID ?? "unknown", undefined, true)
     : undefined
 
   const adapter = new ExplicitChildAdapter({
@@ -193,8 +193,7 @@ export function createAgentsServer(env: Record<string, string | undefined> = pro
     resultRoot: join(workdir, "ctx", "child-results"),
     runId: env.BOT_RUN_ID,
     parentRunId: env.BOT_RUN_ID,
-    timeoutMs: Number(env.CCHP_EXPLICIT_CHILD_TIMEOUT_MS ?? 1_800_000),
-    maxActive: Number(env.CCHP_EXPLICIT_MAX_ACTIVE ?? 10),
+    unlimited: true,
     admissionLedger: reviewAdmissions,
     redactDiagnostic: (value) => redactRuntimeDiagnostic(value, responseSecrets),
     recordHmacKey,
@@ -210,7 +209,7 @@ export function createAgentsServer(env: Record<string, string | undefined> = pro
     { name: "spawn_agent", description: "Spawn one explicit Codex CLI child with the configured review or worker leaf model.", inputSchema: schema(spawnProperties, task === "pr_opened" ? ["task_name", "message", "pass_kind"] : ["task_name", "message"]) },
     { name: "send_message", description: "Queue a message for an active explicit child.", inputSchema: schema({ target: { type: "string" }, message: { type: "string" } }, ["target", "message"]) },
     { name: "followup_task", description: "Resume a terminal explicit child on its existing Codex session.", inputSchema: schema({ target: { type: "string" }, message: { type: "string" } }, ["target", "message"]) },
-    { name: "wait_agent", description: "Wait for one child or every current child to reach a terminal state.", inputSchema: schema({ target: { type: "string" }, timeout_ms: { type: "integer", minimum: 1, maximum: 1_800_000 } }, []) },
+    { name: "wait_agent", description: "Wait for one child or every current child to reach a terminal state without a timeout.", inputSchema: schema({ target: { type: "string" }, timeout_ms: { type: "integer", minimum: 1 } }, []) },
     { name: "interrupt_agent", description: "Interrupt one explicit child and its process group.", inputSchema: schema({ target: { type: "string" } }, ["target"]) },
     { name: "list_agents", description: "List explicit child state.", inputSchema: schema({}, []) },
   ]

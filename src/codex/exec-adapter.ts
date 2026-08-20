@@ -19,6 +19,7 @@ export interface ExecRunOptions {
   outputLastMessage?: string
   outputSchema?: string
   timeoutMs?: number
+  unlimited?: boolean
   interruptGraceMs?: number
   termGraceMs?: number
   killGraceMs?: number
@@ -395,11 +396,11 @@ export function startCodexExec(options: ExecRunOptions): CodexExecHandle {
   })
 
   const timeoutMs = options.timeoutMs ?? 1_800_000
-  const timer = setTimeout(() => {
+  const timer = options.unlimited ? undefined : setTimeout(() => {
     timeoutFailure = new CodexExecTimeoutError(timeoutMs)
     void stop("timeout").catch(() => undefined)
   }, timeoutMs)
-  timer.unref?.()
+  timer?.unref?.()
 
   const abort = (): void => {
     void stop("interrupt").catch(() => undefined)
@@ -447,7 +448,7 @@ export function startCodexExec(options: ExecRunOptions): CodexExecHandle {
       if (!sessionId) started.reject(error)
       throw error
     } finally {
-      clearTimeout(timer)
+      if (timer) clearTimeout(timer)
       options.signal?.removeEventListener("abort", abort)
     }
   })()

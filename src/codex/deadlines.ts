@@ -14,6 +14,9 @@ export const DEADLINES = {
   termGraceMs: 15 * 1000,
 } as const
 
+/** A serializable far-future timestamp used by durable artifacts in unlimited mode. */
+export const UNLIMITED_DEADLINE_AT = "+275760-09-13T00:00:00.000Z"
+
 export type ProgressDeadlineState = "healthy" | "warning" | "stale" | "terminal"
 
 export interface ProgressDeadlineResult {
@@ -27,12 +30,14 @@ export interface ProgressDeadlineOptions {
   semanticAt?: number
   warningMs?: number
   terminalMs?: number
+  unlimited?: boolean
 }
 
 export class ProgressDeadline {
   private readonly now: () => number
   private readonly warningMs: number
   private readonly terminalMs: number
+  private readonly unlimited: boolean
   private semanticAt: number
   private transportAt: number
   private modelAt: number
@@ -42,6 +47,7 @@ export class ProgressDeadline {
 
   constructor(options: ProgressDeadlineOptions = {}) {
     this.now = options.now ?? (() => Date.now())
+    this.unlimited = options.unlimited ?? false
     this.warningMs = options.warningMs ?? DEADLINES.noProgressWarningMs
     this.terminalMs = options.terminalMs ?? DEADLINES.noProgressTerminalMs
     if (this.warningMs < 0 || this.terminalMs <= this.warningMs) {
@@ -81,6 +87,7 @@ export class ProgressDeadline {
     const now = this.now()
     const semanticAge = Math.max(0, now - this.semanticAt)
     const modelAge = Math.max(0, now - this.modelAt)
+    if (this.unlimited) return { state: "healthy", semanticAgeMs: semanticAge, modelAgeMs: modelAge }
     // Terminal requires both clocks. Completed model output can keep a healthy
     // long review alive past 20m of plan/item silence; heartbeats cannot.
     if (semanticAge >= this.terminalMs && modelAge >= this.terminalMs) {

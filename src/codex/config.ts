@@ -280,10 +280,6 @@ export function prepareCodexHome(input: PrepareCodexHomeInput): PreparedCodexHom
     `enabled = ${collaborationMode === "native-v2" ? "true" : "false"}`,
     ...(collaborationMode === "native-v2"
       ? [
-          "max_concurrent_threads_per_session = 11",
-          "min_wait_timeout_ms = 1000",
-          "default_wait_timeout_ms = 600000",
-          "max_wait_timeout_ms = 1800000",
           'tool_namespace = "agents"',
           "hide_spawn_agent_metadata = false",
           "expose_spawn_agent_model_overrides = false",
@@ -310,7 +306,6 @@ export function prepareCodexHome(input: PrepareCodexHomeInput): PreparedCodexHom
       "requires_openai_auth = false",
       "request_max_retries = 2",
       "stream_max_retries = 2",
-      "stream_idle_timeout_ms = 300000",
       "",
     )
   }

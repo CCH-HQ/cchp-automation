@@ -224,21 +224,15 @@ export function resolveRuntimePermission(env: RuntimeEnv = process.env): TaskPer
   })
 }
 
-const SHORT_READ_ONLY_TASKS = new Set<Task>(["engage", "manual", "dispatch", "pr_opened"])
-
 export function resolveRuntimeUsageGuardrails(
   permission: Pick<TaskPermissionProfile, "task" | "allowRepositoryMutation">,
   configuredBudget: number,
-): { totalTokenBudget: number; maxResponsesPerTurn?: number; maxOutputTokens?: number } {
-  const budget = Number.isSafeInteger(configuredBudget) && configuredBudget > 0 ? configuredBudget : 2_000_000
-  if (permission.allowRepositoryMutation || !SHORT_READ_ONLY_TASKS.has(permission.task)) {
-    return { totalTokenBudget: budget }
-  }
-  return {
-    totalTokenBudget: Math.min(budget, 384_000),
-    maxResponsesPerTurn: 6,
-    maxOutputTokens: 8_192,
-  }
+): { totalTokenBudget: number; unlimited: true; maxResponsesPerTurn?: never; maxOutputTokens?: never } {
+  // Provider usage remains observable for billing and anomaly detection, but no
+  // runtime task is rejected because of a token, response, or output budget.
+  void permission
+  void configuredBudget
+  return { totalTokenBudget: Number.MAX_SAFE_INTEGER, unlimited: true }
 }
 
 export function createProgressPublisher(
@@ -499,10 +493,7 @@ export async function main(): Promise<number> {
     lease = acquireRunLease(workdir, process.env.BOT_RUN_ID)
     const contract = parseCallerContract(process.env)
     const permission = resolveRuntimePermission(process.env)
-    const usageGuardrails = resolveRuntimeUsageGuardrails(
-      permission,
-      Number(process.env.CCHP_TOKEN_BUDGET || 2_000_000),
-    )
+    const usageGuardrails = resolveRuntimeUsageGuardrails(permission, Number.NaN)
     const reviewRequired = requiresReviewFinalization(process.env)
     const providerSet = parseProviders({
       providerJson: contract.providerJson,
@@ -658,8 +649,8 @@ export async function main(): Promise<number> {
         ? undefined
         : autoCompactTokenLimit(providerSet.main.context, providerSet.main.compactThreshold),
       totalTokenBudget: usageGuardrails.totalTokenBudget,
+      unlimited: usageGuardrails.unlimited,
       maxResponsesPerTurn: usageGuardrails.maxResponsesPerTurn,
-      tokenAdmissionFraction: 0.85,
       sealProviderAndDrain: () => bridge!.sealAndDrain(),
       cancelProviderThread: (threadId) => bridge!.cancelThread(threadId),
       sealExplicitAdmissions: decision.executionMode === "explicit_child"

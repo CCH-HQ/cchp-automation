@@ -142,8 +142,6 @@ stop_stale_codex() {
   }
 }
 
-max_restarts="${CCHP_RUNTIME_RESTARTS:-1}"
-[[ "$max_restarts" =~ ^[01]$ ]] || { warn "CCHP_RUNTIME_RESTARTS must be 0 or 1"; exit 2; }
 attempt=0
 run_runtime() {
   local see_stdin="$1"
@@ -153,8 +151,7 @@ run_runtime() {
     GH_TOKEN="${github_token}" \
     HEROUI_AUTH_TOKEN="${heroui_token}" \
     CCHP_SEE_API_KEY_STDIN="$see_stdin" \
-    timeout --signal=TERM --kill-after=30s "${BOT_CODEX_TIMEOUT:-${CCHP_CODEX_TIMEOUT:-42690}}" \
-      bun "${ENGINE_DIR}/src/codex/runtime.ts"
+    bun "${ENGINE_DIR}/src/codex/runtime.ts"
 }
 while :; do
   log "starting Codex supervisor task=${BOT_TASK:-unknown} model=${CCHP_BOT_MODEL:-<unset>} run=${BOT_RUN_ID} attempt=$((attempt + 1))"
@@ -165,19 +162,11 @@ while :; do
     run_runtime 0 </dev/null || rc=$?
   fi
   if [[ "$rc" -eq 0 ]]; then exit 0; fi
-  if [[ "$rc" -eq 124 || "$rc" -eq 137 ]]; then
-    warn "Codex supervisor exceeded its deadline and was killed"
-    exit "$rc"
-  fi
   checkpoint_state="$(terminal_checkpoint_state 2>/dev/null || true)"
   if [[ -n "$checkpoint_state" ]]; then
     checkpoint_rc="$(terminal_exit_code "$checkpoint_state")"
     warn "Codex runtime exited ${rc} after durable terminal checkpoint state=${checkpoint_state}; preserving checkpoint outcome"
     exit "$checkpoint_rc"
-  fi
-  if (( attempt >= max_restarts )); then
-    warn "Codex runtime exited ${rc}; restart budget exhausted"
-    exit "$rc"
   fi
   resumable=false
   for _ in 1 2 3; do

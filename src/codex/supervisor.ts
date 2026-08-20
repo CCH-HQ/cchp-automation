@@ -3,7 +3,7 @@ import { appendFileSync, chmodSync, lstatSync, mkdirSync, readFileSync } from "n
 import { join } from "node:path"
 import { CodexAppServer, type CodexAppServerExit, type JsonRpcNotification, type JsonRpcServerRequest } from "./app-server"
 import type { RunFence } from "./run-lock"
-import { DEADLINES, ProgressDeadline } from "./deadlines"
+import { DEADLINES, ProgressDeadline, UNLIMITED_DEADLINE_AT } from "./deadlines"
 import { durableWriteFile } from "./durable-file"
 import { normalizeAppServerNotification, type NormalizedEvent } from "./events"
 import { ChildGraph, type ChildTerminalState } from "./graph"
@@ -49,6 +49,7 @@ export interface SupervisorOptions {
   contextWindow?: number
   compactTokenLimit?: number
   totalTokenBudget: number
+  unlimited?: boolean
   tokenAdmissionFraction?: number
   maxResponsesPerTurn?: number
   sealProviderAndDrain?: () => Promise<void>
@@ -453,6 +454,7 @@ export class Supervisor {
     this.usage = new UsageLedger({
       path: join(codexDir, "usage.jsonl"),
       totalBudget: options.totalTokenBudget,
+      unlimited: options.unlimited,
       admissionFraction: options.tokenAdmissionFraction,
       maxResponsesPerTurn: options.maxResponsesPerTurn,
       assertWriterOwnership: options.assertWriterOwnership,
@@ -463,7 +465,7 @@ export class Supervisor {
       this.rawResponseUsage.set(completion.responseId, completion)
     }
     this.graph = new ChildGraph(join(codexDir, "graph.jsonl"), options.assertWriterOwnership)
-    this.reviewAdmissions = new ReviewAdmissionLedger(join(codexDir, "review-admission.jsonl"), options.runId)
+    this.reviewAdmissions = new ReviewAdmissionLedger(join(codexDir, "review-admission.jsonl"), options.runId, undefined, options.unlimited)
     this.explicitChildren = executionMode === "explicit_child"
       ? options.explicitChildren ?? new ArtifactExplicitChildLifecycle({
           resultRoot: join(options.workdir, "ctx", "child-results"),
@@ -473,8 +475,9 @@ export class Supervisor {
       : undefined
     const now = Date.now()
     this.startedAt = options.resume?.startedAt ?? new Date(now).toISOString()
-    this.wholeRunDeadlineAt = Date.parse(options.resume?.wholeRunDeadlineAt ?? "") ||
-      now + (options.deadlines?.wholeRunMs ?? DEADLINES.wholeRunMs)
+    this.wholeRunDeadlineAt = options.unlimited
+      ? Date.parse(UNLIMITED_DEADLINE_AT)
+      : Date.parse(options.resume?.wholeRunDeadlineAt ?? "") || now + (options.deadlines?.wholeRunMs ?? DEADLINES.wholeRunMs)
     this.lastSemanticProgressAt = options.resume?.lastSemanticProgressAt ?? this.startedAt
     this.drainDeadlineAt = Date.parse(options.resume?.drainDeadlineAt ?? "") || undefined
     this.rootSessionId = options.resume?.rootSessionId
@@ -483,6 +486,7 @@ export class Supervisor {
       semanticAt: Date.parse(this.lastSemanticProgressAt),
       warningMs: options.deadlines?.noProgressWarningMs,
       terminalMs: options.deadlines?.noProgressTerminalMs,
+      unlimited: options.unlimited,
     })
     if (options.resume) {
       this.state = options.resume.state
@@ -530,10 +534,12 @@ export class Supervisor {
 
   private async runOnce(): Promise<SupervisorResult> {
     const remaining = this.wholeRunDeadlineAt - Date.now()
-    if (remaining <= 0) return this.fail("whole run deadline exceeded", "TIMED_OUT", 124)
-    this.runTimer = setTimeout(() => {
-      void this.abort("whole run deadline exceeded", "TIMED_OUT", 124)
-    }, remaining)
+    if (!this.options.unlimited) {
+      if (remaining <= 0) return this.fail("whole run deadline exceeded", "TIMED_OUT", 124)
+      this.runTimer = setTimeout(() => {
+        void this.abort("whole run deadline exceeded", "TIMED_OUT", 124)
+      }, remaining)
+    }
     if (this.state === "FINALIZING") {
       const terminal = new Promise<SupervisorResult>((resolve) => { this.resolveTurn = resolve })
       await this.finalizeSuccess(true)
@@ -651,7 +657,7 @@ export class Supervisor {
     const deadAir = !this.receivedRuntimeEvent && noChildren && budget.consumed === 0 && inFlight === 0
     const stuckInflight = noChildren && inFlight > 0 && budget.admissionDenials > 0 &&
       (check.state === "warning" || check.state === "stale")
-    if (check.state === "terminal" || (deadAir && check.state === "stale") || stuckInflight) {
+    if (!this.options.unlimited && (check.state === "terminal" || (deadAir && check.state === "stale") || stuckInflight)) {
       this.append({
         event: "NO_PROGRESS_TIMEOUT",
         semanticAgeMs: check.semanticAgeMs,
@@ -674,15 +680,17 @@ export class Supervisor {
       ...(warning ? { warning } : {}),
     }, controller.signal).then(() => "completed" as const)
     let timeout: ReturnType<typeof setTimeout> | undefined
-    const outcome = await Promise.race([
-      publish,
-      new Promise<"timed_out">((resolve) => {
-        timeout = setTimeout(() => {
-          controller.abort(new Error("progress publication deadline exceeded"))
-          resolve("timed_out")
-        }, this.options.deadlines?.progressPublishMs ?? DEADLINES.progressPublishMs)
-      }),
-    ])
+    const outcome = this.options.unlimited
+      ? await publish
+      : await Promise.race([
+          publish,
+          new Promise<"timed_out">((resolve) => {
+            timeout = setTimeout(() => {
+              controller.abort(new Error("progress publication deadline exceeded"))
+              resolve("timed_out")
+            }, this.options.deadlines?.progressPublishMs ?? DEADLINES.progressPublishMs)
+          }),
+        ])
     if (timeout) clearTimeout(timeout)
     if (outcome === "timed_out") {
       this.append({
@@ -734,7 +742,8 @@ export class Supervisor {
 
   private async restartAppServer(event: CodexAppServerExit): Promise<void> {
     const limit = this.options.maxAppServerRestarts ?? 1
-    if (!this.rootThreadId || !["ROOT_RUNNING", "ROOT_DRAINING"].includes(this.state) || this.restartAttempts >= limit) {
+    if (!this.rootThreadId || !["ROOT_RUNNING", "ROOT_DRAINING"].includes(this.state) ||
+      (!this.options.unlimited && this.restartAttempts >= limit)) {
       await this.fail(
         `Codex app-server ${event.reason}${event.exitCode === null ? "" : ` (exit ${event.exitCode})`}; restart budget exhausted`,
         "LOST",
@@ -888,7 +897,7 @@ export class Supervisor {
       })
     }
     this.rootTurnId = continuation.continuationTurnId
-    this.drainDeadlineAt ??= Date.now() + (this.options.deadlines?.parentResumeMs ?? DEADLINES.parentResumeMs)
+    if (!this.options.unlimited) this.drainDeadlineAt ??= Date.now() + (this.options.deadlines?.parentResumeMs ?? DEADLINES.parentResumeMs)
     if (this.state !== "ROOT_DRAINING") this.transition("ROOT_DRAINING", "review continuation completed")
     else this.writeRunManifest()
   }
@@ -1781,7 +1790,7 @@ export class Supervisor {
 
   private async succeed(): Promise<void> {
     if (this.settled || this.finalizing || this.terminalIntent) return
-    this.drainDeadlineAt ??= Date.now() + (this.options.deadlines?.parentResumeMs ?? DEADLINES.parentResumeMs)
+    if (!this.options.unlimited) this.drainDeadlineAt ??= Date.now() + (this.options.deadlines?.parentResumeMs ?? DEADLINES.parentResumeMs)
     if (this.state !== "ROOT_DRAINING") this.transition("ROOT_DRAINING", "root turn completed")
     else this.writeRunManifest()
     await this.reconcileCycle()
@@ -1893,7 +1902,7 @@ export class Supervisor {
         return
       }
       this.append({ event: "reconcile_open_edges", count: open.length, explicitActive: explicit.active.length })
-      if (Date.now() >= (this.drainDeadlineAt ?? 0)) {
+      if (!this.options.unlimited && Date.now() >= (this.drainDeadlineAt ?? 0)) {
         for (const edge of open) this.graph.close(edge.childId, "lost")
         await this.fail("root drain deadline expired with open child work", "LOST", 1)
         return
@@ -1982,7 +1991,7 @@ export class Supervisor {
       await this.fail(`explicit child ${failed.childId} ended ${failed.state}${failed.error ? `: ${failed.error}` : ""}`, failed.state === "lost" ? "LOST" : "FAILED", 1)
       return undefined
     }
-    const expired = snapshot.active.filter((child) => Date.parse(child.deadlineAt) <= Date.now())
+    const expired = this.options.unlimited ? [] : snapshot.active.filter((child) => Date.parse(child.deadlineAt) <= Date.now())
     if (expired.length) {
       await this.fail(`explicit child deadline expired: ${expired.map((child) => child.childId).join(", ")}`, "LOST", 1)
       return undefined
@@ -1991,6 +2000,7 @@ export class Supervisor {
   }
 
   private async expireReviewAdmissions(): Promise<void> {
+    if (this.options.unlimited) return
     for (const admission of this.reviewAdmissions.expired()) {
       if (!admission.childThreadId) {
         this.reviewAdmissions.markTerminal(admission.taskId, "timed_out", "review child was not bound before its deadline")
@@ -2037,7 +2047,7 @@ export class Supervisor {
         this.append({ event: "parent_wake_history_error", childId: edge.childId, wakeId: edge.wakeId, message: String(error) })
       }
       const age = edge.closedAt ? Date.now() - Date.parse(edge.closedAt) : 0
-      if ((edge.wakeAttempts ?? 0) >= 2 || age >= (this.options.deadlines?.parentResumeMs ?? DEADLINES.parentResumeMs)) {
+      if (!this.options.unlimited && ((edge.wakeAttempts ?? 0) >= 2 || age >= (this.options.deadlines?.parentResumeMs ?? DEADLINES.parentResumeMs))) {
         await this.fail(`parent wake delivery exhausted for child ${edge.childId}`, "LOST", 1)
         return
       }
@@ -2291,7 +2301,7 @@ export class Supervisor {
   private async waitForUsageCapacityChange(observedVersion: number): Promise<boolean> {
     if (this.usageCapacityVersion !== observedVersion) return true
     const remainingMs = this.wholeRunDeadlineAt - Date.now()
-    if (remainingMs <= 0) return false
+    if (!this.options.unlimited && remainingMs <= 0) return false
     return new Promise<boolean>((resolve) => {
       let done = false
       let timer: ReturnType<typeof setTimeout> | undefined
@@ -2304,7 +2314,7 @@ export class Supervisor {
       }
       const wake = () => finish(true)
       this.usageCapacityWaiters.add(wake)
-      timer = setTimeout(() => finish(false), remainingMs)
+      if (!this.options.unlimited) timer = setTimeout(() => finish(false), remainingMs)
       if (this.usageCapacityVersion !== observedVersion) finish(true)
     })
   }
