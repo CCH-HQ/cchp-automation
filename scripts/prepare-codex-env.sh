@@ -30,7 +30,7 @@ git remote set-url origin "https://github.com/${GH_REPO}.git"
 log "sanitized git remote"
 unset BOT_TOKEN GH_TOKEN HEROUI_AUTH_TOKEN
 
-# Only workspace-write tasks can mutate or validate a prepared web checkout.
+# Only trusted write tasks can mutate or validate a prepared web checkout.
 # In particular, `pr_opened` always has a read-only sandbox even though it is
 # intentionally routed with BOT_CAN_WRITE=1 so it can publish review results.
 # Installing web dependencies for that task delays every review before Codex

@@ -261,6 +261,37 @@ test("launches an explicit child without GitHub, provider, App, SEE or HeroUI cr
   }
 })
 
+test("trusted explicit write children receive full Git metadata access", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "cchp-agents-mcp-write-sandbox-"))
+  const rootHome = join(workdir, "root-codex-home")
+  const repoDir = join(workdir, "repo")
+  mkdirSync(rootHome, { recursive: true })
+  mkdirSync(repoDir)
+  writeFileSync(join(rootHome, "config.toml"), 'model = "root-model"\nreview_model = "review-model"\n[features]\nmulti_agent = false\n')
+  const created = createAgentsServer({
+    BOT_TASK: "ci_fix",
+    BOT_CAN_WRITE: "1",
+    BOT_PR_IS_FORK: "0",
+    BOT_WORKDIR: workdir,
+    BOT_RUN_ID: "run-write-sandbox",
+    ...admissionEnv(workdir, "run-write-sandbox"),
+    REPO_DIR: repoDir,
+    CODEX_HOME: rootHome,
+    CODEX_BIN: fakeCodex,
+    PATH: process.env.PATH,
+    HOME: workdir,
+  })
+  try {
+    await created.adapter.spawn("root", { id: "child-write", role: "worker", prompt: "apply the fix" })
+    await created.adapter.waitAgent("child-write")
+    const invocation = JSON.parse(readFileSync(join(workdir, "fake-codex-exec-trace.jsonl"), "utf8").trim()) as { argv: string[] }
+    expect(invocation.argv).toContain("--sandbox")
+    expect(invocation.argv).toContain("danger-full-access")
+  } finally {
+    await created.adapter.shutdown()
+  }
+})
+
 test("fails closed for an unsupported explicit child role", async () => {
   const workdir = mkdtempSync(join(tmpdir(), "cchp-agents-mcp-role-"))
   const rootHome = join(workdir, "root-codex-home")

@@ -8,7 +8,7 @@ import {
 } from "./model-catalog"
 import type { ProviderSet } from "./providers"
 
-export type CodexSandboxMode = "read-only" | "workspace-write"
+export type CodexSandboxMode = "read-only" | "workspace-write" | "danger-full-access"
 export type CollaborationMode = "native-v2" | "explicit-exec"
 
 export interface PrepareCodexHomeInput {

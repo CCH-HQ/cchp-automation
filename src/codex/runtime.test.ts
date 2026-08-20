@@ -74,7 +74,7 @@ test("maps the frozen route environment to the Codex thread permission profile",
     BOT_TASK: "manual",
     BOT_CAN_WRITE: "1",
     BOT_PR_IS_FORK: "0",
-  })).toMatchObject({ task: "manual", sandboxMode: "workspace-write", approvalPolicy: "never" })
+  })).toMatchObject({ task: "manual", sandboxMode: "danger-full-access", approvalPolicy: "never" })
 
   expect(resolveRuntimePermission({
     BOT_TASK: "pr_opened",

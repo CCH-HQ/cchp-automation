@@ -16,6 +16,8 @@ import { withCollaborationAdmission } from "./collaboration-admission"
 
 type Args = Record<string, unknown>
 
+const WRITE_TASKS = new Set<Task>(["engage", "lgtm_merge", "ci_fix", "reaction_execute", "manual", "dispatch"])
+
 const str = (args: Args, key: string): string => {
   const value = args[key]
   if (typeof value !== "string" || !value.trim()) throw new Error(`${key} must be a non-empty string`)
@@ -149,6 +151,7 @@ export function createAgentsServer(env: Record<string, string | undefined> = pro
   }
   const recordHmacKey = validateRecordHmacKey(env.CCHP_PROCESS_RECORD_HMAC_KEY)
   const admissionIdentity = { runId, writerId, generation }
+  const trustedWrite = env.BOT_CAN_WRITE === "1" && env.BOT_PR_IS_FORK !== "1" && WRITE_TASKS.has(task)
   const responseSecrets = Object.entries(env)
     .filter(([name, value]) => Boolean(value) && (name === "CCHP_PROCESS_RECORD_HMAC_KEY" || /(?:token|secret|password|credential|private[-_]?key|api[-_]?key)/i.test(name)))
     .map(([, value]) => value!)
@@ -173,7 +176,7 @@ export function createAgentsServer(env: Record<string, string | undefined> = pro
       codexBin: env.CODEX_BIN ?? "codex",
       cwd: repoDir,
       env: childEnv,
-      sandbox: "read-only",
+      sandbox: trustedWrite ? "danger-full-access" : "read-only",
       strictConfig: true,
       onStderr: async (line) => {
         appendFileSync(

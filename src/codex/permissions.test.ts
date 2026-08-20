@@ -9,7 +9,7 @@ test("defines a fail-closed Codex permission profile for every frozen task", () 
   expect(Object.keys(profiles)).toEqual([...TASKS])
   expect(
     Object.entries(profiles)
-      .filter(([, profile]) => profile.sandboxMode === "workspace-write")
+      .filter(([, profile]) => profile.sandboxMode === "danger-full-access")
       .map(([task]) => task),
   ).toEqual(["engage", "lgtm_merge", "ci_fix", "reaction_execute", "manual", "dispatch"])
   expect(profiles.pr_opened).toMatchObject({
@@ -18,7 +18,7 @@ test("defines a fail-closed Codex permission profile for every frozen task", () 
     approvalPolicy: "never",
   })
   expect(profiles.lgtm_merge).toMatchObject({
-    sandboxMode: "workspace-write",
+    sandboxMode: "danger-full-access",
     allowRepositoryMutation: true,
     allowShell: true,
     hasWriteToken: true,

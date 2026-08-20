@@ -22,7 +22,7 @@ interface Case {
   task: Task
   canWrite: boolean
   isFork: boolean
-  sandbox: "read-only" | "workspace-write"
+  sandbox: "read-only" | "danger-full-access"
   shell: boolean
   writeToken: boolean
   prompt: RegExp
@@ -35,7 +35,7 @@ const cases: Case[] = [
     eventName: "issue_comment",
     event: { action: "created", comment: { id: 10, body: "please fix", user: { login: "alice" } }, issue: { number: 9, pull_request: {} } },
     members: ["alice"], prInfo: sameRepo, task: "engage", canWrite: true, isFork: false,
-    sandbox: "workspace-write", shell: true, writeToken: true, prompt: /member=1, fork=0/,
+    sandbox: "danger-full-access", shell: true, writeToken: true, prompt: /member=1, fork=0/,
     env: { BOT_PR_NUMBER: "9", BOT_TARGET_BRANCH: "feature", BOT_PR_IS_FORK: "0" },
   },
   {
@@ -67,7 +67,7 @@ const cases: Case[] = [
     eventName: "workflow_run",
     event: { workflow_run: { conclusion: "failure", name: "CI", id: 123, head_sha: "sha-1", head_branch: "feature" } },
     prForSha: 9, prInfo: sameRepo, task: "ci_fix", canWrite: true, isFork: false,
-    sandbox: "workspace-write", shell: true, writeToken: true, prompt: /associated PR: '9'/,
+    sandbox: "danger-full-access", shell: true, writeToken: true, prompt: /associated PR: '9'/,
     env: { BOT_RUN_ID: "123", BOT_HEAD_SHA: "sha-1", BOT_TARGET_BRANCH: "feature" },
   },
   {
@@ -90,7 +90,7 @@ const cases: Case[] = [
     eventName: "schedule", event: { schedule: "*/10 * * * *" },
     rocket: { issueNumber: 5, commentId: 77, reactor: "alice" },
     task: "reaction_execute", canWrite: true, isFork: false,
-    sandbox: "workspace-write", shell: true, writeToken: true, prompt: /plan comment 77 on issue #5/,
+    sandbox: "danger-full-access", shell: true, writeToken: true, prompt: /plan comment 77 on issue #5/,
     env: { BOT_ISSUE_NUMBER: "5", BOT_PLAN_COMMENT_ID: "77", BOT_TARGET_BRANCH: "dev" },
   },
   {
@@ -104,7 +104,7 @@ const cases: Case[] = [
     name: "explicit dispatch can write repository but gets manual prompt",
     eventName: "workflow_dispatch", event: {}, dispatch: { task: "dispatch", prompt: "operate", branch: "release", canWrite: "1" },
     task: "dispatch", canWrite: true, isFork: false,
-    sandbox: "workspace-write", shell: true, writeToken: true, prompt: /TASK: manual dispatch.*operate/,
+    sandbox: "danger-full-access", shell: true, writeToken: true, prompt: /TASK: manual dispatch.*operate/,
     env: { BOT_TARGET_BRANCH: "release", BOT_CAN_WRITE: "1" },
   },
 ]

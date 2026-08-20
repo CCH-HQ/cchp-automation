@@ -32,7 +32,12 @@ export function permissionForTask(input: TaskPermissionInput): TaskPermissionPro
   const reviewOnly = input.task === "pr_opened"
   return {
     task: input.task,
-    sandboxMode: allowRepositoryMutation ? "workspace-write" : "read-only",
+    // A write-capable bot must be able to update the repository's Git metadata
+    // (index, refs, and lock files) before it can push. Codex workspace-write
+    // deliberately protects `.git`, so trusted same-repository mutation tasks
+    // use the explicit full-access mode; the Git proxy still scopes network
+    // writes to the trusted repository and rotating App token.
+    sandboxMode: allowRepositoryMutation ? "danger-full-access" : "read-only",
     approvalPolicy: "never",
     allowRepositoryMutation,
     hasWriteToken: trustedWrite,

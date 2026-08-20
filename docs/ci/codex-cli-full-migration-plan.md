@@ -387,7 +387,11 @@ provider bridge 必须实现完整的双向协议转换:
 - reviewer agent: `edit`, `task`, arbitrary shell and publication tools all denied; only read/search, fixture input and artifact write API allowed。
 - planner: only `${BOT_WORKDIR}/ctx/plan.md` is writable; no repository write。
 - fork review/engage: base GitHub token, read-only Codex sandbox, no code write.
-- same-repo implementer: workspace-write only when route classifier sets `BOT_CAN_WRITE=1` and token scope is write.
+- same-repo implementer: `danger-full-access` only when route classifier sets
+  `BOT_CAN_WRITE=1` and the token scope is write. Codex `workspace-write`
+  protects `.git` metadata, which prevents a trusted CI fix from committing and
+  pushing its own changes; the Git HTTP proxy still scopes network writes to the
+  trusted repository and rotating App token.
 
 `CCHP_BOT_SMALL_MODEL` 若使用不同 provider,对应 custom agent TOML 必须同时设置 `model_provider` 和 `model`;不得错误继承 main provider。`CCHP_BOT_EXTRA_INSTRUCTIONS` 中的每一项按原顺序解析: trusted repo/local file 做 canonical path 校验后读取,HTTPS URL 以固定 timeout/size 下载到 `ctx/instructions`,记录 SHA256,并作为 untrusted supplemental context 注入。调用仓库不需要改变数组内容。
 
