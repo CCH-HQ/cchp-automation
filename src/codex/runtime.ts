@@ -367,6 +367,7 @@ export function createTerminalProgressPublisher(
       codexVersion: metadata?.runtime?.codexVersion ?? result.runtime?.codexVersion,
       executionMode: metadata?.runtime?.executionMode ?? result.runtime?.executionMode,
       cleanupOutcome: metadata?.cleanupOutcome,
+      finalMessage: result.finalMessage ? redact(result.finalMessage) : undefined,
     })
     const publishBody = async (): Promise<StickyResult | undefined> => upsertSticky(
       octokit,

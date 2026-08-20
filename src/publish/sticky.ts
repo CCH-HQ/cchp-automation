@@ -98,7 +98,14 @@ function sanitizeTerminalMessage(value: unknown): string {
   return text.trim().slice(0, 16_000)
 }
 
+function escapeTerminalDetail(value: string): string {
+  return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+}
+
+const TERMINAL_SUMMARY_COLLAPSE_THRESHOLD = 1_200
+
 export function renderTerminalProgress(task: string, terminal: TerminalProgress): string {
+  void task
   const reason = sanitizeTodo(terminal.terminalReason)
   const usage = terminal.consumedTokens == null
     ? undefined
@@ -107,22 +114,44 @@ export function renderTerminalProgress(task: string, terminal: TerminalProgress)
   const mode = terminal.executionMode === "native_v2"
     ? "native-v2"
     : terminal.executionMode === "explicit_child" ? "explicit-exec" : undefined
+  if (terminal.state === "SUCCEEDED") {
+    const summary = finalMessage || "CCHP Automation 已完成。"
+    const summaryBody = summary.length > TERMINAL_SUMMARY_COLLAPSE_THRESHOLD
+      ? [
+          "<details>",
+          "<summary><sub>运行结果摘要</sub></summary>",
+          "",
+          summary,
+          "",
+          "</details>",
+        ]
+      : summary
+    return [`### ${LOGO_HEADING} CCHP Automation`, "", summaryBody].flat().join("\n")
+  }
+
+  const details = [
+    `State: \`${sanitizeTodo(terminal.state) || "UNKNOWN"}\``,
+    `Run: \`${sanitizeTodo(terminal.runId) || "unknown"}\``,
+    ...(usage ? [`Usage: ${usage}`] : []),
+    ...(terminal.reservedTokens == null ? [] : [`Reserved: ${terminal.reservedTokens.toLocaleString("en-US")} tokens`]),
+    ...(terminal.responsesInFlight == null ? [] : [`In flight: ${terminal.responsesInFlight.toLocaleString("en-US")} responses`]),
+    ...(terminal.codexVersion ? [`Codex: \`${sanitizeTodo(terminal.codexVersion)}\``] : []),
+    ...(mode ? [`Mode: \`${mode}\``] : []),
+    ...(terminal.cleanupOutcome ? [`Cleanup: \`${sanitizeTodo(terminal.cleanupOutcome)}\``] : []),
+    ...(reason ? [`Reason: ${reason}`] : []),
+    ...(finalMessage ? [`Response: ${finalMessage}`] : []),
+  ].map(escapeTerminalDetail)
   return [
-    `### ${LOGO_HEADING} Run complete — \`${sanitizeTaskName(task)}\``,
+    `### ${LOGO_HEADING} CCHP Automation`,
     "",
-    `**State:** \`${sanitizeTodo(terminal.state) || "UNKNOWN"}\``,
-    `**Run:** \`${sanitizeTodo(terminal.runId) || "unknown"}\``,
-    ...(usage ? [`**Usage:** ${usage}`] : []),
-    ...(terminal.reservedTokens == null ? [] : [`**Reserved:** ${terminal.reservedTokens.toLocaleString("en-US")} tokens`]),
-    ...(terminal.responsesInFlight == null ? [] : [`**In flight:** ${terminal.responsesInFlight.toLocaleString("en-US")} responses`]),
-    ...(terminal.codexVersion ? [`**Codex:** \`${sanitizeTodo(terminal.codexVersion)}\``] : []),
-    ...(mode ? [`**Mode:** \`${mode}\``] : []),
-    ...(terminal.cleanupOutcome ? [`**Cleanup:** \`${sanitizeTodo(terminal.cleanupOutcome)}\``] : []),
-    ...(reason ? ["", `**Result:** ${reason}`] : []),
-    ...(finalMessage ? ["", "**Response:**", "", finalMessage] : []),
+    "CCHP Automation 遇到了内部错误。",
     "",
-    "---",
-    `<sub>${BRAND_FOOTER_PREFIX} · Final status from the CCHP supervisor.</sub>`,
+    "<details>",
+    "<summary><sub>技术细节</sub></summary>",
+    "",
+    `<sub>${details.join("<br>\n")}</sub>`,
+    "",
+    "</details>",
   ].join("\n")
 }
 

@@ -346,10 +346,11 @@ test("terminal progress replaces the task sticky only while the trusted PR head 
   })).toBe(true)
   expect(calls).toHaveLength(1)
   expect(calls[0]!.comment_id).toBe(9)
-  expect(String(calls[0]!.body)).toContain("Run complete — `pr_opened`")
+  expect(String(calls[0]!.body)).toContain("CCHP Automation 遇到了内部错误。")
+  expect(String(calls[0]!.body)).toContain("<details>")
   expect(String(calls[0]!.body)).toContain("<!-- cchp-bot:progress:pr_opened -->")
   expect(String(calls[0]!.body)).not.toContain("ghp_runtime_secret")
-  expect(String(calls[0]!.body)).not.toContain("Deleted an inaccurate reply")
+  expect(String(calls[0]!.body)).toContain("Deleted an inaccurate reply")
 })
 
 test("repairs a late progress mutation so terminal progress remains the authoritative final write", async () => {
@@ -364,7 +365,7 @@ test("repairs a late progress mutation so terminal progress remains the authorit
         listComments: Object.assign(() => {}, { tag: "comments" }),
         updateComment: async (args: Record<string, unknown>) => {
           const body = String(args.body)
-          if (!body.includes("Run complete")) {
+          if (!body.includes("CCHP Automation")) {
             progressStarted()
             await progressGate
             writes.push("progress")

@@ -383,11 +383,11 @@ test("publishes the last supervisor checkpoint after a native runtime crash", as
   }, octokit)).toBe("published")
   const body = String(calls[0]!.body)
   expect(body).toContain("392,592 / 2,000,000 tokens")
-  expect(body).toContain("**Reserved:** 24,000 tokens")
-  expect(body).toContain("**In flight:** 1 responses")
-  expect(body).toContain("**Codex:** `codex-cli 0.146.0`")
-  expect(body).toContain("**Mode:** `native-v2`")
-  expect(body).toContain("**Cleanup:** `success`")
+  expect(body).toContain("Reserved: 24,000 tokens")
+  expect(body).toContain("In flight: 1 responses")
+  expect(body).toContain("Codex: `codex-cli 0.146.0`")
+  expect(body).toContain("Mode: `native-v2`")
+  expect(body).toContain("Cleanup: `success`")
 })
 
 test("updates an existing live sticky after a capability gate failure", async () => {
@@ -431,7 +431,8 @@ test("updates an existing live sticky after a capability gate failure", async ()
   }, octokit)
   expect(result).toBe("published")
   expect(calls).toHaveLength(1)
-  expect(String(calls[0]!.body)).toContain("Run complete — `pr_opened`")
+  expect(String(calls[0]!.body)).toContain("CCHP Automation 遇到了内部错误。")
+  expect(String(calls[0]!.body)).toContain("<details>")
   expect(String(calls[0]!.body)).toContain("Codex capability gate failure")
   expect(String(calls[0]!.body)).toContain("<!-- cchp-bot:progress:pr_opened -->")
 })
@@ -600,8 +601,8 @@ test("publishes metadata-only pr_opened success without finalized review evidenc
     CCHP_JOB_CANCELLED: "false",
   }, octokit)).toBe("published")
   expect(calls).toHaveLength(1)
-  expect(String(calls[0]!.body)).toContain("Run complete — `pr_opened`")
-  expect(String(calls[0]!.body)).toContain("**State:** `SUCCEEDED`")
+  expect(String(calls[0]!.body)).toContain("CCHP Automation 已完成。")
+  expect(String(calls[0]!.body)).not.toContain("**State:** `SUCCEEDED`")
   expect(String(calls[0]!.body)).toContain("<!-- cchp-bot:progress:pr_opened -->")
   expect(readWorkflowFinalization(finalizationPath).record).toMatchObject({
     resolvedState: "SUCCEEDED",

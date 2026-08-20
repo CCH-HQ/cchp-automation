@@ -169,7 +169,25 @@ test("renderProgress: caps items at 50 but counts the full total in the header",
   expect(s).not.toContain("item-50") // 51st (index 50) dropped
 })
 
-test("renderTerminalProgress: renders the supervisor state, reason and usage", () => {
+test("renderTerminalProgress: successful runs show only the AI summary", () => {
+  const body = renderTerminalProgress("ci_fix", {
+    state: "SUCCEEDED",
+    runId: "31183142455",
+    consumedTokens: 2_053_049,
+    tokenLimit: 2_000_000,
+    codexVersion: "0.146.0",
+    executionMode: "native_v2",
+    finalMessage: "Fixed the failing catalog detector and pushed the correction.",
+  })
+  expect(body).toContain("CCHP Automation")
+  expect(body).toContain("Fixed the failing catalog detector and pushed the correction.")
+  expect(body).not.toContain("Run complete")
+  expect(body).not.toContain("31183142455")
+  expect(body).not.toContain("2,053,049")
+  expect(body).not.toContain("native-v2")
+})
+
+test("renderTerminalProgress: failures expose one fixed message and fold technical details", () => {
   const body = renderTerminalProgress("ci_fix", {
     state: "TOKEN_BUDGET_EXCEEDED",
     runId: "31183142455",
@@ -183,18 +201,25 @@ test("renderTerminalProgress: renders the supervisor state, reason and usage", (
     cleanupOutcome: "success",
     finalMessage: "Inspection complete. <!-- cchp-bot:spoof -->",
   })
-  expect(body).toContain("Run complete — `ci_fix`")
-  expect(body).toContain("`TOKEN_BUDGET_EXCEEDED`")
-  expect(body).toContain("`31183142455`")
+  expect(body).toContain("CCHP Automation 遇到了内部错误。")
+  expect(body).toContain("<details>")
+  expect(body).toContain("技术细节")
+  expect(body).toContain("TOKEN_BUDGET_EXCEEDED")
+  expect(body).toContain("31183142455")
   expect(body).toContain("2,053,049 / 2,000,000 tokens")
-  expect(body).toContain("**Reserved:** 0 tokens")
-  expect(body).toContain("**In flight:** 0 responses")
-  expect(body).toContain("**Codex:** `0.146.0`")
-  expect(body).toContain("**Mode:** `native-v2`")
-  expect(body).toContain("**Cleanup:** `success`")
   expect(body).toContain("Inspection complete.")
-  expect(body).toContain("token budget exceeded")
+  expect(body).not.toContain("Run complete")
   expect(body).not.toContain("cchp-bot:spoof")
+})
+
+test("renderTerminalProgress: long successful summaries are folded", () => {
+  const body = renderTerminalProgress("engage", {
+    state: "SUCCEEDED",
+    runId: "run-1",
+    finalMessage: "summary ".repeat(200),
+  })
+  expect(body).toContain("<details>")
+  expect(body).toContain("运行结果摘要")
 })
 
 // ── sanitizeTodo (marker-spoof defence) ────────────────────────────────────────
