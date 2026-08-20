@@ -54,14 +54,17 @@ the capability boundary.
 
 ## Deadlines and recovery
 
-- The reusable job timeout is 720 minutes.
-- `run-codex.sh` defaults the supervisor process timeout to 42,690 seconds,
-  leaving the supervisor's 11h50m deadline time for cleanup and durable fsync.
-- A non-timeout runtime crash may restart once only when the durable manifest
-  proves ownership of the same nonterminal root thread and run id.
-- An app-server crash may restart once inside the supervisor and must resume the
-  same thread with `thread/resume`; it never starts a second root turn.
-- Runtime or app-server restart budget exhaustion is terminal `LOST`.
+- Production runs use unlimited token, response, child, review-task, and
+  wall-clock budgets. The workflow and `run-codex.sh` do not add an outer job or
+  process timeout, and supervisor progress/deadline watchdogs are disabled for
+  the unlimited runtime path.
+- Usage accounting, reservations, provider anomaly detection, durable ledgers,
+  and terminal cleanup remain active. Unlimited means admission is never denied
+  for budget exhaustion; it does not disable integrity or ownership checks.
+- A non-timeout runtime crash is resumed when the durable manifest proves
+  ownership of the same nonterminal root thread and run id. App-server crashes
+  may be restarted repeatedly and must resume the same thread with
+  `thread/resume`; they never start a second root turn.
 - Graph edges, provider usage, TODO revisions, and provenance sequences replay
   from JSONL/JSON state and remain idempotent across process restart.
 
