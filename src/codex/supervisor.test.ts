@@ -265,6 +265,7 @@ test("bounds a stalled progress publication and still enforces the semantic dead
     stop: async () => 0,
   } as unknown as CodexAppServer
   let aborted = 0
+  let publishStarted = 0
   const supervisor = new Supervisor({
     appServer: fake,
     codexHome: join(workdir, "codex-home"),
@@ -277,6 +278,7 @@ test("bounds a stalled progress publication and still enforces the semantic dead
     modelProvider: "cchp",
     totalTokenBudget: 1_000,
     publishProgress: async (_body, signal) => await new Promise<void>((resolve) => {
+      publishStarted++
       signal?.addEventListener("abort", () => { aborted++; resolve() }, { once: true })
     }),
     deadlines: {
@@ -288,7 +290,9 @@ test("bounds a stalled progress publication and still enforces the semantic dead
     },
   })
   const started = Date.now()
-  expect(await supervisor.run()).toMatchObject({ state: "NO_PROGRESS_TIMEOUT", exitCode: 124 })
+  const run = supervisor.run()
+  await eventually(() => publishStarted > 0)
+  expect(await run).toMatchObject({ state: "NO_PROGRESS_TIMEOUT", exitCode: 124 })
   expect(Date.now() - started).toBeLessThan(300)
   expect(aborted).toBeGreaterThan(0)
   expect(readJsonl(join(workdir, "ctx", "codex", "supervisor.jsonl")).some((row) =>
