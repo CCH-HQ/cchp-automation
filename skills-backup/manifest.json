@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "note": "Trace-only backup of Agent Skills; NOT a runtime pin. Runs install latest and use this backup only for missing live skills.",
-  "generatedAt": "2026-08-05T18:17:21Z",
+  "generatedAt": "2026-09-28T10:52:59Z",
   "sourceCount": 9,
   "installFailures": 0,
   "sources": [
@@ -11,8 +11,8 @@
       "repo": "mattpocock/skills",
       "ref": "main",
       "subpath": "skills/engineering",
-      "commit": "cdef59f6e311b6c5918d7c49630b6e3ca5593ca2",
-      "fetchedAt": "2026-08-05T18:17:21Z"
+      "commit": "484efcbe67ae1e558b4df95bfc90135b7b0c9df8",
+      "fetchedAt": "2026-09-28T10:52:59Z"
     },
     {
       "id": "addyosmani-agent-skills",
@@ -20,8 +20,8 @@
       "repo": "addyosmani/agent-skills",
       "ref": "main",
       "subpath": "skills",
-      "commit": "bdf76c7c6b7b3b3e01bb15c9fdc42ac5351855c1",
-      "fetchedAt": "2026-08-05T18:17:21Z"
+      "commit": "2686b620fc1fed2e8f60c704839c766b8594c6b6",
+      "fetchedAt": "2026-09-28T10:52:59Z"
     },
     {
       "id": "samber-go-skills",
@@ -29,8 +29,8 @@
       "repo": "samber/cc-skills-golang",
       "ref": "HEAD",
       "subpath": "",
-      "commit": "3a823627c6fac359a74b82bd9b5fc8f126a0e950",
-      "fetchedAt": "2026-08-05T18:17:21Z"
+      "commit": "19a0626ae8565d27a7b7bdf59d8d99d94d7e284c",
+      "fetchedAt": "2026-09-28T10:52:59Z"
     },
     {
       "id": "vercel-react-best-practices",
@@ -38,8 +38,8 @@
       "repo": "vercel-labs/agent-skills",
       "ref": "main",
       "subpath": "skills/react-best-practices",
-      "commit": "7c180d9044c9ae2b442b567aad4e42a28dd5ed62",
-      "fetchedAt": "2026-08-05T18:17:21Z"
+      "commit": "063bee94c3f4df8453406c830b0a7df0f2860278",
+      "fetchedAt": "2026-09-28T10:52:59Z"
     },
     {
       "id": "obra-superpowers",
@@ -47,8 +47,8 @@
       "repo": "obra/Superpowers",
       "ref": "main",
       "subpath": "skills",
-      "commit": "44c9b2d6e889982ac18c27d05a19fefe335194e1",
-      "fetchedAt": "2026-08-05T18:17:21Z"
+      "commit": "8ca22dba9a94f28898bbce59f2537ff4d87c747d",
+      "fetchedAt": "2026-09-28T10:52:59Z"
     },
     {
       "id": "ataraxy-sem",
@@ -56,8 +56,8 @@
       "repo": "Ataraxy-Labs/sem",
       "ref": "main",
       "subpath": "skills/sem",
-      "commit": "11675d121d834104cf62d47b1968b8caa337be08",
-      "fetchedAt": "2026-08-05T18:17:21Z"
+      "commit": "a4a687f4815d45d17a6d1127aec9dced63cc114c",
+      "fetchedAt": "2026-09-28T10:52:59Z"
     },
     {
       "id": "anthropic-frontend-design",
@@ -65,8 +65,8 @@
       "repo": "anthropics/skills",
       "ref": "main",
       "subpath": "skills/frontend-design",
-      "commit": "b29e7cf65e5cb78a5ac33d582270551bc74a14eb",
-      "fetchedAt": "2026-08-05T18:17:21Z"
+      "commit": "33375500bcea98d610eb30ce10ac4e59b89c390d",
+      "fetchedAt": "2026-09-28T10:52:59Z"
     },
     {
       "id": "anthropic-skill-creator",
@@ -74,8 +74,8 @@
       "repo": "anthropics/skills",
       "ref": "main",
       "subpath": "skills/skill-creator",
-      "commit": "b29e7cf65e5cb78a5ac33d582270551bc74a14eb",
-      "fetchedAt": "2026-08-05T18:17:21Z"
+      "commit": "33375500bcea98d610eb30ce10ac4e59b89c390d",
+      "fetchedAt": "2026-09-28T10:52:59Z"
     },
     {
       "id": "anthropic-claude-md-improver",
@@ -84,7 +84,7 @@
       "ref": "main",
       "subpath": "plugins/claude-md-management/skills/claude-md-improver",
       "commit": "95380b3cd58f7fbf575ebda0fe291224ba028317",
-      "fetchedAt": "2026-08-05T18:17:21Z"
+      "fetchedAt": "2026-09-28T10:52:59Z"
     }
   ],
   "skills": {
@@ -93,41 +93,41 @@
       "url": "https://github.com/addyosmani/agent-skills/tree/main/skills",
       "repo": "addyosmani/agent-skills",
       "ref": "main",
-      "commit": "bdf76c7c6b7b3b3e01bb15c9fdc42ac5351855c1",
-      "fetchedAt": "2026-08-05T18:17:21Z",
+      "commit": "2686b620fc1fed2e8f60c704839c766b8594c6b6",
+      "fetchedAt": "2026-09-28T10:52:59Z",
       "skillPath": "skills/api-and-interface-design/SKILL.md",
-      "contentHash": "420b3e0ad7ecf6dfe270071eba55a223e1e57b8276ff6d5d150e71f0d484e52c",
-      "cliComputedHash": "3cf54553433e55875c664baf78f9c769820bdfac155f09bf2989d70e20e6e147"
+      "contentHash": "00fd3ab7d768c1ed0f4491adeb7cfbd160a2f94cb084f4218303ca0386442f7c",
+      "cliComputedHash": "26f5a9e7abfd332d7a2e5887cf19bddd3393f47514c379b36bf227c1f15cdec4"
     },
     "ask-matt": {
       "sourceId": "mattpocock-engineering",
       "url": "https://github.com/mattpocock/skills/tree/main/skills/engineering",
       "repo": "mattpocock/skills",
       "ref": "main",
-      "commit": "cdef59f6e311b6c5918d7c49630b6e3ca5593ca2",
-      "fetchedAt": "2026-08-05T18:17:21Z",
+      "commit": "484efcbe67ae1e558b4df95bfc90135b7b0c9df8",
+      "fetchedAt": "2026-09-28T10:52:59Z",
       "skillPath": "skills/engineering/ask-matt/SKILL.md",
-      "contentHash": "4836ce539fb28009b14b416357877ba9f13f4c945124702f4c5c107edfd70928",
-      "cliComputedHash": "b2e8ef5ffc2f142022c1e1e1bba68073f0821356a8e1cf1b23670f61d13fe50b"
+      "contentHash": "be458effa5f3640d3f97a3ad18cf006eb406544ee777e4881984d055d99a3633",
+      "cliComputedHash": "0cd14026efa0330083cbc7adf590976c162b60e02f696a8dcce96f0b4dab8a72"
     },
     "brainstorming": {
       "sourceId": "obra-superpowers",
       "url": "https://github.com/obra/Superpowers/tree/main/skills",
       "repo": "obra/Superpowers",
       "ref": "main",
-      "commit": "44c9b2d6e889982ac18c27d05a19fefe335194e1",
-      "fetchedAt": "2026-08-05T18:17:21Z",
+      "commit": "8ca22dba9a94f28898bbce59f2537ff4d87c747d",
+      "fetchedAt": "2026-09-28T10:52:59Z",
       "skillPath": "skills/brainstorming/SKILL.md",
-      "contentHash": "80a724b5a94294f7c833619455d83ebbe041cce8d9de4f96071af3489b84d475",
-      "cliComputedHash": "225b53fce53d627d3a1e94bfea84060ccdbf11a58a2d5cf11eefef89d598020e"
+      "contentHash": "a5ea2a49f1396cbc0ca681c7fab418a5fdb37fb53d9d02d86f00df28902fbe66",
+      "cliComputedHash": "b95dc657c5dd79caf7340ee6dead6faf2ce2d1cc613352a027fa8993966b41b7"
     },
     "browser-testing-with-devtools": {
       "sourceId": "addyosmani-agent-skills",
       "url": "https://github.com/addyosmani/agent-skills/tree/main/skills",
       "repo": "addyosmani/agent-skills",
       "ref": "main",
-      "commit": "bdf76c7c6b7b3b3e01bb15c9fdc42ac5351855c1",
-      "fetchedAt": "2026-08-05T18:17:21Z",
+      "commit": "2686b620fc1fed2e8f60c704839c766b8594c6b6",
+      "fetchedAt": "2026-09-28T10:52:59Z",
       "skillPath": "skills/browser-testing-with-devtools/SKILL.md",
       "contentHash": "52e977c5a000aaae075dbcfd1451030136ad93af13ce242bfac5728011c305d6",
       "cliComputedHash": "639950ea71851d9c4919608cba8b6276cd1ba30cd82acdc4949c701537eed661"
@@ -137,8 +137,8 @@
       "url": "https://github.com/addyosmani/agent-skills/tree/main/skills",
       "repo": "addyosmani/agent-skills",
       "ref": "main",
-      "commit": "bdf76c7c6b7b3b3e01bb15c9fdc42ac5351855c1",
-      "fetchedAt": "2026-08-05T18:17:21Z",
+      "commit": "2686b620fc1fed2e8f60c704839c766b8594c6b6",
+      "fetchedAt": "2026-09-28T10:52:59Z",
       "skillPath": "skills/ci-cd-and-automation/SKILL.md",
       "contentHash": "104c87006c272f7b13d106ee14c9b15db77d52377442ef2f2252ebf5ff2606ba",
       "cliComputedHash": "578b098a7d2352ccdac8b8abdc40eb6803538e81cf8382f138da6188a655087c"
@@ -149,106 +149,128 @@
       "repo": "anthropics/claude-plugins-official",
       "ref": "main",
       "commit": "95380b3cd58f7fbf575ebda0fe291224ba028317",
-      "fetchedAt": "2026-08-05T18:17:21Z",
+      "fetchedAt": "2026-09-28T10:52:59Z",
       "skillPath": "plugins/claude-md-management/skills/claude-md-improver/SKILL.md",
       "contentHash": "93687e5ecfaf79a0e68e66eaf5530d82245b35b263610d12cfd755b5d5ed3fad",
       "cliComputedHash": "d6707ed0467d9664d0f9d2c44724c8fb1814475ec6d3c62a5d54bbbe807e0775"
-    },
-    "codebase-design": {
-      "sourceId": "mattpocock-engineering",
-      "url": "https://github.com/mattpocock/skills/tree/main/skills/engineering",
-      "repo": "mattpocock/skills",
-      "ref": "main",
-      "commit": "cdef59f6e311b6c5918d7c49630b6e3ca5593ca2",
-      "fetchedAt": "2026-08-05T18:17:21Z",
-      "skillPath": "skills/engineering/codebase-design/SKILL.md",
-      "contentHash": "3d56729f322a86eeae38354ab7b12a5f30b70a07005816078953f55e37f07b0f",
-      "cliComputedHash": "6d9d51d8caa01633fd00cf87089c5618c982321f942ac69f62565dc001c6b22f"
-    },
-    "code-review": {
-      "sourceId": "mattpocock-engineering",
-      "url": "https://github.com/mattpocock/skills/tree/main/skills/engineering",
-      "repo": "mattpocock/skills",
-      "ref": "main",
-      "commit": "cdef59f6e311b6c5918d7c49630b6e3ca5593ca2",
-      "fetchedAt": "2026-08-05T18:17:21Z",
-      "skillPath": "skills/engineering/code-review/SKILL.md",
-      "contentHash": "85b6eef77ee34db129eddf7b637c08af99ae4b62b7e0c9b08a125fc9b17b5610",
-      "cliComputedHash": "56a409d679605958439d1e9ca6c11c29835a4be95584825967ea4a491803ebd2"
     },
     "code-review-and-quality": {
       "sourceId": "addyosmani-agent-skills",
       "url": "https://github.com/addyosmani/agent-skills/tree/main/skills",
       "repo": "addyosmani/agent-skills",
       "ref": "main",
-      "commit": "bdf76c7c6b7b3b3e01bb15c9fdc42ac5351855c1",
-      "fetchedAt": "2026-08-05T18:17:21Z",
+      "commit": "2686b620fc1fed2e8f60c704839c766b8594c6b6",
+      "fetchedAt": "2026-09-28T10:52:59Z",
       "skillPath": "skills/code-review-and-quality/SKILL.md",
-      "contentHash": "720bb7e7fb105e3520da83614bb0de08fa677c1e611d88314cba5ee13bd55213",
-      "cliComputedHash": "ae7a873053c84dd5a76f70c05a21efc4095017e95b8f5db778eb826809859cac"
+      "contentHash": "7585a3910ddc8c86c240276762e31324fb180f073b692937d538d1f639e3074c",
+      "cliComputedHash": "03790162b6550eddca4dc66b24ba70df417479499972abe7ccd451d191d2b0fe"
+    },
+    "code-review": {
+      "sourceId": "mattpocock-engineering",
+      "url": "https://github.com/mattpocock/skills/tree/main/skills/engineering",
+      "repo": "mattpocock/skills",
+      "ref": "main",
+      "commit": "484efcbe67ae1e558b4df95bfc90135b7b0c9df8",
+      "fetchedAt": "2026-09-28T10:52:59Z",
+      "skillPath": "skills/engineering/code-review/SKILL.md",
+      "contentHash": "2339bc537e2450d6328aa3ca9604167fd22f43618ca2ca89163aca3f6ad5ec5e",
+      "cliComputedHash": "caa9a086baaf9e0f7cd71f64edfa83da6821c05e826b083221f3d02e3d6a1905"
     },
     "code-simplification": {
       "sourceId": "addyosmani-agent-skills",
       "url": "https://github.com/addyosmani/agent-skills/tree/main/skills",
       "repo": "addyosmani/agent-skills",
       "ref": "main",
-      "commit": "bdf76c7c6b7b3b3e01bb15c9fdc42ac5351855c1",
-      "fetchedAt": "2026-08-05T18:17:21Z",
+      "commit": "2686b620fc1fed2e8f60c704839c766b8594c6b6",
+      "fetchedAt": "2026-09-28T10:52:59Z",
       "skillPath": "skills/code-simplification/SKILL.md",
       "contentHash": "cc04b3c705181988e7ae56657aac18af41876e464332415feff4f7b4776317b2",
       "cliComputedHash": "7973e746e8e2ea5004d520da970c15a106824b8d6be1bcff48908aec021f3677"
+    },
+    "codebase-design": {
+      "sourceId": "mattpocock-engineering",
+      "url": "https://github.com/mattpocock/skills/tree/main/skills/engineering",
+      "repo": "mattpocock/skills",
+      "ref": "main",
+      "commit": "484efcbe67ae1e558b4df95bfc90135b7b0c9df8",
+      "fetchedAt": "2026-09-28T10:52:59Z",
+      "skillPath": "skills/engineering/codebase-design/SKILL.md",
+      "contentHash": "460875dd7177ebc6c2e30a11eee583664543e491c78960737a70f6ca77a5fac4",
+      "cliComputedHash": "5a17552cc1482f1a40124bf4e6c9dbd90ac0dbb47e71c07d47369f9e5f2ae3b5"
+    },
+    "constraint-driven-development": {
+      "sourceId": "addyosmani-agent-skills",
+      "url": "https://github.com/addyosmani/agent-skills/tree/main/skills",
+      "repo": "addyosmani/agent-skills",
+      "ref": "main",
+      "commit": "2686b620fc1fed2e8f60c704839c766b8594c6b6",
+      "fetchedAt": "2026-09-28T10:52:59Z",
+      "skillPath": "skills/constraint-driven-development/SKILL.md",
+      "contentHash": "cc88cb052b0f2d60262dadd28ed183ac3aa3c50d25a928b702f8637f43f1728e",
+      "cliComputedHash": "b4180cd9c4ed2af6c8310c4f4e9bb5003ef8eccfe65a7f288ba7f9842dbd19a5"
     },
     "context-engineering": {
       "sourceId": "addyosmani-agent-skills",
       "url": "https://github.com/addyosmani/agent-skills/tree/main/skills",
       "repo": "addyosmani/agent-skills",
       "ref": "main",
-      "commit": "bdf76c7c6b7b3b3e01bb15c9fdc42ac5351855c1",
-      "fetchedAt": "2026-08-05T18:17:21Z",
+      "commit": "2686b620fc1fed2e8f60c704839c766b8594c6b6",
+      "fetchedAt": "2026-09-28T10:52:59Z",
       "skillPath": "skills/context-engineering/SKILL.md",
-      "contentHash": "b4b1ae0405e16d225c95917b8effb7f6b846b3ff16cdf5b0fbae7e7e8e2ed4ca",
-      "cliComputedHash": "bb8864454c5a24636cab86c4b3c4b29e7e7431c80485bfd7c9c0a19a01936510"
+      "contentHash": "7b011d7abc009ddfab4c2701218daf61051a4a58592962b30565a0df779c0daf",
+      "cliComputedHash": "807434a4b178635a5539a1da241815ba7228f00b71f8e3ccd529472ce3bcaf80"
     },
     "debugging-and-error-recovery": {
       "sourceId": "addyosmani-agent-skills",
       "url": "https://github.com/addyosmani/agent-skills/tree/main/skills",
       "repo": "addyosmani/agent-skills",
       "ref": "main",
-      "commit": "bdf76c7c6b7b3b3e01bb15c9fdc42ac5351855c1",
-      "fetchedAt": "2026-08-05T18:17:21Z",
+      "commit": "2686b620fc1fed2e8f60c704839c766b8594c6b6",
+      "fetchedAt": "2026-09-28T10:52:59Z",
       "skillPath": "skills/debugging-and-error-recovery/SKILL.md",
-      "contentHash": "219f5f97ade828d5785515960c7bc29bf17500f0600feb3c083fe59818c34946",
-      "cliComputedHash": "1a119d27e8f1d27ed6317adf3115826336491346780dcb7d7a7a7f79fe3ffe10"
+      "contentHash": "393e903d094160f27a06e07c037d6d0492ca9cac1a426fd7a00ed99ce6e766e1",
+      "cliComputedHash": "6f437bc609eb8d0dc7f4768c17c9aeb85c9c7632bc36703af9f1367ffb47237a"
     },
     "deprecation-and-migration": {
       "sourceId": "addyosmani-agent-skills",
       "url": "https://github.com/addyosmani/agent-skills/tree/main/skills",
       "repo": "addyosmani/agent-skills",
       "ref": "main",
-      "commit": "bdf76c7c6b7b3b3e01bb15c9fdc42ac5351855c1",
-      "fetchedAt": "2026-08-05T18:17:21Z",
+      "commit": "2686b620fc1fed2e8f60c704839c766b8594c6b6",
+      "fetchedAt": "2026-09-28T10:52:59Z",
       "skillPath": "skills/deprecation-and-migration/SKILL.md",
-      "contentHash": "a25c37d4524d3b5b71f359fd844089788da04d7316b17bf7269d5fa42b3bd751",
-      "cliComputedHash": "55a559781ae92cacd6b75acd509e61b577c2660212d1808da2fbb8dbadc90196"
+      "contentHash": "022d8ce48543bdded5052592c08f6f425ba437aecf47cdb9ac07b913099ccd17",
+      "cliComputedHash": "0d7b2002e250c02a260f6bc502d7a798ab8e8ca0c020c54d7b0f16053935c72c"
     },
     "diagnosing-bugs": {
       "sourceId": "mattpocock-engineering",
       "url": "https://github.com/mattpocock/skills/tree/main/skills/engineering",
       "repo": "mattpocock/skills",
       "ref": "main",
-      "commit": "cdef59f6e311b6c5918d7c49630b6e3ca5593ca2",
-      "fetchedAt": "2026-08-05T18:17:21Z",
+      "commit": "484efcbe67ae1e558b4df95bfc90135b7b0c9df8",
+      "fetchedAt": "2026-09-28T10:52:59Z",
       "skillPath": "skills/engineering/diagnosing-bugs/SKILL.md",
-      "contentHash": "0c6c5d0036251ea356bfef382fed29cc38cdbd671286086e11577c1a3f5069d3",
-      "cliComputedHash": "fd6c99466b7ba43be624e6e66ed6d7af2796ded7218f24c83820823977819e22"
+      "contentHash": "460a8d8670a26616dcded3426da0254ca8644baafa997ffe28339e3f527e5c6c",
+      "cliComputedHash": "37b5e9c624513551da790b52864dc8c84bff996a6d03a380cc6facdcc0a88354"
+    },
+    "diagnosing-superpowers": {
+      "sourceId": "obra-superpowers",
+      "url": "https://github.com/obra/Superpowers/tree/main/skills",
+      "repo": "obra/Superpowers",
+      "ref": "main",
+      "commit": "8ca22dba9a94f28898bbce59f2537ff4d87c747d",
+      "fetchedAt": "2026-09-28T10:52:59Z",
+      "skillPath": "skills/diagnosing-superpowers/SKILL.md",
+      "contentHash": "221fb3aefa4e54283715269708e03d2c3d058dbd610daab75791166a7cdb3f71",
+      "cliComputedHash": "0f33f20feb5340f7be932581880325725b0d2894e15193bffeab53ad474c3267"
     },
     "dispatching-parallel-agents": {
       "sourceId": "obra-superpowers",
       "url": "https://github.com/obra/Superpowers/tree/main/skills",
       "repo": "obra/Superpowers",
       "ref": "main",
-      "commit": "44c9b2d6e889982ac18c27d05a19fefe335194e1",
-      "fetchedAt": "2026-08-05T18:17:21Z",
+      "commit": "8ca22dba9a94f28898bbce59f2537ff4d87c747d",
+      "fetchedAt": "2026-09-28T10:52:59Z",
       "skillPath": "skills/dispatching-parallel-agents/SKILL.md",
       "contentHash": "62cea6b4ab440a6c877aa0120244374f47a16a2be2fc03bb0ba7d6efaa8159e2",
       "cliComputedHash": "b011107f17188e0b2898bb1856b5bac8b49537cc86e737c82126558a235bd62a"
@@ -258,613 +280,613 @@
       "url": "https://github.com/addyosmani/agent-skills/tree/main/skills",
       "repo": "addyosmani/agent-skills",
       "ref": "main",
-      "commit": "bdf76c7c6b7b3b3e01bb15c9fdc42ac5351855c1",
-      "fetchedAt": "2026-08-05T18:17:21Z",
+      "commit": "2686b620fc1fed2e8f60c704839c766b8594c6b6",
+      "fetchedAt": "2026-09-28T10:52:59Z",
       "skillPath": "skills/documentation-and-adrs/SKILL.md",
-      "contentHash": "e6ce5e810b9e929dbbd0ce4148364e7d6f8af189faadb92d0a3a37d7a1ab8484",
-      "cliComputedHash": "7464fd2950b99fb00bbf65cab27653e0a049eef00c98927713ffdfe232a9daa9"
+      "contentHash": "804879e79e0ce6b1bed4515da5ddae4f8ea9c123221d2303b2000aaa8fa4f40b",
+      "cliComputedHash": "f13054e8bd32a432df3e0e68240758cf61a9e8817aa8540f9d9831f427c47e0e"
     },
     "domain-modeling": {
       "sourceId": "mattpocock-engineering",
       "url": "https://github.com/mattpocock/skills/tree/main/skills/engineering",
       "repo": "mattpocock/skills",
       "ref": "main",
-      "commit": "cdef59f6e311b6c5918d7c49630b6e3ca5593ca2",
-      "fetchedAt": "2026-08-05T18:17:21Z",
+      "commit": "484efcbe67ae1e558b4df95bfc90135b7b0c9df8",
+      "fetchedAt": "2026-09-28T10:52:59Z",
       "skillPath": "skills/engineering/domain-modeling/SKILL.md",
-      "contentHash": "9dee1701147e08a0f5662d7a7c61007f4949fd1ea52ab8b0e3fddd7459bbc6f3",
-      "cliComputedHash": "363cb0f53b0b431e7c00086ad1f823500b7e1b70b5616ee969c979f0934e9e6e"
+      "contentHash": "a84b088dce732c0dbc2d3a930ac5312cfa5341370a37cbc405d19830ca1fc400",
+      "cliComputedHash": "a11713c0ff7870efa3c331b2e273f09116158485246edc89ae5088eefd1b0b48"
     },
     "doubt-driven-development": {
       "sourceId": "addyosmani-agent-skills",
       "url": "https://github.com/addyosmani/agent-skills/tree/main/skills",
       "repo": "addyosmani/agent-skills",
       "ref": "main",
-      "commit": "bdf76c7c6b7b3b3e01bb15c9fdc42ac5351855c1",
-      "fetchedAt": "2026-08-05T18:17:21Z",
+      "commit": "2686b620fc1fed2e8f60c704839c766b8594c6b6",
+      "fetchedAt": "2026-09-28T10:52:59Z",
       "skillPath": "skills/doubt-driven-development/SKILL.md",
-      "contentHash": "0e4ae808538b750844d1d6bb411690bf6dde87ca42fc4796f17637b4350adab1",
-      "cliComputedHash": "f6094460ebc9512285c85790e49f612081b9dd6a2b77d874fe2d960ef50a9ef1"
+      "contentHash": "d0ebb6e5478abd0f50efd439c48e13b404d790772bc05b92628f247b798d6884",
+      "cliComputedHash": "b13f18a68abf2a1fd0c30adeac9bec0ee551adec9f2a1dc2700f1a6e3eb48092"
     },
     "executing-plans": {
       "sourceId": "obra-superpowers",
       "url": "https://github.com/obra/Superpowers/tree/main/skills",
       "repo": "obra/Superpowers",
       "ref": "main",
-      "commit": "44c9b2d6e889982ac18c27d05a19fefe335194e1",
-      "fetchedAt": "2026-08-05T18:17:21Z",
+      "commit": "8ca22dba9a94f28898bbce59f2537ff4d87c747d",
+      "fetchedAt": "2026-09-28T10:52:59Z",
       "skillPath": "skills/executing-plans/SKILL.md",
-      "contentHash": "a522fb70aff69d01e674c92cbd9814dd31c275b2e1b95fc60609482e1703f082",
-      "cliComputedHash": "78a07800ee99a5861ae10be59d79fad085fdca10444e8aaeb2691597e357cff8"
+      "contentHash": "da8def0a00f76919f76b92535ae644155ec36f87d305b4cba504d458b6175368",
+      "cliComputedHash": "5d587b5a8ed12c3d6808bce1561d9a72eab37a9b44d51d9dff99232decaae78e"
     },
     "finishing-a-development-branch": {
       "sourceId": "obra-superpowers",
       "url": "https://github.com/obra/Superpowers/tree/main/skills",
       "repo": "obra/Superpowers",
       "ref": "main",
-      "commit": "44c9b2d6e889982ac18c27d05a19fefe335194e1",
-      "fetchedAt": "2026-08-05T18:17:21Z",
+      "commit": "8ca22dba9a94f28898bbce59f2537ff4d87c747d",
+      "fetchedAt": "2026-09-28T10:52:59Z",
       "skillPath": "skills/finishing-a-development-branch/SKILL.md",
-      "contentHash": "1a0dc9c784028ea6b7f3de82d972b5727a2b8c70ccc25dd22c4ea3aec9949f73",
-      "cliComputedHash": "a2afe045ea677114a89854f296ae57f8d34eb84864daa7b08ea9434acded724d"
+      "contentHash": "1ac29db88a574e4742626bce56d2385ac4744ae3d59e1932937f42ee8e27d563",
+      "cliComputedHash": "4f571e7befb8b0946d9d7770232c818812412e9ab1dfb811f847edfba1fc6275"
     },
     "frontend-design": {
       "sourceId": "anthropic-frontend-design",
       "url": "https://github.com/anthropics/skills/tree/main/skills/frontend-design",
       "repo": "anthropics/skills",
       "ref": "main",
-      "commit": "b29e7cf65e5cb78a5ac33d582270551bc74a14eb",
-      "fetchedAt": "2026-08-05T18:17:21Z",
+      "commit": "33375500bcea98d610eb30ce10ac4e59b89c390d",
+      "fetchedAt": "2026-09-28T10:52:59Z",
       "skillPath": "skills/frontend-design/SKILL.md",
-      "contentHash": "1c85d2efae03f05ebef44501999cefe6d294a8ad310705506fdfe08f19c36a47",
-      "cliComputedHash": "4eabc66183767153e404b39d1b839b1c37f2d82d86f0a0d7e880a579d8d62336"
+      "contentHash": "180ab393af52fde72c621db7a1236e48c3b6769682961ea8cada4d9fac454d1c",
+      "cliComputedHash": "89496d5dd00f4810205f351759594fc2742bf8eea85a2f2b2d1de59f4bd91576"
     },
     "frontend-ui-engineering": {
       "sourceId": "addyosmani-agent-skills",
       "url": "https://github.com/addyosmani/agent-skills/tree/main/skills",
       "repo": "addyosmani/agent-skills",
       "ref": "main",
-      "commit": "bdf76c7c6b7b3b3e01bb15c9fdc42ac5351855c1",
-      "fetchedAt": "2026-08-05T18:17:21Z",
+      "commit": "2686b620fc1fed2e8f60c704839c766b8594c6b6",
+      "fetchedAt": "2026-09-28T10:52:59Z",
       "skillPath": "skills/frontend-ui-engineering/SKILL.md",
-      "contentHash": "44ef6707a09b807dce42eac5e8c38a17268921640c45a2cadc89161751d729f9",
-      "cliComputedHash": "3a5d4a84e52710f2d724ff68813fba0d61db4f2a232a9d0b0050a8fec08b3e82"
+      "contentHash": "5982704f652bbdf27538d7e60c0d9f8e3229b7ce5d8d53d23d3578109d8db231",
+      "cliComputedHash": "caada020b47fb51c68ba91f9bf390745e18f9d6c17e4c251b046ba74e43343d7"
     },
     "git-workflow-and-versioning": {
       "sourceId": "addyosmani-agent-skills",
       "url": "https://github.com/addyosmani/agent-skills/tree/main/skills",
       "repo": "addyosmani/agent-skills",
       "ref": "main",
-      "commit": "bdf76c7c6b7b3b3e01bb15c9fdc42ac5351855c1",
-      "fetchedAt": "2026-08-05T18:17:21Z",
+      "commit": "2686b620fc1fed2e8f60c704839c766b8594c6b6",
+      "fetchedAt": "2026-09-28T10:52:59Z",
       "skillPath": "skills/git-workflow-and-versioning/SKILL.md",
-      "contentHash": "668eccd112f26e8f898bf87115b61046df92a9f3490e6641a6b94938d0410291",
-      "cliComputedHash": "8b53153892a21c3a486831bf608970b040ad0e9da698505af58c659242cf835c"
+      "contentHash": "25bfe940c8ca2489b534e5227ee986f0a464168990f6d7d2904f66b8ae8bd38f",
+      "cliComputedHash": "e8e0d1cc98c0a6b81d2979442ae92addae32cd5194fb5c4eac4ac5228b408770"
     },
     "golang-benchmark": {
       "sourceId": "samber-go-skills",
       "url": "https://github.com/samber/cc-skills-golang",
       "repo": "samber/cc-skills-golang",
       "ref": "HEAD",
-      "commit": "3a823627c6fac359a74b82bd9b5fc8f126a0e950",
-      "fetchedAt": "2026-08-05T18:17:21Z",
+      "commit": "19a0626ae8565d27a7b7bdf59d8d99d94d7e284c",
+      "fetchedAt": "2026-09-28T10:52:59Z",
       "skillPath": "skills/golang-benchmark/SKILL.md",
-      "contentHash": "af27be5143a13313eb615d1cc9de3cbe3a3fb338602656f183c9cc43f2d85153",
-      "cliComputedHash": "62039f51cffedd4d5a452c8d2a48ec1cd6777ec57a6aa1cd86511ebc4943c878"
+      "contentHash": "59c08c0b338f93ef39d1bd17ae235fcf89047833b62488b9898ce498a593380d",
+      "cliComputedHash": "990a156c09355a9c87c603f3ca1f43c5fd28d3c2c73ce49cf91c9446a13355e7"
     },
     "golang-cli": {
       "sourceId": "samber-go-skills",
       "url": "https://github.com/samber/cc-skills-golang",
       "repo": "samber/cc-skills-golang",
       "ref": "HEAD",
-      "commit": "3a823627c6fac359a74b82bd9b5fc8f126a0e950",
-      "fetchedAt": "2026-08-05T18:17:21Z",
+      "commit": "19a0626ae8565d27a7b7bdf59d8d99d94d7e284c",
+      "fetchedAt": "2026-09-28T10:52:59Z",
       "skillPath": "skills/golang-cli/SKILL.md",
-      "contentHash": "753dd599b37c85ca70914db3672f20cdefce01344320da062d21595a7a0f46af",
-      "cliComputedHash": "1901746f0c3c32b219ee06c750e386c2bbdb76978419b8d662aad68cb6759eb6"
+      "contentHash": "7fa4f82e37ac1eaf316f50aadccba159b034d80cab8bdd1729cb000b44baa77c",
+      "cliComputedHash": "96b9f4023920ad11434d2e75895371bd583baf7e149fe1a02d45a083013313e1"
     },
     "golang-code-style": {
       "sourceId": "samber-go-skills",
       "url": "https://github.com/samber/cc-skills-golang",
       "repo": "samber/cc-skills-golang",
       "ref": "HEAD",
-      "commit": "3a823627c6fac359a74b82bd9b5fc8f126a0e950",
-      "fetchedAt": "2026-08-05T18:17:21Z",
+      "commit": "19a0626ae8565d27a7b7bdf59d8d99d94d7e284c",
+      "fetchedAt": "2026-09-28T10:52:59Z",
       "skillPath": "skills/golang-code-style/SKILL.md",
-      "contentHash": "6d6ef4e398470fd51898d769506a8c777f530f7350068bd11a97a282a2d1bf83",
-      "cliComputedHash": "1c949d9721fac34faf39e640a08c9f17b6449a64183824ac99d2e3785b1fef57"
+      "contentHash": "a9cbaf6f470d8c5a2eb6b08bfef5e931b68014223e806f3571f74d47d89ef497",
+      "cliComputedHash": "8ce09e462ef435cedc78307c124adb0c83848366b4bc51cd0942d3c79fff1e71"
     },
     "golang-concurrency": {
       "sourceId": "samber-go-skills",
       "url": "https://github.com/samber/cc-skills-golang",
       "repo": "samber/cc-skills-golang",
       "ref": "HEAD",
-      "commit": "3a823627c6fac359a74b82bd9b5fc8f126a0e950",
-      "fetchedAt": "2026-08-05T18:17:21Z",
+      "commit": "19a0626ae8565d27a7b7bdf59d8d99d94d7e284c",
+      "fetchedAt": "2026-09-28T10:52:59Z",
       "skillPath": "skills/golang-concurrency/SKILL.md",
-      "contentHash": "03a807403323f6c3a09548eeffe1601abca1de931d3bca914fadd926823a1da7",
-      "cliComputedHash": "599a74eed42371e5e82f8afe0eb42805a1807341d998c8d85cf8232303b66c46"
+      "contentHash": "0567ffb37a2e1cc1761f2f0b24dc2c2afa1de17b8938bfda2ca41de17d22b844",
+      "cliComputedHash": "f76a7af92805c94c91b7aea0f743e20c4613ca346203cbd7f0e9d296a7970385"
     },
     "golang-context": {
       "sourceId": "samber-go-skills",
       "url": "https://github.com/samber/cc-skills-golang",
       "repo": "samber/cc-skills-golang",
       "ref": "HEAD",
-      "commit": "3a823627c6fac359a74b82bd9b5fc8f126a0e950",
-      "fetchedAt": "2026-08-05T18:17:21Z",
+      "commit": "19a0626ae8565d27a7b7bdf59d8d99d94d7e284c",
+      "fetchedAt": "2026-09-28T10:52:59Z",
       "skillPath": "skills/golang-context/SKILL.md",
-      "contentHash": "99ccea9b07b8c0ee381b569af297339c96d4ba2d9dcc38e6bcf4b34d6901dfd7",
-      "cliComputedHash": "17351f3065a9857759db7f279f693eeacb9a4d6c84ddac5c9c74a08ca1d04b62"
+      "contentHash": "b5296895e02c7b93fd169fa377558d42bc5dbbc8bffe09bd3b76fcf996fce707",
+      "cliComputedHash": "5f4f7696bb5228139f200faf3918dcb8b796c94717ede72794d06e9da72f094f"
     },
     "golang-continuous-integration": {
       "sourceId": "samber-go-skills",
       "url": "https://github.com/samber/cc-skills-golang",
       "repo": "samber/cc-skills-golang",
       "ref": "HEAD",
-      "commit": "3a823627c6fac359a74b82bd9b5fc8f126a0e950",
-      "fetchedAt": "2026-08-05T18:17:21Z",
+      "commit": "19a0626ae8565d27a7b7bdf59d8d99d94d7e284c",
+      "fetchedAt": "2026-09-28T10:52:59Z",
       "skillPath": "skills/golang-continuous-integration/SKILL.md",
-      "contentHash": "9f1e4270b5b5dfbc56b99a00060f84b361ecf21cdedf034105192bc83d3a6a64",
-      "cliComputedHash": "3e05e6159414419c167712b788bf0a066818b514c3385a2907de2c33ee886f1a"
-    },
-    "golang-database": {
-      "sourceId": "samber-go-skills",
-      "url": "https://github.com/samber/cc-skills-golang",
-      "repo": "samber/cc-skills-golang",
-      "ref": "HEAD",
-      "commit": "3a823627c6fac359a74b82bd9b5fc8f126a0e950",
-      "fetchedAt": "2026-08-05T18:17:21Z",
-      "skillPath": "skills/golang-database/SKILL.md",
-      "contentHash": "257f8ab5602515d90ca3d20bd4ae79d852836d8ffe93cf62742c96988a201a22",
-      "cliComputedHash": "909e31dbc8bb6eea2851985825a81dc53e954c31e76c31bbeaa5b690ee0de9ff"
+      "contentHash": "96f706e8884c86a2478fbc87593a4c1f5b9e4d3a6a4801b627f76039a9c66f5a",
+      "cliComputedHash": "891e65e6e29d768dc56bafcaabab4ec58dcd57dd3a126a115913f3b4a4e2204a"
     },
     "golang-data-structures": {
       "sourceId": "samber-go-skills",
       "url": "https://github.com/samber/cc-skills-golang",
       "repo": "samber/cc-skills-golang",
       "ref": "HEAD",
-      "commit": "3a823627c6fac359a74b82bd9b5fc8f126a0e950",
-      "fetchedAt": "2026-08-05T18:17:21Z",
+      "commit": "19a0626ae8565d27a7b7bdf59d8d99d94d7e284c",
+      "fetchedAt": "2026-09-28T10:52:59Z",
       "skillPath": "skills/golang-data-structures/SKILL.md",
-      "contentHash": "aa9de8f0234f1b384e2ace6e69031d07b4eb5bcb6fd87fd8f362692593c4fdf8",
-      "cliComputedHash": "1fd9e735f6e30f22638fc76a0b3583e37a279d362b7ea08c7ad8a381b9c26721"
+      "contentHash": "a536afc8ef9d3529c045b3e0305bac3f3eb758a1dfca2bfaca423e3d42f20bbf",
+      "cliComputedHash": "3f4f2fc087ee3c9031e88dd5694fbede9da8d30652608143aaac6a309cf94d34"
+    },
+    "golang-database": {
+      "sourceId": "samber-go-skills",
+      "url": "https://github.com/samber/cc-skills-golang",
+      "repo": "samber/cc-skills-golang",
+      "ref": "HEAD",
+      "commit": "19a0626ae8565d27a7b7bdf59d8d99d94d7e284c",
+      "fetchedAt": "2026-09-28T10:52:59Z",
+      "skillPath": "skills/golang-database/SKILL.md",
+      "contentHash": "b227d21dd74c60416b09a2704e523ae6d83a83751af05caa57f95bdb0cc344cb",
+      "cliComputedHash": "ce43d8932ba59822fe7455a85ba20e1d861313a66d953d13476ff040a2ae9d45"
     },
     "golang-dependency-injection": {
       "sourceId": "samber-go-skills",
       "url": "https://github.com/samber/cc-skills-golang",
       "repo": "samber/cc-skills-golang",
       "ref": "HEAD",
-      "commit": "3a823627c6fac359a74b82bd9b5fc8f126a0e950",
-      "fetchedAt": "2026-08-05T18:17:21Z",
+      "commit": "19a0626ae8565d27a7b7bdf59d8d99d94d7e284c",
+      "fetchedAt": "2026-09-28T10:52:59Z",
       "skillPath": "skills/golang-dependency-injection/SKILL.md",
-      "contentHash": "c8924ab65c3d2c8589b5253aa27a0306dfdfb7f75130d126f95b7add64691b98",
-      "cliComputedHash": "ddc61a1dade6025c285a2c24e4efab2d8ee17bdc4ed0bab84663eb25fb6f03f2"
+      "contentHash": "69c19472a6ec973390003488b0abd19e68679f08c5de17c9930c73f93ff73aa2",
+      "cliComputedHash": "95f8f7860be1278ce33527f353887dc6b3c8122278d0bbe1cd0d0855bb3762bf"
     },
     "golang-dependency-management": {
       "sourceId": "samber-go-skills",
       "url": "https://github.com/samber/cc-skills-golang",
       "repo": "samber/cc-skills-golang",
       "ref": "HEAD",
-      "commit": "3a823627c6fac359a74b82bd9b5fc8f126a0e950",
-      "fetchedAt": "2026-08-05T18:17:21Z",
+      "commit": "19a0626ae8565d27a7b7bdf59d8d99d94d7e284c",
+      "fetchedAt": "2026-09-28T10:52:59Z",
       "skillPath": "skills/golang-dependency-management/SKILL.md",
-      "contentHash": "28004b9f2b6ad40ec0df00791823a6450db5eedbfd684021068e22180482765b",
-      "cliComputedHash": "2a308393ed1d6624e6c5c59a12a9aab25431d237e1e543d03aa97f1121950ab3"
+      "contentHash": "a31860c0d9423d414269c95629c651f2389b3e22b40f28d7426e673e52b93629",
+      "cliComputedHash": "263a39654c000a9406725901d482be83bedb5c87322edfe18a09a9c2bb19e7d8"
     },
     "golang-design-patterns": {
       "sourceId": "samber-go-skills",
       "url": "https://github.com/samber/cc-skills-golang",
       "repo": "samber/cc-skills-golang",
       "ref": "HEAD",
-      "commit": "3a823627c6fac359a74b82bd9b5fc8f126a0e950",
-      "fetchedAt": "2026-08-05T18:17:21Z",
+      "commit": "19a0626ae8565d27a7b7bdf59d8d99d94d7e284c",
+      "fetchedAt": "2026-09-28T10:52:59Z",
       "skillPath": "skills/golang-design-patterns/SKILL.md",
-      "contentHash": "e90eb4be29effe855ff311419f73c9b98508d1ae67541d1a33545a4f6dfa585c",
-      "cliComputedHash": "be80b0298aa92d2563dae317e4558f96f0f4990684254c41e644bf35b7c40b5e"
+      "contentHash": "cc526885c9877a966ad822de9888425e17facd1848a7b2eb3c90e8c12375ded3",
+      "cliComputedHash": "796b9e2252c844fc400a0cf59937480535d11680d3178836a4c2ec14b2f4ea4c"
     },
     "golang-documentation": {
       "sourceId": "samber-go-skills",
       "url": "https://github.com/samber/cc-skills-golang",
       "repo": "samber/cc-skills-golang",
       "ref": "HEAD",
-      "commit": "3a823627c6fac359a74b82bd9b5fc8f126a0e950",
-      "fetchedAt": "2026-08-05T18:17:21Z",
+      "commit": "19a0626ae8565d27a7b7bdf59d8d99d94d7e284c",
+      "fetchedAt": "2026-09-28T10:52:59Z",
       "skillPath": "skills/golang-documentation/SKILL.md",
-      "contentHash": "c176ec5fcc642890bbaa2ee5806fd66463f8c23e3297b02f92ccb46be10c82f4",
-      "cliComputedHash": "9ac7585cd6df629c6862c68c4f65db1cb16ea73d3c6655c6fb5dacc89ac36fba"
+      "contentHash": "f57cd22a3d738cfaede2cd7889b2f83de1a42d22b0356e3e6533d0aa17c91848",
+      "cliComputedHash": "30eb4877c93ed2aa84c374d4ca130b6c5ffd8a62be581fe4a11c285787a01677"
     },
     "golang-error-handling": {
       "sourceId": "samber-go-skills",
       "url": "https://github.com/samber/cc-skills-golang",
       "repo": "samber/cc-skills-golang",
       "ref": "HEAD",
-      "commit": "3a823627c6fac359a74b82bd9b5fc8f126a0e950",
-      "fetchedAt": "2026-08-05T18:17:21Z",
+      "commit": "19a0626ae8565d27a7b7bdf59d8d99d94d7e284c",
+      "fetchedAt": "2026-09-28T10:52:59Z",
       "skillPath": "skills/golang-error-handling/SKILL.md",
-      "contentHash": "39665c6232b30832de136f45b4ed1efcd432ac5a9f2a29d1bf095227ac6da9c9",
-      "cliComputedHash": "1601d92a30a221903d024d4ad470595c3c6141d14a5b274a446394adefc83a52"
+      "contentHash": "b3a461d6960306384daa90d8e9e1788870cf51cca96bd79d5dfed361d377b39d",
+      "cliComputedHash": "7b872085d11457427db2d5559f530d9a7c4d93e09c4709a030731868084db6d3"
     },
     "golang-google-wire": {
       "sourceId": "samber-go-skills",
       "url": "https://github.com/samber/cc-skills-golang",
       "repo": "samber/cc-skills-golang",
       "ref": "HEAD",
-      "commit": "3a823627c6fac359a74b82bd9b5fc8f126a0e950",
-      "fetchedAt": "2026-08-05T18:17:21Z",
+      "commit": "19a0626ae8565d27a7b7bdf59d8d99d94d7e284c",
+      "fetchedAt": "2026-09-28T10:52:59Z",
       "skillPath": "skills/golang-google-wire/SKILL.md",
-      "contentHash": "412238ba3ece557d508e52512069bec377f241449b07681774edadb7fd926948",
-      "cliComputedHash": "809cd5676966febc7b36a09a63f37b71d7945a5ea59cc9b51c03cb9b9b1a2937"
+      "contentHash": "a561d5b4128b5eb35f9db7425c35b8ed607bac56fe51851a1af56e513c4575cc",
+      "cliComputedHash": "42ede582458c038c39c23abe155f823e0728e04c28bfab833c58fdbe611165ee"
     },
     "golang-gopls": {
       "sourceId": "samber-go-skills",
       "url": "https://github.com/samber/cc-skills-golang",
       "repo": "samber/cc-skills-golang",
       "ref": "HEAD",
-      "commit": "3a823627c6fac359a74b82bd9b5fc8f126a0e950",
-      "fetchedAt": "2026-08-05T18:17:21Z",
+      "commit": "19a0626ae8565d27a7b7bdf59d8d99d94d7e284c",
+      "fetchedAt": "2026-09-28T10:52:59Z",
       "skillPath": "skills/golang-gopls/SKILL.md",
-      "contentHash": "4311c2cf367de125efea41f29a9d606b86f8ccb63e9601953479d803a24d9030",
-      "cliComputedHash": "f92d164da860d10ca171d8127602383010be173ae8858eab92fe8b028f0e4231"
+      "contentHash": "eb813b4cf304c039707023eeac245acf0801ec6288365d86c7aae9df2db28518",
+      "cliComputedHash": "3dec70d143315f5fcb02ac6a3ca9a797bb6cdb82dd34f12be5d15282f9d0b015"
     },
     "golang-graphql": {
       "sourceId": "samber-go-skills",
       "url": "https://github.com/samber/cc-skills-golang",
       "repo": "samber/cc-skills-golang",
       "ref": "HEAD",
-      "commit": "3a823627c6fac359a74b82bd9b5fc8f126a0e950",
-      "fetchedAt": "2026-08-05T18:17:21Z",
+      "commit": "19a0626ae8565d27a7b7bdf59d8d99d94d7e284c",
+      "fetchedAt": "2026-09-28T10:52:59Z",
       "skillPath": "skills/golang-graphql/SKILL.md",
-      "contentHash": "816c20ce3c48113f5e55323c15d2c2c8cee034122964d241f6176b15a49a0a44",
-      "cliComputedHash": "11aef7592117d7cb8cc63a6e26436ae073bb0b5f9e68f996c11a1bbaa2e98c59"
+      "contentHash": "a42f992df561c70bd6d05b2197b01a00e20ed42b92117d031ff0bf3e96d3d0aa",
+      "cliComputedHash": "c6a53a277d01549c3c5b4d833c68c5d0fec9374ffd5a7e5e58c05000546edb27"
     },
     "golang-grpc": {
       "sourceId": "samber-go-skills",
       "url": "https://github.com/samber/cc-skills-golang",
       "repo": "samber/cc-skills-golang",
       "ref": "HEAD",
-      "commit": "3a823627c6fac359a74b82bd9b5fc8f126a0e950",
-      "fetchedAt": "2026-08-05T18:17:21Z",
+      "commit": "19a0626ae8565d27a7b7bdf59d8d99d94d7e284c",
+      "fetchedAt": "2026-09-28T10:52:59Z",
       "skillPath": "skills/golang-grpc/SKILL.md",
-      "contentHash": "9aae11f7936d0cbf6933058f085db4d4e955809cc65346c28376cb7f2276c222",
-      "cliComputedHash": "14355dae5b44931ecefb748b10383e55bd7a39551e804477b7207c04e3bc6f11"
+      "contentHash": "e6674662879c4193615174b8ce1988d5d88ea026f5b6f2c9044c6a95c4c5d7e0",
+      "cliComputedHash": "fc7d8796283bfea95264a37ec6208033c39fcea31affd8007574963f614e498e"
     },
     "golang-how-to": {
       "sourceId": "samber-go-skills",
       "url": "https://github.com/samber/cc-skills-golang",
       "repo": "samber/cc-skills-golang",
       "ref": "HEAD",
-      "commit": "3a823627c6fac359a74b82bd9b5fc8f126a0e950",
-      "fetchedAt": "2026-08-05T18:17:21Z",
+      "commit": "19a0626ae8565d27a7b7bdf59d8d99d94d7e284c",
+      "fetchedAt": "2026-09-28T10:52:59Z",
       "skillPath": "skills/golang-how-to/SKILL.md",
-      "contentHash": "ad4d8fa4663e5bbde5a761261775fe2b2bf14f4b7fae75db629a93aa36bf0ceb",
-      "cliComputedHash": "b0e79b814c49078ddabd93533851e745fb29f5a33afcdea0de9317ac6ebf050a"
+      "contentHash": "dd7cc7db57507a2aeabdc6f88110907b4252231fe68e7fa9c76c4e4e35facd51",
+      "cliComputedHash": "afc168dab3d9f54bd873c41f2095dd8de8d93f69dea9769962c148f8bb82dc00"
     },
     "golang-lint": {
       "sourceId": "samber-go-skills",
       "url": "https://github.com/samber/cc-skills-golang",
       "repo": "samber/cc-skills-golang",
       "ref": "HEAD",
-      "commit": "3a823627c6fac359a74b82bd9b5fc8f126a0e950",
-      "fetchedAt": "2026-08-05T18:17:21Z",
+      "commit": "19a0626ae8565d27a7b7bdf59d8d99d94d7e284c",
+      "fetchedAt": "2026-09-28T10:52:59Z",
       "skillPath": "skills/golang-lint/SKILL.md",
-      "contentHash": "89f06ada45e8bdb55216f82505cfd3a158bdc20517150d0408afb9cc63fdfe4c",
-      "cliComputedHash": "ea282d6b3a39d02fc468ef66615830de75f720c66ac72e899c4479868bea6c76"
+      "contentHash": "a8b2c802f4e4ad9ff05a2e0397081e8027ba9ccf71130010827ea05c397d4868",
+      "cliComputedHash": "386edc2ea3e124ead8c03adec369070aa569bf4fe6b0e02a5e59566a2991e665"
     },
     "golang-modernize": {
       "sourceId": "samber-go-skills",
       "url": "https://github.com/samber/cc-skills-golang",
       "repo": "samber/cc-skills-golang",
       "ref": "HEAD",
-      "commit": "3a823627c6fac359a74b82bd9b5fc8f126a0e950",
-      "fetchedAt": "2026-08-05T18:17:21Z",
+      "commit": "19a0626ae8565d27a7b7bdf59d8d99d94d7e284c",
+      "fetchedAt": "2026-09-28T10:52:59Z",
       "skillPath": "skills/golang-modernize/SKILL.md",
-      "contentHash": "79412466b1e08edec384caac93cc605d1cfc30d0134e28ff73ac81cfcd62257c",
-      "cliComputedHash": "923780b2686c61be6b39f8ab201ad6449457a718b0484cff3b115c481f06af73"
+      "contentHash": "4cc8dbcb1afc72cf25681eb711ac911f39a213c65c365a2873abf9c2c3f91c88",
+      "cliComputedHash": "658f6cd1c6aad4ebe1c15a6fe6ecfc6b7ea890f9cfdf4bc08e66e837dbc49c5a"
     },
     "golang-naming": {
       "sourceId": "samber-go-skills",
       "url": "https://github.com/samber/cc-skills-golang",
       "repo": "samber/cc-skills-golang",
       "ref": "HEAD",
-      "commit": "3a823627c6fac359a74b82bd9b5fc8f126a0e950",
-      "fetchedAt": "2026-08-05T18:17:21Z",
+      "commit": "19a0626ae8565d27a7b7bdf59d8d99d94d7e284c",
+      "fetchedAt": "2026-09-28T10:52:59Z",
       "skillPath": "skills/golang-naming/SKILL.md",
-      "contentHash": "0bc16283c3f85950f3965b11d3b53768c72b4eb5c4eca3acb4429db82daaa333",
-      "cliComputedHash": "7c2f78c3494f46599b85aa33a5b8d2b05b7d6cedf596247d862877b79d20d442"
+      "contentHash": "a310b5b8a921df4412f4824dc78831251601ba5c9b65e1ca13c394228eb74a4e",
+      "cliComputedHash": "cb920729431ee7a80a06779c4247744f778500a1f8b9fc26595c60e67c053a6f"
     },
     "golang-observability": {
       "sourceId": "samber-go-skills",
       "url": "https://github.com/samber/cc-skills-golang",
       "repo": "samber/cc-skills-golang",
       "ref": "HEAD",
-      "commit": "3a823627c6fac359a74b82bd9b5fc8f126a0e950",
-      "fetchedAt": "2026-08-05T18:17:21Z",
+      "commit": "19a0626ae8565d27a7b7bdf59d8d99d94d7e284c",
+      "fetchedAt": "2026-09-28T10:52:59Z",
       "skillPath": "skills/golang-observability/SKILL.md",
-      "contentHash": "33a61cc7a2bcad076d613d97ba10e1db2caf0a524da138c9a9ac9523effe16b2",
-      "cliComputedHash": "aa70cddb5f28db0682dce7d5327e63f1abbf48705dc61786aa13849e7781c833"
+      "contentHash": "d1a4cf914ad351ce1c20a77317e8a97203e74fa45f9d1e09353cf5064f42990d",
+      "cliComputedHash": "0fbf2e9487a4c1b82b0d32de997eb886e4a9dd7910d3c6efa835f8b439691ea7"
     },
     "golang-performance": {
       "sourceId": "samber-go-skills",
       "url": "https://github.com/samber/cc-skills-golang",
       "repo": "samber/cc-skills-golang",
       "ref": "HEAD",
-      "commit": "3a823627c6fac359a74b82bd9b5fc8f126a0e950",
-      "fetchedAt": "2026-08-05T18:17:21Z",
+      "commit": "19a0626ae8565d27a7b7bdf59d8d99d94d7e284c",
+      "fetchedAt": "2026-09-28T10:52:59Z",
       "skillPath": "skills/golang-performance/SKILL.md",
-      "contentHash": "d31568de22289b8cc1a8cd5d3f4ea8cab25629bfa1839ee16abbf25102213d6d",
-      "cliComputedHash": "56a9621bfd52c2674a27217f8e223df117b605b15fe06be8ec666c5d2c02604e"
+      "contentHash": "6b203db5a633accd97eaa7eb72fe3a884497caf6c0b0635672f9d021f48afea8",
+      "cliComputedHash": "80d84fb4b2ca42ec2ec9f177ccc9b3d183b4fa900c1d52c40fd698b8f8b46452"
     },
     "golang-pkg-go-dev": {
       "sourceId": "samber-go-skills",
       "url": "https://github.com/samber/cc-skills-golang",
       "repo": "samber/cc-skills-golang",
       "ref": "HEAD",
-      "commit": "3a823627c6fac359a74b82bd9b5fc8f126a0e950",
-      "fetchedAt": "2026-08-05T18:17:21Z",
+      "commit": "19a0626ae8565d27a7b7bdf59d8d99d94d7e284c",
+      "fetchedAt": "2026-09-28T10:52:59Z",
       "skillPath": "skills/golang-pkg-go-dev/SKILL.md",
-      "contentHash": "fe8a9440e7611a3c01d64652270fbda6257b85b3460896a6c74218c07bbcea03",
-      "cliComputedHash": "e44d5d8b5f80b272399139c3270986b484b2c45a4e3ae3381160bcb15216c231"
+      "contentHash": "f66990e2bdd8fe63722acaf78926c2ae5c037f6d4cdfeafac175488fb8ce0c5c",
+      "cliComputedHash": "715be70d7b074b612da590568c0a945b8326eba85afa89e47fcb82f9a8c79005"
     },
     "golang-popular-libraries": {
       "sourceId": "samber-go-skills",
       "url": "https://github.com/samber/cc-skills-golang",
       "repo": "samber/cc-skills-golang",
       "ref": "HEAD",
-      "commit": "3a823627c6fac359a74b82bd9b5fc8f126a0e950",
-      "fetchedAt": "2026-08-05T18:17:21Z",
+      "commit": "19a0626ae8565d27a7b7bdf59d8d99d94d7e284c",
+      "fetchedAt": "2026-09-28T10:52:59Z",
       "skillPath": "skills/golang-popular-libraries/SKILL.md",
-      "contentHash": "bfc61f7bb6df0be7388058e5a2658c5303b54a9c72e7dde77cd6d37ad40f8ced",
-      "cliComputedHash": "6c6eef244f145651f395c563ce5a392af49059e5919aa18774d25f4528ae1e88"
+      "contentHash": "1b598e46d88d014b83fd0de07ca337c25d4784adaa0cdf3415b70310e0486ae8",
+      "cliComputedHash": "e030bd4d9815a008adb8fa35cf01813ec9ed25b993097480e8a2771b99f20779"
     },
     "golang-project-layout": {
       "sourceId": "samber-go-skills",
       "url": "https://github.com/samber/cc-skills-golang",
       "repo": "samber/cc-skills-golang",
       "ref": "HEAD",
-      "commit": "3a823627c6fac359a74b82bd9b5fc8f126a0e950",
-      "fetchedAt": "2026-08-05T18:17:21Z",
+      "commit": "19a0626ae8565d27a7b7bdf59d8d99d94d7e284c",
+      "fetchedAt": "2026-09-28T10:52:59Z",
       "skillPath": "skills/golang-project-layout/SKILL.md",
-      "contentHash": "d339e913d3058b40018223cecc5ca9ad39eebf009ab5f5dca55d963f1788eebb",
-      "cliComputedHash": "4410bbe9953100fd277f6a1deb1c66d7d73c5e30217af322edf2125394940286"
+      "contentHash": "780854ae1c05b1c1b3de5531a2d8ecb41862f58713b6a7f02450ab848220d40c",
+      "cliComputedHash": "33cb4d7b0ad983e521f4b70a8d03652fbf4e4f7bf026e2ca6bf94d8475755013"
     },
     "golang-refactoring": {
       "sourceId": "samber-go-skills",
       "url": "https://github.com/samber/cc-skills-golang",
       "repo": "samber/cc-skills-golang",
       "ref": "HEAD",
-      "commit": "3a823627c6fac359a74b82bd9b5fc8f126a0e950",
-      "fetchedAt": "2026-08-05T18:17:21Z",
+      "commit": "19a0626ae8565d27a7b7bdf59d8d99d94d7e284c",
+      "fetchedAt": "2026-09-28T10:52:59Z",
       "skillPath": "skills/golang-refactoring/SKILL.md",
-      "contentHash": "17d7c61ace018ef84207af03a46a1a2a2b404d240f44a42f9a9b3552c15898c5",
-      "cliComputedHash": "2af895968756f63a123fccca14b83adf5465cb636327fc86678609082d39060b"
+      "contentHash": "edf72052bc531c4d0e09f307f05e7eebe909bd58f707566a80961a28ba092bfd",
+      "cliComputedHash": "ed5f452b21c8ad9fc48ea33b871698ebf196b64a923b9984c26f0552c59ec628"
     },
     "golang-safety": {
       "sourceId": "samber-go-skills",
       "url": "https://github.com/samber/cc-skills-golang",
       "repo": "samber/cc-skills-golang",
       "ref": "HEAD",
-      "commit": "3a823627c6fac359a74b82bd9b5fc8f126a0e950",
-      "fetchedAt": "2026-08-05T18:17:21Z",
+      "commit": "19a0626ae8565d27a7b7bdf59d8d99d94d7e284c",
+      "fetchedAt": "2026-09-28T10:52:59Z",
       "skillPath": "skills/golang-safety/SKILL.md",
-      "contentHash": "942b075d976f0416763162eaafbda023faaf909cf57fb7a984524627284952d7",
-      "cliComputedHash": "dc54b4e717130dfe632f8996d8a72b8946fa966e3711f12a49b3d6573d6df466"
+      "contentHash": "12a466b14c8fc0994c12ab0fbb76bc45e3aff15cff9b2e5c65052484b4ee59f8",
+      "cliComputedHash": "f0f2ae4454460c1df68085aac47a0ff13043d8546703ad627a703e55ace85705"
     },
     "golang-samber-do": {
       "sourceId": "samber-go-skills",
       "url": "https://github.com/samber/cc-skills-golang",
       "repo": "samber/cc-skills-golang",
       "ref": "HEAD",
-      "commit": "3a823627c6fac359a74b82bd9b5fc8f126a0e950",
-      "fetchedAt": "2026-08-05T18:17:21Z",
+      "commit": "19a0626ae8565d27a7b7bdf59d8d99d94d7e284c",
+      "fetchedAt": "2026-09-28T10:52:59Z",
       "skillPath": "skills/golang-samber-do/SKILL.md",
-      "contentHash": "a8f4826866e83e840fad7e9360e9392a8745af96ff725950b6cdad5014ba18b6",
-      "cliComputedHash": "8cf10205b5922bdc9dc7162b21d741408886efc06c4ddb31f08db98230ce0832"
+      "contentHash": "d49a62de2a4f5902a414d0d712173ebcc6404bf0877ff14da6cc258a2be663df",
+      "cliComputedHash": "e122bb67d78eb352d809f89f671ecf265225b88f08619841bd1835a202d7a6ec"
     },
     "golang-samber-hot": {
       "sourceId": "samber-go-skills",
       "url": "https://github.com/samber/cc-skills-golang",
       "repo": "samber/cc-skills-golang",
       "ref": "HEAD",
-      "commit": "3a823627c6fac359a74b82bd9b5fc8f126a0e950",
-      "fetchedAt": "2026-08-05T18:17:21Z",
+      "commit": "19a0626ae8565d27a7b7bdf59d8d99d94d7e284c",
+      "fetchedAt": "2026-09-28T10:52:59Z",
       "skillPath": "skills/golang-samber-hot/SKILL.md",
-      "contentHash": "03cb4d623b88ae49b93942d32f7ada8bb66ce4f40da3c1bcc7f90f1dda1090b9",
-      "cliComputedHash": "44f0f41e90396ffd73ea5a0a973118653b579baa3f628abc032aee745b25b2e6"
+      "contentHash": "a66d3329a841f641fb0c4596892facd2e07ee3869bcd06210d6bd703d43a63f9",
+      "cliComputedHash": "87225e1b58abc90eb7c91866cd371acb10c6667833b2da65bc109e9c255fb92d"
     },
     "golang-samber-lo": {
       "sourceId": "samber-go-skills",
       "url": "https://github.com/samber/cc-skills-golang",
       "repo": "samber/cc-skills-golang",
       "ref": "HEAD",
-      "commit": "3a823627c6fac359a74b82bd9b5fc8f126a0e950",
-      "fetchedAt": "2026-08-05T18:17:21Z",
+      "commit": "19a0626ae8565d27a7b7bdf59d8d99d94d7e284c",
+      "fetchedAt": "2026-09-28T10:52:59Z",
       "skillPath": "skills/golang-samber-lo/SKILL.md",
-      "contentHash": "46a97a0963a061f7a15c34679a081cbf456cabbd816ca29e5c3fe4927068da06",
-      "cliComputedHash": "0891a177c8c6d552bb59d42b09dd39e44eb6528ed4c9ad66c8161867325eaf9a"
+      "contentHash": "91974da9bd60e3ab50cc2644e835bfef47c314c45e155f512acb1af65aeeb9e5",
+      "cliComputedHash": "ab5eebc874d97894c3636dce92bd24a3d93ae18c92193c556ccd12da75a811dc"
     },
     "golang-samber-mo": {
       "sourceId": "samber-go-skills",
       "url": "https://github.com/samber/cc-skills-golang",
       "repo": "samber/cc-skills-golang",
       "ref": "HEAD",
-      "commit": "3a823627c6fac359a74b82bd9b5fc8f126a0e950",
-      "fetchedAt": "2026-08-05T18:17:21Z",
+      "commit": "19a0626ae8565d27a7b7bdf59d8d99d94d7e284c",
+      "fetchedAt": "2026-09-28T10:52:59Z",
       "skillPath": "skills/golang-samber-mo/SKILL.md",
-      "contentHash": "801201a6dc4ae0ae3b7820f6d7d4d0d250873e07170118c6b557824ccfb6b376",
-      "cliComputedHash": "4a4eaa554c9f6c6705b9465084a94696f8e92d78f61e0093a2edc658d0f2fb4c"
+      "contentHash": "5071acfaeae73a01d5ba8c827cc27264d8e256c7d745ea40d0751f7ccd171685",
+      "cliComputedHash": "6e399bb6b2dd8f4f602406bf9b1a57e2e6a5ee2780936b77029cc2252ab16d22"
     },
     "golang-samber-oops": {
       "sourceId": "samber-go-skills",
       "url": "https://github.com/samber/cc-skills-golang",
       "repo": "samber/cc-skills-golang",
       "ref": "HEAD",
-      "commit": "3a823627c6fac359a74b82bd9b5fc8f126a0e950",
-      "fetchedAt": "2026-08-05T18:17:21Z",
+      "commit": "19a0626ae8565d27a7b7bdf59d8d99d94d7e284c",
+      "fetchedAt": "2026-09-28T10:52:59Z",
       "skillPath": "skills/golang-samber-oops/SKILL.md",
-      "contentHash": "2196e0b10da102576aaa5a041ed56a32a9af4dec52554c63af0d6a653cc2cc38",
-      "cliComputedHash": "7202aa8853513f358eda71d422dfc5f16563e3863e47de4a6e8f7e2ec05648c2"
+      "contentHash": "9334443f3ba019736a930704902410fb1f7800f3538fe298ff783f8d40eec5c5",
+      "cliComputedHash": "bfe9173caf8a7bfe1a391863e5751793739cfeac19e08191b4d48d0ca929342b"
     },
     "golang-samber-ro": {
       "sourceId": "samber-go-skills",
       "url": "https://github.com/samber/cc-skills-golang",
       "repo": "samber/cc-skills-golang",
       "ref": "HEAD",
-      "commit": "3a823627c6fac359a74b82bd9b5fc8f126a0e950",
-      "fetchedAt": "2026-08-05T18:17:21Z",
+      "commit": "19a0626ae8565d27a7b7bdf59d8d99d94d7e284c",
+      "fetchedAt": "2026-09-28T10:52:59Z",
       "skillPath": "skills/golang-samber-ro/SKILL.md",
-      "contentHash": "92ad0dc3b832dd1d121acbe5462487e4b5998ced3e12ba1c2d1ac2ab686e0b29",
-      "cliComputedHash": "4c6b5d0e6e4ba0646cad34ccf283ab91651b2310b0955e072d916d23c85d5cc1"
+      "contentHash": "214405af1b0f45fcfde0a8a0e8c3f7b07c30bf92538a53c0cc6b45af9e84e56b",
+      "cliComputedHash": "e813b5dec2bc80075e8114807026a72680f10253c9d414f19037f4ab92db65d5"
     },
     "golang-samber-slog": {
       "sourceId": "samber-go-skills",
       "url": "https://github.com/samber/cc-skills-golang",
       "repo": "samber/cc-skills-golang",
       "ref": "HEAD",
-      "commit": "3a823627c6fac359a74b82bd9b5fc8f126a0e950",
-      "fetchedAt": "2026-08-05T18:17:21Z",
+      "commit": "19a0626ae8565d27a7b7bdf59d8d99d94d7e284c",
+      "fetchedAt": "2026-09-28T10:52:59Z",
       "skillPath": "skills/golang-samber-slog/SKILL.md",
-      "contentHash": "dfef17953d4a54bba773a6d8a2d0ddb2003c85fc063dba2bc5c2480905135ec0",
-      "cliComputedHash": "baaf12a31a156c7a43988f77b6f2252827d7f9d1b155ce337cf853c82e8d14eb"
+      "contentHash": "560db1f09ef71308fb01496138e0f1c3f9978b6ed4e8662aaebe843c9745ee8b",
+      "cliComputedHash": "61dc0f9a5a8e9b0d848dbc9c6988bc549d422a6e3de32f2bae253807879b69f3"
     },
     "golang-security": {
       "sourceId": "samber-go-skills",
       "url": "https://github.com/samber/cc-skills-golang",
       "repo": "samber/cc-skills-golang",
       "ref": "HEAD",
-      "commit": "3a823627c6fac359a74b82bd9b5fc8f126a0e950",
-      "fetchedAt": "2026-08-05T18:17:21Z",
+      "commit": "19a0626ae8565d27a7b7bdf59d8d99d94d7e284c",
+      "fetchedAt": "2026-09-28T10:52:59Z",
       "skillPath": "skills/golang-security/SKILL.md",
-      "contentHash": "03fd97eebca2dda6fd5c6c0affd6bd8f8c552200d06323414c7ae2819ea39113",
-      "cliComputedHash": "ec7a8da21c7ca213783cc1631c3496c841209ba92fdf8155c1c9e45dfee38c94"
+      "contentHash": "6cdff6f92eaea2bde711f52b87b0cebbec65939ca1b7b3c79aed36fa2be135f6",
+      "cliComputedHash": "9a3ddcef7515b6be2ebe20415e4c5fb16f79f5c26b5df6c69f5b54f81e85d7a0"
     },
     "golang-spf13-cobra": {
       "sourceId": "samber-go-skills",
       "url": "https://github.com/samber/cc-skills-golang",
       "repo": "samber/cc-skills-golang",
       "ref": "HEAD",
-      "commit": "3a823627c6fac359a74b82bd9b5fc8f126a0e950",
-      "fetchedAt": "2026-08-05T18:17:21Z",
+      "commit": "19a0626ae8565d27a7b7bdf59d8d99d94d7e284c",
+      "fetchedAt": "2026-09-28T10:52:59Z",
       "skillPath": "skills/golang-spf13-cobra/SKILL.md",
-      "contentHash": "ed4a5613a7ca2dd756a8fca78ba08d714facbeca3aadaeede5268c293efbfcd2",
-      "cliComputedHash": "dcfa99ce23eef99133df4b82fd1152c9ef8e1fef8fc467db2fb8f62398f7747f"
+      "contentHash": "1d9b5c5ee8c7faeb1c06c861a37600ef9f3b85f5707b0f4c6bd5d0f66ac0a986",
+      "cliComputedHash": "7a1b81ab62e96e0af383acc78821c08fc7816cc645271a4d38fcdc6f92bdc2c0"
     },
     "golang-spf13-viper": {
       "sourceId": "samber-go-skills",
       "url": "https://github.com/samber/cc-skills-golang",
       "repo": "samber/cc-skills-golang",
       "ref": "HEAD",
-      "commit": "3a823627c6fac359a74b82bd9b5fc8f126a0e950",
-      "fetchedAt": "2026-08-05T18:17:21Z",
+      "commit": "19a0626ae8565d27a7b7bdf59d8d99d94d7e284c",
+      "fetchedAt": "2026-09-28T10:52:59Z",
       "skillPath": "skills/golang-spf13-viper/SKILL.md",
-      "contentHash": "53f609fdb211bfa71c872b796bbecfa4319cd78c21e96bb4d02ab8c5c820ec55",
-      "cliComputedHash": "505e169ef1bf75acefc2c2f8ec9c6d0f1cfc9ad48c1f14730b72359596a3b6d5"
+      "contentHash": "4d47635f5163af47582a0290949630d0c27a5cef076ae1f97d46da7e489d01ee",
+      "cliComputedHash": "d36ac4a53d978281f7657c1730bd7066be9cd452976a4b098356e7454b0316b5"
     },
     "golang-stay-updated": {
       "sourceId": "samber-go-skills",
       "url": "https://github.com/samber/cc-skills-golang",
       "repo": "samber/cc-skills-golang",
       "ref": "HEAD",
-      "commit": "3a823627c6fac359a74b82bd9b5fc8f126a0e950",
-      "fetchedAt": "2026-08-05T18:17:21Z",
+      "commit": "19a0626ae8565d27a7b7bdf59d8d99d94d7e284c",
+      "fetchedAt": "2026-09-28T10:52:59Z",
       "skillPath": "skills/golang-stay-updated/SKILL.md",
-      "contentHash": "a00768af94472fdc4d2ff1c4cf1cce3889ea77720c3610b0428e61fa2afb7f7a",
-      "cliComputedHash": "76ad4a471595b1e2ff49a1cfe3ce813e9909c0d220524a956c2fa586910ef376"
+      "contentHash": "c968918bded6d350ada4d5a263ae9ec63cbc3842e5cf5e00303d7ac0681e3660",
+      "cliComputedHash": "427efc2da438f03950525782080349921e7d491365ed21c3655aa007c35b0cf7"
     },
     "golang-stretchr-testify": {
       "sourceId": "samber-go-skills",
       "url": "https://github.com/samber/cc-skills-golang",
       "repo": "samber/cc-skills-golang",
       "ref": "HEAD",
-      "commit": "3a823627c6fac359a74b82bd9b5fc8f126a0e950",
-      "fetchedAt": "2026-08-05T18:17:21Z",
+      "commit": "19a0626ae8565d27a7b7bdf59d8d99d94d7e284c",
+      "fetchedAt": "2026-09-28T10:52:59Z",
       "skillPath": "skills/golang-stretchr-testify/SKILL.md",
-      "contentHash": "60cace45cd652c29bfcb4d536e944a22f7c121bc57beb7ea0809d0754415e0d0",
-      "cliComputedHash": "309c5ed8d19ffefe86fce6c3f950f3ef008415ac9670feedee8de852f7eba24d"
+      "contentHash": "5c16ef2637dbaf8bdbb350bc0b4bf7f67d92f2944443f0e68072ab394a4e527e",
+      "cliComputedHash": "0b7542f4a301aee1f00e638dfe790fdd419f496906da71b2fea53a3440891195"
     },
     "golang-structs-interfaces": {
       "sourceId": "samber-go-skills",
       "url": "https://github.com/samber/cc-skills-golang",
       "repo": "samber/cc-skills-golang",
       "ref": "HEAD",
-      "commit": "3a823627c6fac359a74b82bd9b5fc8f126a0e950",
-      "fetchedAt": "2026-08-05T18:17:21Z",
+      "commit": "19a0626ae8565d27a7b7bdf59d8d99d94d7e284c",
+      "fetchedAt": "2026-09-28T10:52:59Z",
       "skillPath": "skills/golang-structs-interfaces/SKILL.md",
-      "contentHash": "39fe2a84c54ac57d858bb8200da6ce07bf4dbfcb72d5a0f8c9004eed951c3cb4",
-      "cliComputedHash": "421cf8eab6c55edc0e3a47d74daaf50d5eded6c5d40fa289b1cda873bdcb8243"
+      "contentHash": "804daf9bfb3500de36c522eb2ca836b9e03336dad4e24367f86f1c7d41728c4e",
+      "cliComputedHash": "150bb7cdb43e1efab246e90d17bde6a871c2fdbbc81eb7260b9914f7d45f52ac"
     },
     "golang-swagger": {
       "sourceId": "samber-go-skills",
       "url": "https://github.com/samber/cc-skills-golang",
       "repo": "samber/cc-skills-golang",
       "ref": "HEAD",
-      "commit": "3a823627c6fac359a74b82bd9b5fc8f126a0e950",
-      "fetchedAt": "2026-08-05T18:17:21Z",
+      "commit": "19a0626ae8565d27a7b7bdf59d8d99d94d7e284c",
+      "fetchedAt": "2026-09-28T10:52:59Z",
       "skillPath": "skills/golang-swagger/SKILL.md",
-      "contentHash": "1b6514e0f045d45689ec64c186b9ea45cafe285805b1f8cd2b59fdb498c1be6a",
-      "cliComputedHash": "8b9263be170011dd5242dd31147853abdcc496fde232dba6346ae7435b523882"
+      "contentHash": "5b074a417f7ef110ba99fc831685693cd747ebe48c652fa4808cdec52c8a4119",
+      "cliComputedHash": "f4626fd952bbb2118522c3328b1e4c08a83c91fb85302cfe9e636e9ba31904e6"
     },
     "golang-testing": {
       "sourceId": "samber-go-skills",
       "url": "https://github.com/samber/cc-skills-golang",
       "repo": "samber/cc-skills-golang",
       "ref": "HEAD",
-      "commit": "3a823627c6fac359a74b82bd9b5fc8f126a0e950",
-      "fetchedAt": "2026-08-05T18:17:21Z",
+      "commit": "19a0626ae8565d27a7b7bdf59d8d99d94d7e284c",
+      "fetchedAt": "2026-09-28T10:52:59Z",
       "skillPath": "skills/golang-testing/SKILL.md",
-      "contentHash": "e7d85000f8b32877090de87167e62dd06a62145cb458abd08ae0518e4abb8700",
-      "cliComputedHash": "5149794b7adbda8f4509fad7ec13b63cbae0c4aacad915b87b324cda2be3f5ac"
+      "contentHash": "eacce27203662af8fd0438be02fe1eec4ab8dd980888be4d1806caba7661a5d5",
+      "cliComputedHash": "31b691f568f4c00d8d7bedc65a38d9966d9f3d353712929a1a8805eaa3f88b00"
     },
     "golang-troubleshooting": {
       "sourceId": "samber-go-skills",
       "url": "https://github.com/samber/cc-skills-golang",
       "repo": "samber/cc-skills-golang",
       "ref": "HEAD",
-      "commit": "3a823627c6fac359a74b82bd9b5fc8f126a0e950",
-      "fetchedAt": "2026-08-05T18:17:21Z",
+      "commit": "19a0626ae8565d27a7b7bdf59d8d99d94d7e284c",
+      "fetchedAt": "2026-09-28T10:52:59Z",
       "skillPath": "skills/golang-troubleshooting/SKILL.md",
-      "contentHash": "b498ea36e2c91f72f5630a9da1a04f26447917b2619c11a15812f0b31cc42f35",
-      "cliComputedHash": "cd547f6013dc017af54d16baf37cca1a0cac3c1db61a728b68828659aae71d55"
+      "contentHash": "683e559329c00b9e5b09f1a35cdda3cf21f6dfb9f3aebe2c2abcd7e440fae8c0",
+      "cliComputedHash": "5e754f70758a1096b9e0fd6c0b24cc2200e2808b4f0285ea8dcf2e6c4981fd2a"
     },
     "golang-uber-dig": {
       "sourceId": "samber-go-skills",
       "url": "https://github.com/samber/cc-skills-golang",
       "repo": "samber/cc-skills-golang",
       "ref": "HEAD",
-      "commit": "3a823627c6fac359a74b82bd9b5fc8f126a0e950",
-      "fetchedAt": "2026-08-05T18:17:21Z",
+      "commit": "19a0626ae8565d27a7b7bdf59d8d99d94d7e284c",
+      "fetchedAt": "2026-09-28T10:52:59Z",
       "skillPath": "skills/golang-uber-dig/SKILL.md",
-      "contentHash": "a8b4453e86944f4e806a177f5e49542240245ad06c3e9d0471ac533afc4c8ea2",
-      "cliComputedHash": "587984786422e897d253ebd76ad1278db7de1a11cec2136f2b468e828bad2f51"
+      "contentHash": "3598bbe4719fe5a60e6e9943660945cab8d36bfb981fdf5367e16c931c7f8543",
+      "cliComputedHash": "858b7261ab1ac4b5a6f8d22f17cd401b451e97483d28816a8b44afdb29e8ce11"
     },
     "golang-uber-fx": {
       "sourceId": "samber-go-skills",
       "url": "https://github.com/samber/cc-skills-golang",
       "repo": "samber/cc-skills-golang",
       "ref": "HEAD",
-      "commit": "3a823627c6fac359a74b82bd9b5fc8f126a0e950",
-      "fetchedAt": "2026-08-05T18:17:21Z",
+      "commit": "19a0626ae8565d27a7b7bdf59d8d99d94d7e284c",
+      "fetchedAt": "2026-09-28T10:52:59Z",
       "skillPath": "skills/golang-uber-fx/SKILL.md",
-      "contentHash": "014ce493a1ca0cba7be2a71376dba640820a53fc47e32d5fd9adea65e8b52510",
-      "cliComputedHash": "4b77c609828aa3de034247b1c19d2ed2230be89015cc930dfe1ee0bfe2be1b48"
+      "contentHash": "8d2906fd8ac24eca5af0c2ac9444c7a6ae8d6fbe2e7d1b0d9accb18934257d4c",
+      "cliComputedHash": "e08067cdc0bb745483dafe455d71b9f3172d5ef488be829bbce34b0526d3c541"
     },
     "grill-with-docs": {
       "sourceId": "mattpocock-engineering",
       "url": "https://github.com/mattpocock/skills/tree/main/skills/engineering",
       "repo": "mattpocock/skills",
       "ref": "main",
-      "commit": "cdef59f6e311b6c5918d7c49630b6e3ca5593ca2",
-      "fetchedAt": "2026-08-05T18:17:21Z",
+      "commit": "484efcbe67ae1e558b4df95bfc90135b7b0c9df8",
+      "fetchedAt": "2026-09-28T10:52:59Z",
       "skillPath": "skills/engineering/grill-with-docs/SKILL.md",
-      "contentHash": "274370c6b28e60dbe93f7394521a948fc09d4481531152ff4e432f4ef7b79f7d",
-      "cliComputedHash": "9c460cbd94fd3c63cdef967dbdb6e66ca687103cdc380cd37834e4d10b738f78"
+      "contentHash": "1c1b25b51130bd7bc09a13f04a1fa29bef83f3eafe0073c08d00dcc1d405d7cd",
+      "cliComputedHash": "35e62aa423aaeab6a414bcac273f56dfb17802ef2334b41b6a3b00f28196c8cf"
     },
     "idea-refine": {
       "sourceId": "addyosmani-agent-skills",
       "url": "https://github.com/addyosmani/agent-skills/tree/main/skills",
       "repo": "addyosmani/agent-skills",
       "ref": "main",
-      "commit": "bdf76c7c6b7b3b3e01bb15c9fdc42ac5351855c1",
-      "fetchedAt": "2026-08-05T18:17:21Z",
+      "commit": "2686b620fc1fed2e8f60c704839c766b8594c6b6",
+      "fetchedAt": "2026-09-28T10:52:59Z",
       "skillPath": "skills/idea-refine/SKILL.md",
       "contentHash": "830699bf4122885884bab64d8e8b6dfe571a6fd60e2c2027f2f0d225be07825c",
       "cliComputedHash": "9fc0ae5d8a074872a636d22f9c6fe71e041b86cddc9fe5af90ef654f5032ec5d"
@@ -874,8 +896,8 @@
       "url": "https://github.com/mattpocock/skills/tree/main/skills/engineering",
       "repo": "mattpocock/skills",
       "ref": "main",
-      "commit": "cdef59f6e311b6c5918d7c49630b6e3ca5593ca2",
-      "fetchedAt": "2026-08-05T18:17:21Z",
+      "commit": "484efcbe67ae1e558b4df95bfc90135b7b0c9df8",
+      "fetchedAt": "2026-09-28T10:52:59Z",
       "skillPath": "skills/engineering/implement/SKILL.md",
       "contentHash": "ea167c22cff868eb85a8b3ab5687d4a49e29342f7d403c033b0ecef2ce9cfac2",
       "cliComputedHash": "2139cfedf24791adbc839aaab6019cff158af1e28bfead020ec6e0ce01b3e74d"
@@ -885,85 +907,85 @@
       "url": "https://github.com/mattpocock/skills/tree/main/skills/engineering",
       "repo": "mattpocock/skills",
       "ref": "main",
-      "commit": "cdef59f6e311b6c5918d7c49630b6e3ca5593ca2",
-      "fetchedAt": "2026-08-05T18:17:21Z",
+      "commit": "484efcbe67ae1e558b4df95bfc90135b7b0c9df8",
+      "fetchedAt": "2026-09-28T10:52:59Z",
       "skillPath": "skills/engineering/improve-codebase-architecture/SKILL.md",
-      "contentHash": "22ea100192edd70c6c20ce4a67db5e8db89253574ef0d05b3ffc0d675984e429",
-      "cliComputedHash": "66e8a50c83c3c724fcfe0769701b665c56cec220cc4f49cc1aee8bdfc07de94a"
+      "contentHash": "6d63a61b5a16c1af17a47fce531f0cae684a9098f6265ba78164db19f981fc6a",
+      "cliComputedHash": "2449db6ab1ded9581f69fcc56c1f64818112d05e271fd4c5da23c6523f9d3d9d"
     },
     "incremental-implementation": {
       "sourceId": "addyosmani-agent-skills",
       "url": "https://github.com/addyosmani/agent-skills/tree/main/skills",
       "repo": "addyosmani/agent-skills",
       "ref": "main",
-      "commit": "bdf76c7c6b7b3b3e01bb15c9fdc42ac5351855c1",
-      "fetchedAt": "2026-08-05T18:17:21Z",
+      "commit": "2686b620fc1fed2e8f60c704839c766b8594c6b6",
+      "fetchedAt": "2026-09-28T10:52:59Z",
       "skillPath": "skills/incremental-implementation/SKILL.md",
-      "contentHash": "e420841aea7f27aa9da95db2ee4d5673f99754e4e4ca5b8b3164d9e164ac2233",
-      "cliComputedHash": "d83e705bd54b0a4b02a75cdda0a3f2a28b935286e31eb945e13aafe079c87b59"
+      "contentHash": "aa1fb3332c611f86aced134a5d061df442a2d6d98ad015965ceccd2cfd65d56d",
+      "cliComputedHash": "bb1198705f46dc9ff75fb5685a7a872de5924d743b44eb202135f5046750ab7e"
     },
     "interview-me": {
       "sourceId": "addyosmani-agent-skills",
       "url": "https://github.com/addyosmani/agent-skills/tree/main/skills",
       "repo": "addyosmani/agent-skills",
       "ref": "main",
-      "commit": "bdf76c7c6b7b3b3e01bb15c9fdc42ac5351855c1",
-      "fetchedAt": "2026-08-05T18:17:21Z",
+      "commit": "2686b620fc1fed2e8f60c704839c766b8594c6b6",
+      "fetchedAt": "2026-09-28T10:52:59Z",
       "skillPath": "skills/interview-me/SKILL.md",
-      "contentHash": "1b70686435ad7d2301dcab811256fec9bf04283dfcc24e6291fa9b0954641a3e",
-      "cliComputedHash": "efded91ac7f7626239b338ce8622afeb557151b86532b632f3c9eb5b2ff9048f"
+      "contentHash": "03042eda6ba51f7c4798adfd4edc411c0519bab39942a057f51ba13ba7cd6ec4",
+      "cliComputedHash": "4229002dd862e6e037c8a01c3e31d9af097465c58b2c3611912edb2af005f303"
     },
     "observability-and-instrumentation": {
       "sourceId": "addyosmani-agent-skills",
       "url": "https://github.com/addyosmani/agent-skills/tree/main/skills",
       "repo": "addyosmani/agent-skills",
       "ref": "main",
-      "commit": "bdf76c7c6b7b3b3e01bb15c9fdc42ac5351855c1",
-      "fetchedAt": "2026-08-05T18:17:21Z",
+      "commit": "2686b620fc1fed2e8f60c704839c766b8594c6b6",
+      "fetchedAt": "2026-09-28T10:52:59Z",
       "skillPath": "skills/observability-and-instrumentation/SKILL.md",
-      "contentHash": "105ff66d563775952257afb49615acd3f565f352dcab1808ec66edf022e9c0df",
-      "cliComputedHash": "9bfc314353e4a55d691faca5b1a894e38a9897d88aabff34ea2c6a039d86bf8d"
+      "contentHash": "eb284ada95e3754d15039d1cfe679b4c3655f638fda864cf0a7175b8fd1b46e6",
+      "cliComputedHash": "e5eba32f952a29d20c0383728a9505d0ca2a90f1d8d075603e53804b441b2dd2"
     },
     "performance-optimization": {
       "sourceId": "addyosmani-agent-skills",
       "url": "https://github.com/addyosmani/agent-skills/tree/main/skills",
       "repo": "addyosmani/agent-skills",
       "ref": "main",
-      "commit": "bdf76c7c6b7b3b3e01bb15c9fdc42ac5351855c1",
-      "fetchedAt": "2026-08-05T18:17:21Z",
+      "commit": "2686b620fc1fed2e8f60c704839c766b8594c6b6",
+      "fetchedAt": "2026-09-28T10:52:59Z",
       "skillPath": "skills/performance-optimization/SKILL.md",
-      "contentHash": "1ba9e5509bb918b7ee3f2771a9d5a0b3f93b97ab0bf1b39564bbfcc81ff344c1",
-      "cliComputedHash": "3881a49f910607b36f4fb1f9f17b4ef703293c6073986bcfa9f7839d44680aba"
+      "contentHash": "3a23e78571e0cd8641aacfcdbe5858d54cda5d91e0b1cff8aec87a11811041e6",
+      "cliComputedHash": "f0a8e3bdb9b7d199434c2a5dd7cbb7d3cf69d802029cde1ef5daa07bffa27efc"
     },
     "planning-and-task-breakdown": {
       "sourceId": "addyosmani-agent-skills",
       "url": "https://github.com/addyosmani/agent-skills/tree/main/skills",
       "repo": "addyosmani/agent-skills",
       "ref": "main",
-      "commit": "bdf76c7c6b7b3b3e01bb15c9fdc42ac5351855c1",
-      "fetchedAt": "2026-08-05T18:17:21Z",
+      "commit": "2686b620fc1fed2e8f60c704839c766b8594c6b6",
+      "fetchedAt": "2026-09-28T10:52:59Z",
       "skillPath": "skills/planning-and-task-breakdown/SKILL.md",
-      "contentHash": "c9a42f352d863756045e796e1d6c5876e22f377e936a710825c0998725400f0e",
-      "cliComputedHash": "ecc29e854ff27b26a2e6b3e4f15ec5b9bd74f65c7e434515eb0e4ac23cc6cdee"
+      "contentHash": "b877058be93335f544ab4c6a2543c46cd0974a245cdc6e32ed5eea0e81b876f6",
+      "cliComputedHash": "0dc14a1402cdabd376f2d81d2225fcb4a18ee63d58b945ff83affeb024285b8f"
     },
     "prototype": {
       "sourceId": "mattpocock-engineering",
       "url": "https://github.com/mattpocock/skills/tree/main/skills/engineering",
       "repo": "mattpocock/skills",
       "ref": "main",
-      "commit": "cdef59f6e311b6c5918d7c49630b6e3ca5593ca2",
-      "fetchedAt": "2026-08-05T18:17:21Z",
+      "commit": "484efcbe67ae1e558b4df95bfc90135b7b0c9df8",
+      "fetchedAt": "2026-09-28T10:52:59Z",
       "skillPath": "skills/engineering/prototype/SKILL.md",
-      "contentHash": "ea71282475e28c2340112b5a96d069e780a94d4e2754cb430d9443224e489cdd",
-      "cliComputedHash": "73862de6cd32acf30799bfb2220357b96c1a58ab0e3d01126b769fd659d6555a"
+      "contentHash": "9f653c42e0103b5e0181bceafbe7c6170b75d6229ddd7b9ebc2e19534ffd0c76",
+      "cliComputedHash": "d3fc74689bd993e39c44bfae510d014eecffbeec2922764b065377fd1327c0f6"
     },
     "receiving-code-review": {
       "sourceId": "obra-superpowers",
       "url": "https://github.com/obra/Superpowers/tree/main/skills",
       "repo": "obra/Superpowers",
       "ref": "main",
-      "commit": "44c9b2d6e889982ac18c27d05a19fefe335194e1",
-      "fetchedAt": "2026-08-05T18:17:21Z",
+      "commit": "8ca22dba9a94f28898bbce59f2537ff4d87c747d",
+      "fetchedAt": "2026-09-28T10:52:59Z",
       "skillPath": "skills/receiving-code-review/SKILL.md",
       "contentHash": "a2e9c70c0f2630d5a9fd57e9eebc5dbcb541281a075e1b0303ada8c9fecc1145",
       "cliComputedHash": "59361179fc9225173e0c145ffd9bafbf9fdbf8b43ce3dc308497a0b4f83a6063"
@@ -973,52 +995,52 @@
       "url": "https://github.com/obra/Superpowers/tree/main/skills",
       "repo": "obra/Superpowers",
       "ref": "main",
-      "commit": "44c9b2d6e889982ac18c27d05a19fefe335194e1",
-      "fetchedAt": "2026-08-05T18:17:21Z",
+      "commit": "8ca22dba9a94f28898bbce59f2537ff4d87c747d",
+      "fetchedAt": "2026-09-28T10:52:59Z",
       "skillPath": "skills/requesting-code-review/SKILL.md",
-      "contentHash": "f26093f72f2162e4f10d72033664a2011fcfd322415a2068b691d6d9e818afe3",
-      "cliComputedHash": "2304d2073c62eab163e04de40fe775e3d87c69c0df40cd4dc953fdb8e3205b81"
+      "contentHash": "0bc8f1bbbc6c1eb6d052db6c141eca3613c16e77780e0acaa81ee4a8dadabbdf",
+      "cliComputedHash": "2abaeac1de432c76abda0ca7ba618901d2e94f8817b3650f9c523acea2d224f5"
     },
     "research": {
       "sourceId": "mattpocock-engineering",
       "url": "https://github.com/mattpocock/skills/tree/main/skills/engineering",
       "repo": "mattpocock/skills",
       "ref": "main",
-      "commit": "cdef59f6e311b6c5918d7c49630b6e3ca5593ca2",
-      "fetchedAt": "2026-08-05T18:17:21Z",
+      "commit": "484efcbe67ae1e558b4df95bfc90135b7b0c9df8",
+      "fetchedAt": "2026-09-28T10:52:59Z",
       "skillPath": "skills/engineering/research/SKILL.md",
-      "contentHash": "62184af7954b21560d19e94637f9a29c48a0946d6f4d090cdcff531cad1e15fc",
-      "cliComputedHash": "bd3e2c6826671d82c86ed0da3dac3370ebcf63b0fe847f91bb444e1fb7dac21b"
+      "contentHash": "e45255278d5affc53e4b7e84955cd5fc749a8f4a805f47fa0bb5fefbfcac09a2",
+      "cliComputedHash": "c8c1cba327a6f824b554cd978079a3dadd7406d73174f8fb9bfef58824691970"
     },
     "resolving-merge-conflicts": {
       "sourceId": "mattpocock-engineering",
       "url": "https://github.com/mattpocock/skills/tree/main/skills/engineering",
       "repo": "mattpocock/skills",
       "ref": "main",
-      "commit": "cdef59f6e311b6c5918d7c49630b6e3ca5593ca2",
-      "fetchedAt": "2026-08-05T18:17:21Z",
+      "commit": "484efcbe67ae1e558b4df95bfc90135b7b0c9df8",
+      "fetchedAt": "2026-09-28T10:52:59Z",
       "skillPath": "skills/engineering/resolving-merge-conflicts/SKILL.md",
-      "contentHash": "aa827be0bca7db1935394c3cb5da70f95f521a749f649f834439b277acbfd63e",
-      "cliComputedHash": "28aad6f8b1b7025abc8892fa8890f68fe1533499b28a565f416b159131d22fad"
+      "contentHash": "f85d285fe54ce66e2a4d54a301aa45caf4533b743a3a3a2554447ec118ea247b",
+      "cliComputedHash": "63b2dcadbe9124caeb3448f1378286fe18dcefb2494f60e136831b8b4986ca27"
     },
     "security-and-hardening": {
       "sourceId": "addyosmani-agent-skills",
       "url": "https://github.com/addyosmani/agent-skills/tree/main/skills",
       "repo": "addyosmani/agent-skills",
       "ref": "main",
-      "commit": "bdf76c7c6b7b3b3e01bb15c9fdc42ac5351855c1",
-      "fetchedAt": "2026-08-05T18:17:21Z",
+      "commit": "2686b620fc1fed2e8f60c704839c766b8594c6b6",
+      "fetchedAt": "2026-09-28T10:52:59Z",
       "skillPath": "skills/security-and-hardening/SKILL.md",
-      "contentHash": "06419d3352b3bd7be915392780eebed95ebcd2f0bc08668be6c271aea73bdf51",
-      "cliComputedHash": "a0246e67cf8f8a18687a7736442738318b1997715fbdf53dfcf767082c51cca5"
+      "contentHash": "4ec37798ad5f00ff56c0212577c77763ce30b9ee84af5bc2b5465538d6374949",
+      "cliComputedHash": "1e0cd727cccd3c8c0834ce7722a8a2851e2e849f1352ee972f39311437b021d3"
     },
     "sem": {
       "sourceId": "ataraxy-sem",
       "url": "https://github.com/Ataraxy-Labs/sem/tree/main/skills/sem",
       "repo": "Ataraxy-Labs/sem",
       "ref": "main",
-      "commit": "11675d121d834104cf62d47b1968b8caa337be08",
-      "fetchedAt": "2026-08-05T18:17:21Z",
+      "commit": "a4a687f4815d45d17a6d1127aec9dced63cc114c",
+      "fetchedAt": "2026-09-28T10:52:59Z",
       "skillPath": "skills/sem/SKILL.md",
       "contentHash": "9375003e87410f761105654e33d45854cbc55dc937dd62961ccc38cb77ea84e7",
       "cliComputedHash": "ebcd1f2ccc8ae23f9b327dc07485edc08f73ec7bae432229dbae5f8676af3df9"
@@ -1028,30 +1050,30 @@
       "url": "https://github.com/mattpocock/skills/tree/main/skills/engineering",
       "repo": "mattpocock/skills",
       "ref": "main",
-      "commit": "cdef59f6e311b6c5918d7c49630b6e3ca5593ca2",
-      "fetchedAt": "2026-08-05T18:17:21Z",
+      "commit": "484efcbe67ae1e558b4df95bfc90135b7b0c9df8",
+      "fetchedAt": "2026-09-28T10:52:59Z",
       "skillPath": "skills/engineering/setup-matt-pocock-skills/SKILL.md",
-      "contentHash": "5c41e847c29eaaa10c337ff3ade6044e8694f5dcc4fb5578acfeb94dcc5cd92a",
-      "cliComputedHash": "f9c2b933dda18eea572e96f6ebbcd5b30e0d1bfdc074af53cc99728dc5f0bdac"
+      "contentHash": "87be115c3c20d74598ede8acccb857f8606b3645f9c3eeef19e454cd550cb5f4",
+      "cliComputedHash": "552b0f48b9fe054aa93c5d432fefbd7bd9645e3f2d20b4e22432453a81800b21"
     },
     "shipping-and-launch": {
       "sourceId": "addyosmani-agent-skills",
       "url": "https://github.com/addyosmani/agent-skills/tree/main/skills",
       "repo": "addyosmani/agent-skills",
       "ref": "main",
-      "commit": "bdf76c7c6b7b3b3e01bb15c9fdc42ac5351855c1",
-      "fetchedAt": "2026-08-05T18:17:21Z",
+      "commit": "2686b620fc1fed2e8f60c704839c766b8594c6b6",
+      "fetchedAt": "2026-09-28T10:52:59Z",
       "skillPath": "skills/shipping-and-launch/SKILL.md",
-      "contentHash": "18f9cd4674e29fc6d126352ca99790c8f9188cc66370c862fc8c53bb81c916e5",
-      "cliComputedHash": "005e89054a4bbe27e991c58aa2ddcede4285a7128eb452aaaae351832ebc8a88"
+      "contentHash": "f99f142e18194d905afed928ccf76023012ef96adde745fd08c21a3c0ddf3d51",
+      "cliComputedHash": "65a2be8a52839ec029b779eaf2b59d981fb0956e1228a87c9897f5af8b672f1a"
     },
     "skill-creator": {
       "sourceId": "anthropic-skill-creator",
       "url": "https://github.com/anthropics/skills/tree/main/skills/skill-creator",
       "repo": "anthropics/skills",
       "ref": "main",
-      "commit": "b29e7cf65e5cb78a5ac33d582270551bc74a14eb",
-      "fetchedAt": "2026-08-05T18:17:21Z",
+      "commit": "33375500bcea98d610eb30ce10ac4e59b89c390d",
+      "fetchedAt": "2026-09-28T10:52:59Z",
       "skillPath": "skills/skill-creator/SKILL.md",
       "contentHash": "c10bdfefc7026b7e92f99aa12b15fc79dc7d0024c6fc2ddd112d767fb5e3650a",
       "cliComputedHash": "5ea13a6d9f0d4bb694405d79acd00cadec0d21bb138c4dd10fcf3c500cb835c2"
@@ -1061,118 +1083,118 @@
       "url": "https://github.com/addyosmani/agent-skills/tree/main/skills",
       "repo": "addyosmani/agent-skills",
       "ref": "main",
-      "commit": "bdf76c7c6b7b3b3e01bb15c9fdc42ac5351855c1",
-      "fetchedAt": "2026-08-05T18:17:21Z",
+      "commit": "2686b620fc1fed2e8f60c704839c766b8594c6b6",
+      "fetchedAt": "2026-09-28T10:52:59Z",
       "skillPath": "skills/source-driven-development/SKILL.md",
-      "contentHash": "c2a7dd1ee6a62551e8f7e1819a43476bdece6506f5864e9ad87ba326393d1583",
-      "cliComputedHash": "235fb43569e9b21ec5d209818ff1ad3da9682be33c4e464ffa89ed348e7094a0"
+      "contentHash": "601826496658b725d0243ba325a8e032db45452698e9e9946720ecbddfd717c0",
+      "cliComputedHash": "d1923bb807f7db157a794f07a590ca639b3789b2f1a5eabef993f8df24791e2a"
     },
     "spec-driven-development": {
       "sourceId": "addyosmani-agent-skills",
       "url": "https://github.com/addyosmani/agent-skills/tree/main/skills",
       "repo": "addyosmani/agent-skills",
       "ref": "main",
-      "commit": "bdf76c7c6b7b3b3e01bb15c9fdc42ac5351855c1",
-      "fetchedAt": "2026-08-05T18:17:21Z",
+      "commit": "2686b620fc1fed2e8f60c704839c766b8594c6b6",
+      "fetchedAt": "2026-09-28T10:52:59Z",
       "skillPath": "skills/spec-driven-development/SKILL.md",
-      "contentHash": "181d4bbf8e9def925720cb0144b187b0bdf184de0832d85ce24b85307a386049",
-      "cliComputedHash": "2dee9aa940633b7b5e0f45be34839ab31c0de98d482e16772c5cd350f4b91b4b"
+      "contentHash": "32fb882fc1dfe1dedf3ef5038bcb85f100ce37647ee4767b3982ff7c7113888f",
+      "cliComputedHash": "d4dc15caa8d97749267da68676aeadff3fb5b8d9a4462664937137ac09610e4f"
     },
     "subagent-driven-development": {
       "sourceId": "obra-superpowers",
       "url": "https://github.com/obra/Superpowers/tree/main/skills",
       "repo": "obra/Superpowers",
       "ref": "main",
-      "commit": "44c9b2d6e889982ac18c27d05a19fefe335194e1",
-      "fetchedAt": "2026-08-05T18:17:21Z",
+      "commit": "8ca22dba9a94f28898bbce59f2537ff4d87c747d",
+      "fetchedAt": "2026-09-28T10:52:59Z",
       "skillPath": "skills/subagent-driven-development/SKILL.md",
-      "contentHash": "b9a3b91ba97d4970ab656832b9007e9562627f8e78400ba0352cd366d07338b7",
-      "cliComputedHash": "f32739563160d3612fe2febd0dad4a9cc8a6d1ea7dfcda59f245b3a4b968f7cf"
+      "contentHash": "9dab906f4a3cb6e7d5c758e56beba1f2389a364159d7ee919f433276688ccf6e",
+      "cliComputedHash": "d5caecf77dad1d6b86be893ce3fdeb0222921c64bb955db8b12a5780eecb4ec6"
     },
     "systematic-debugging": {
       "sourceId": "obra-superpowers",
       "url": "https://github.com/obra/Superpowers/tree/main/skills",
       "repo": "obra/Superpowers",
       "ref": "main",
-      "commit": "44c9b2d6e889982ac18c27d05a19fefe335194e1",
-      "fetchedAt": "2026-08-05T18:17:21Z",
+      "commit": "8ca22dba9a94f28898bbce59f2537ff4d87c747d",
+      "fetchedAt": "2026-09-28T10:52:59Z",
       "skillPath": "skills/systematic-debugging/SKILL.md",
-      "contentHash": "9432515996f6cf8294d5b9939150784308d45a48ffb0bd6679e67ae4d58258fd",
-      "cliComputedHash": "a2750dfbaed1690da73b120254892c4f926b4576cb82eb16fc877783941fe39b"
+      "contentHash": "4e677cd5170c5b38234d8459379a63ac83a4b7867b1d203cca5b46ce5660087f",
+      "cliComputedHash": "3589907ee34dc8b1b7223a33fac98ab841a9e42f9960ab4433a832f0c6f00be0"
     },
     "tdd": {
       "sourceId": "mattpocock-engineering",
       "url": "https://github.com/mattpocock/skills/tree/main/skills/engineering",
       "repo": "mattpocock/skills",
       "ref": "main",
-      "commit": "cdef59f6e311b6c5918d7c49630b6e3ca5593ca2",
-      "fetchedAt": "2026-08-05T18:17:21Z",
+      "commit": "484efcbe67ae1e558b4df95bfc90135b7b0c9df8",
+      "fetchedAt": "2026-09-28T10:52:59Z",
       "skillPath": "skills/engineering/tdd/SKILL.md",
-      "contentHash": "d67a2a92081da4689b627977ca59b7e6dd1c493979a41fdd99fb8dea9f52342f",
-      "cliComputedHash": "614ac2e45fb0ec02f6ce422d26bd9aa4e33aa4867323f5a3a5c0c20b96f78ff4"
+      "contentHash": "6a00e44ec8451cf2587e6d6df76061cf8f5d15d0460174010b11fb799989a396",
+      "cliComputedHash": "e753a5da75292bbe59d302d89566bc2c53d0e73944da2f0e944a7578883c07d0"
     },
     "test-driven-development": {
       "sourceId": "obra-superpowers",
       "url": "https://github.com/obra/Superpowers/tree/main/skills",
       "repo": "obra/Superpowers",
       "ref": "main",
-      "commit": "44c9b2d6e889982ac18c27d05a19fefe335194e1",
-      "fetchedAt": "2026-08-05T18:17:21Z",
+      "commit": "8ca22dba9a94f28898bbce59f2537ff4d87c747d",
+      "fetchedAt": "2026-09-28T10:52:59Z",
       "skillPath": "skills/test-driven-development/SKILL.md",
-      "contentHash": "b23b6e44500c5a101529fff13df1c60f576022c9a2fcca7a8722ad89f568bffa",
-      "cliComputedHash": "a4126a9c5f17be3c228aa9e5755898ade283448b86099f56f40852e8c14532be"
+      "contentHash": "95c46909a4d6a6e9ad3119b5b302465474d7ecab0775fc0bc3f0a447f840246b",
+      "cliComputedHash": "3cfe4ebb6fa7288f668d87880d279c8e48f7a92b63415e296857060f5ce22e05"
     },
     "to-spec": {
       "sourceId": "mattpocock-engineering",
       "url": "https://github.com/mattpocock/skills/tree/main/skills/engineering",
       "repo": "mattpocock/skills",
       "ref": "main",
-      "commit": "cdef59f6e311b6c5918d7c49630b6e3ca5593ca2",
-      "fetchedAt": "2026-08-05T18:17:21Z",
+      "commit": "484efcbe67ae1e558b4df95bfc90135b7b0c9df8",
+      "fetchedAt": "2026-09-28T10:52:59Z",
       "skillPath": "skills/engineering/to-spec/SKILL.md",
-      "contentHash": "c16fe54e68f449e336d2efe4152c804ad43c1f96477473a085d366ef342a72f7",
-      "cliComputedHash": "7e07d4cfabd1a4f61627ebe2705601784fae7b9aca7e13af3e201ace75738200"
+      "contentHash": "be2e3cc996da5b455a6630746f101bc480462c041e31d83d0912fd413ec70be5",
+      "cliComputedHash": "3fa1a0695d4ea242fae9e569e4d22aa1788623197abb33bfadafae7315789bbf"
     },
     "to-tickets": {
       "sourceId": "mattpocock-engineering",
       "url": "https://github.com/mattpocock/skills/tree/main/skills/engineering",
       "repo": "mattpocock/skills",
       "ref": "main",
-      "commit": "cdef59f6e311b6c5918d7c49630b6e3ca5593ca2",
-      "fetchedAt": "2026-08-05T18:17:21Z",
+      "commit": "484efcbe67ae1e558b4df95bfc90135b7b0c9df8",
+      "fetchedAt": "2026-09-28T10:52:59Z",
       "skillPath": "skills/engineering/to-tickets/SKILL.md",
-      "contentHash": "78ea52d1ff9696a904967dd40d05670da16b587045bbc55791e805c647d68975",
-      "cliComputedHash": "0349eee265e7005e667b4543de849672106c46d545e998f37d3319300bb07751"
+      "contentHash": "a4b39bb8659002bb91072dd3b2b132eb209b26a09b6adcd488e129b4e9b17942",
+      "cliComputedHash": "bf5e6ebcb4f1272de0c188d5b3901f265a03d1fa9935a21a7a56938e21e2e761"
     },
     "triage": {
       "sourceId": "mattpocock-engineering",
       "url": "https://github.com/mattpocock/skills/tree/main/skills/engineering",
       "repo": "mattpocock/skills",
       "ref": "main",
-      "commit": "cdef59f6e311b6c5918d7c49630b6e3ca5593ca2",
-      "fetchedAt": "2026-08-05T18:17:21Z",
+      "commit": "484efcbe67ae1e558b4df95bfc90135b7b0c9df8",
+      "fetchedAt": "2026-09-28T10:52:59Z",
       "skillPath": "skills/engineering/triage/SKILL.md",
-      "contentHash": "de9fa109b34857f1c3daa54ca02565dbcd3704b3973815b484d2c7a08b8c0d54",
-      "cliComputedHash": "1bc5349f0b61e19a6df61496b5a03d88cd69595dd303353f87945997a9e4a884"
+      "contentHash": "2fd5f6047814f3b19d52a807cf2232b347c6e20034a33ffd50659c2ef97e3070",
+      "cliComputedHash": "b954d74c219c805bf353d6642251a713c9b2e9cfdb11babfe588bcfe7dfd16d5"
     },
     "using-agent-skills": {
       "sourceId": "addyosmani-agent-skills",
       "url": "https://github.com/addyosmani/agent-skills/tree/main/skills",
       "repo": "addyosmani/agent-skills",
       "ref": "main",
-      "commit": "bdf76c7c6b7b3b3e01bb15c9fdc42ac5351855c1",
-      "fetchedAt": "2026-08-05T18:17:21Z",
+      "commit": "2686b620fc1fed2e8f60c704839c766b8594c6b6",
+      "fetchedAt": "2026-09-28T10:52:59Z",
       "skillPath": "skills/using-agent-skills/SKILL.md",
-      "contentHash": "ad13bf8d8a025815154fe729f127323c90b8c7ad870934eb7d2562eab8a36d8c",
-      "cliComputedHash": "531902008625dafa3710a5a4730766455273ad6ea9beca0b4129be9f358de61f"
+      "contentHash": "53d5df37103bd8e717764760878f0a03e1d09af18864db1d1eeb296383d8eab1",
+      "cliComputedHash": "4221dc84c943696829025a42c7961b257afdb8f1ba20af42463434a0d9c03812"
     },
     "using-git-worktrees": {
       "sourceId": "obra-superpowers",
       "url": "https://github.com/obra/Superpowers/tree/main/skills",
       "repo": "obra/Superpowers",
       "ref": "main",
-      "commit": "44c9b2d6e889982ac18c27d05a19fefe335194e1",
-      "fetchedAt": "2026-08-05T18:17:21Z",
+      "commit": "8ca22dba9a94f28898bbce59f2537ff4d87c747d",
+      "fetchedAt": "2026-09-28T10:52:59Z",
       "skillPath": "skills/using-git-worktrees/SKILL.md",
       "contentHash": "4bdf014c762f50bf52a8880e1f643a136cf9968ccd63a106b8c739a24303a0af",
       "cliComputedHash": "48c8a1040e378e0cb7208107294e3afa9067b9370c3f33b49a443eb6b7528b0d"
@@ -1182,30 +1204,30 @@
       "url": "https://github.com/obra/Superpowers/tree/main/skills",
       "repo": "obra/Superpowers",
       "ref": "main",
-      "commit": "44c9b2d6e889982ac18c27d05a19fefe335194e1",
-      "fetchedAt": "2026-08-05T18:17:21Z",
+      "commit": "8ca22dba9a94f28898bbce59f2537ff4d87c747d",
+      "fetchedAt": "2026-09-28T10:52:59Z",
       "skillPath": "skills/using-superpowers/SKILL.md",
-      "contentHash": "c470aac9a4316ecc4830fe1bc5d08913dff3a7f347504fac659f87314110ce2e",
-      "cliComputedHash": "a77a803b7fc1a19c87605cf7a5ef318c5adc233de10b9ebeecb2ee2609f5454e"
+      "contentHash": "2721b676d8f22ba66fb57d3e3c053bda49f9c2b7e14e8f3ffb51ccc9ad812c2f",
+      "cliComputedHash": "ef8670c2a2d8e2f6ed52d6f3219759903300ca13afc5ec2e25826a735112562b"
     },
     "vercel-react-best-practices": {
       "sourceId": "vercel-react-best-practices",
       "url": "https://github.com/vercel-labs/agent-skills/tree/main/skills/react-best-practices",
       "repo": "vercel-labs/agent-skills",
       "ref": "main",
-      "commit": "7c180d9044c9ae2b442b567aad4e42a28dd5ed62",
-      "fetchedAt": "2026-08-05T18:17:21Z",
+      "commit": "063bee94c3f4df8453406c830b0a7df0f2860278",
+      "fetchedAt": "2026-09-28T10:52:59Z",
       "skillPath": "skills/react-best-practices/SKILL.md",
-      "contentHash": "99c51ec5786b76eb4690ba47a2b0e06ff7a7be43057f21036fc5025f038debd9",
-      "cliComputedHash": "ca7b0c0c6e5f2750043f7f0cd72d16ac4e2abc48f9b5500d047a4b77a2506212"
+      "contentHash": "c80222f9339599002afa3a8509afcf644dfa15debff629aecf853d609ad90dfc",
+      "cliComputedHash": "3219a1944e404ffc14d1d9d6aef6dd2e3855b81387ee0a044ccbfe14d34c2357"
     },
     "verification-before-completion": {
       "sourceId": "obra-superpowers",
       "url": "https://github.com/obra/Superpowers/tree/main/skills",
       "repo": "obra/Superpowers",
       "ref": "main",
-      "commit": "44c9b2d6e889982ac18c27d05a19fefe335194e1",
-      "fetchedAt": "2026-08-05T18:17:21Z",
+      "commit": "8ca22dba9a94f28898bbce59f2537ff4d87c747d",
+      "fetchedAt": "2026-09-28T10:52:59Z",
       "skillPath": "skills/verification-before-completion/SKILL.md",
       "contentHash": "2e5c5f8225aa6e3e8ab5ce8ebff5d6f3e365c14e94dda01d6394a5b53979f960",
       "cliComputedHash": "b529822bdac4b197b180fe12225cff86b930b65910435103c10622df7f041651"
@@ -1215,44 +1237,44 @@
       "url": "https://github.com/mattpocock/skills/tree/main/skills/engineering",
       "repo": "mattpocock/skills",
       "ref": "main",
-      "commit": "cdef59f6e311b6c5918d7c49630b6e3ca5593ca2",
-      "fetchedAt": "2026-08-05T18:17:21Z",
+      "commit": "484efcbe67ae1e558b4df95bfc90135b7b0c9df8",
+      "fetchedAt": "2026-09-28T10:52:59Z",
       "skillPath": "skills/engineering/wayfinder/SKILL.md",
-      "contentHash": "d7a569fe9660764ad927f18175a5585419a159b5caf895f9a40e978839ec490a",
-      "cliComputedHash": "f343ecf46157cb645a5494644418308ad95391e9fc696faa47ae5a412bf5f6e4"
+      "contentHash": "67260d067711394e7747abf5d5e077e5435e0db32251e3794f1a107f7a625448",
+      "cliComputedHash": "fa790eb4255b13d24d7e33ff4891ccd3d621558cc0ab87ae226777538ea16a8f"
     },
     "wizard": {
       "sourceId": "mattpocock-engineering",
       "url": "https://github.com/mattpocock/skills/tree/main/skills/engineering",
       "repo": "mattpocock/skills",
       "ref": "main",
-      "commit": "cdef59f6e311b6c5918d7c49630b6e3ca5593ca2",
-      "fetchedAt": "2026-08-05T18:17:21Z",
+      "commit": "484efcbe67ae1e558b4df95bfc90135b7b0c9df8",
+      "fetchedAt": "2026-09-28T10:52:59Z",
       "skillPath": "skills/engineering/wizard/SKILL.md",
-      "contentHash": "83e689ef5d6e7252f0d334b3062da0804512f2da86bf32def208db735cd6f38e",
-      "cliComputedHash": "3cfe7e22cba6a19a8b73e3bc231970202b26db82e1ac44aa16ad592e8a1897b3"
+      "contentHash": "8ed4d0e8e54b3ac9dfee8bb57ee21a9055f68e8c7d7bf974a632b19cb15f5825",
+      "cliComputedHash": "dee7f1a523994a1e063c69fe09c2f5b4da97a41ad68107722664e6e472cb2423"
     },
     "writing-plans": {
       "sourceId": "obra-superpowers",
       "url": "https://github.com/obra/Superpowers/tree/main/skills",
       "repo": "obra/Superpowers",
       "ref": "main",
-      "commit": "44c9b2d6e889982ac18c27d05a19fefe335194e1",
-      "fetchedAt": "2026-08-05T18:17:21Z",
+      "commit": "8ca22dba9a94f28898bbce59f2537ff4d87c747d",
+      "fetchedAt": "2026-09-28T10:52:59Z",
       "skillPath": "skills/writing-plans/SKILL.md",
-      "contentHash": "41c2b4132a320a656c26aaf1371b7a317254444b1c4354658d557cea18600d45",
-      "cliComputedHash": "a8a8b0d07b744173079b25d26c6a189a0b5e7ddd80444ce92055b974dab7352b"
+      "contentHash": "1a3821c7a1e2616fb0a38cc0347c8b4c2446d321a7d4f8b25558f5d6b1c40df1",
+      "cliComputedHash": "c2647b5bf067be353a893e5a39a632cbbeb7ad81e61fa5ae227ece5490029073"
     },
     "writing-skills": {
       "sourceId": "obra-superpowers",
       "url": "https://github.com/obra/Superpowers/tree/main/skills",
       "repo": "obra/Superpowers",
       "ref": "main",
-      "commit": "44c9b2d6e889982ac18c27d05a19fefe335194e1",
-      "fetchedAt": "2026-08-05T18:17:21Z",
+      "commit": "8ca22dba9a94f28898bbce59f2537ff4d87c747d",
+      "fetchedAt": "2026-09-28T10:52:59Z",
       "skillPath": "skills/writing-skills/SKILL.md",
-      "contentHash": "ab27649c935e476aa5ec52af131c410bfc992700ad0f03852cb2e58b835e246c",
-      "cliComputedHash": "19a1223c9c174f1b4daf807417f13d53886cdc79feeb05c978129a17592f51d7"
+      "contentHash": "7b94829b4955f71d4227b263d256059cf42fa1ade3a414b485b1eae44381f720",
+      "cliComputedHash": "f06bbb471439736c838e89a57a2a371bcc687931ba878901d97373194e212ea9"
     }
   }
 }
