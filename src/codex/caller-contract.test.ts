@@ -8,7 +8,7 @@ import {
   WORKFLOW_INPUTS,
 } from "./caller-contract"
 
-test("freezes the existing reusable workflow ABI without Codex-specific caller fields", () => {
+test("freezes the existing reusable workflow ABI without runtime-specific caller fields", () => {
   expect(WORKFLOW_INPUTS).toEqual({
     default_branch: "main",
     roadmap_project: "",
@@ -142,7 +142,7 @@ test("finalizes progress for every acted workflow before cleanup", () => {
   const finalizer = workflow.indexOf("- name: Finalize progress comment")
   const freshToken = workflow.indexOf("- name: Mint App token (progress finalizer)")
   const cleanup = workflow.indexOf("- name: Cleanup isolated environment")
-  expect(finalizer).toBeGreaterThan(workflow.indexOf("- name: Run Codex supervisor"))
+  expect(finalizer).toBeGreaterThan(workflow.indexOf("- name: Run Pi supervisor"))
   expect(finalizer).toBeGreaterThan(freshToken)
   expect(cleanup).toBeGreaterThan(finalizer)
   const block = workflow.slice(freshToken, cleanup)
@@ -150,12 +150,12 @@ test("finalizes progress for every acted workflow before cleanup", () => {
   expect(block).toContain("GH_TOKEN: ${{ steps.finalizer_token.outputs.token || steps.interaction.outputs.token }}")
   expect(block).toContain("CCHP_WRITE_OUTCOME: ${{ steps.write.outcome }}")
   expect(block).toContain("CCHP_NEEDS_WRITE: ${{ steps.route.outputs.needs_write }}")
-  expect(block).toContain("CCHP_INSTALL_OUTCOME: ${{ steps.install_codex.outcome }}")
-  expect(block).toContain("CCHP_PREPARE_OUTCOME: ${{ steps.prepare_codex.outcome }}")
+  expect(block).toContain("CCHP_INSTALL_OUTCOME: ${{ steps.install_pi.outcome }}")
+  expect(block).toContain("CCHP_PREPARE_OUTCOME: ${{ steps.prepare_pi.outcome }}")
   expect(block).toContain("CCHP_SCAN_OUTCOME: ${{ steps.external_scan.outcome }}")
   expect(block).toContain("CCHP_CAPABILITY_OUTCOME: ${{ steps.capability_gate.outcome }}")
-  expect(block).toContain("CCHP_SUPERVISOR_OUTCOME: ${{ steps.codex_supervisor.outcome }}")
-  expect(block).toContain("src/codex/finalize-workflow-progress.ts")
+  expect(block).toContain("CCHP_SUPERVISOR_OUTCOME: ${{ steps.pi_supervisor.outcome }}")
+  expect(block).toContain("src/pi/finalize-workflow-progress.ts")
 })
 
 test("separates read-only routing, interaction publication, and repository write credentials", () => {

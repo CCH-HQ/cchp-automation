@@ -1,9 +1,4 @@
-# Engine self-CI: type-check + unit tests for the TypeScript/Octokit engine, plus
-# lint + security-audit gates for the reusable workflow itself. Runs on every push
-# to main and on all pull requests.
-#
-# Every third-party action is pinned to a full 40-char commit SHA with a trailing
-# `# vX.Y.Z` version comment; Renovate keeps both fresh (see /renovate.json5).
+# Engine self-CI for the Pi runtime, TypeScript engine, and reusable workflow.
 name: ci
 
 on:
@@ -11,14 +6,11 @@ on:
     branches: [main]
   pull_request:
 
-# Read-only by default; no job here pushes or comments. Verification artifacts
-# are redacted local test outputs only.
 permissions:
   contents: read
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
-  # Cancel superseded PR runs; never cancel an in-flight run on main.
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
@@ -32,7 +24,7 @@ jobs:
           persist-credentials: false
 
       - name: Install Bun
-        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c624218ae5fe3d6 # v2.2.0
         with:
           bun-version-file: .bun-version
 
@@ -45,36 +37,19 @@ jobs:
       - name: Type-check
         run: bunx tsc --noEmit
 
-      # Bash integration harnesses (whole-pipeline prompt/context/permission
-      # self-test + external-scan self-test). These guard the ultrareview
-      # constraints the consumer repo's hygiene S13 used to grep for.
-      - name: Script integration tests
+      - name: Shell integration tests
         working-directory: scripts
         run: |
           bash compact-prompt.test.sh
           bash external-scan.test.sh
-          bash prepare-codex-env.test.sh
-          bash run-codex.test.sh
+          bash install-pi.test.sh
           bash cleanup.test.sh
-          bash install-codex.test.sh
-          bash codex-capability-smoke-wrapper.test.sh
-          bash verify-capability-gate.test.sh
-          bash pre-cutover-acceptance.test.sh
-          bash codex-removal-gate.test.sh
           bash install-skills.test.sh
           bash refresh-skills-backup.test.sh
 
-  codex-contract:
-    name: Codex 0.147.0 native + explicit contract
-    # Keep the protocol/capability contract on a hosted runner so an unavailable
-    # ARC pool cannot leave the required CI check queued for a day. The actual
-    # reusable workflow remains pinned to the protected self-hosted runner in
-    # `.github/workflows/run.yml`; this job validates the portable engine seam.
-    if: >-
-      github.event_name != 'pull_request' ||
-      github.event.pull_request.head.repo.full_name == github.repository
+  pi-contract:
+    name: Pi provider, MCP, RPC and todo contract
     runs-on: ubuntu-22.04
-    timeout-minutes: 10
     steps:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -82,137 +57,18 @@ jobs:
           persist-credentials: false
 
       - name: Install Bun
-        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c624218ae5fe3d6 # v2.2.0
         with:
           bun-version-file: .bun-version
 
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
-      - name: Install pinned Codex CLI
-        run: bash scripts/install-codex.sh
+      - name: Run Pi contract tests
+        run: bun test src/pi
 
-      - name: Capability, strict-config, collaboration and credential smoke
-        working-directory: ${{ runner.temp }}
-        env:
-          CCHP_CODEX_VERSION: "0.147.0"
-          CCHP_ARTIFACT_RUN_ID: ${{ github.run_id }}-${{ github.run_attempt }}
-          CCHP_SMOKE_ARTIFACT_DIR: artifacts/codex-capability/${{ github.run_id }}-${{ github.run_attempt }}
-        run: bash ${{ github.workspace }}/scripts/codex-capability-smoke.sh
-
-      - name: Validate Codex capability evidence ownership
-        id: validate-capability-evidence
-        if: always()
-        env:
-          CCHP_ARTIFACT_RUN_ID: ${{ github.run_id }}-${{ github.run_attempt }}
-          CCHP_SMOKE_ARTIFACT_DIR: artifacts/codex-capability/${{ github.run_id }}-${{ github.run_attempt }}
-        run: |
-          node - <<'NODE'
-          const fs = require("node:fs")
-          const path = `${process.env.CCHP_SMOKE_ARTIFACT_DIR}/summary.json`
-          const summary = JSON.parse(fs.readFileSync(path, "utf8"))
-          if (summary.run_id !== process.env.CCHP_ARTIFACT_RUN_ID) throw new Error("capability evidence belongs to another run")
-          if (summary.schema_version !== 2 || summary.stage !== "completed" || summary.status !== "passed") throw new Error("capability evidence is not a complete passed run")
-          if (!summary.modes || summary.modes["explicit-exec"] !== "passed" || summary.modes["native-v2"] !== "passed") throw new Error("capability summary modes are incomplete")
-          if (!summary.workspace_write || summary.workspace_write["explicit-exec"] !== "passed" || summary.workspace_write["native-v2"] !== "passed") throw new Error("capability summary workspace-write modes are incomplete")
-          const directory = process.env.CCHP_SMOKE_ARTIFACT_DIR
-          for (const [name, mode] of [["capability-explicit-exec.json", "explicit-exec"], ["capability-native-v2.json", "native-v2"]]) {
-            const artifact = JSON.parse(fs.readFileSync(`${directory}/${name}`, "utf8"))
-            if (artifact.schema_version !== 2 || artifact.run_id !== process.env.CCHP_ARTIFACT_RUN_ID || artifact.status !== "passed" || artifact.collaborationMode !== mode) throw new Error(`invalid capability artifact ${name}`)
-            const workspace = artifact.workspace_write
-            const network = workspace?.external_network
-            const observations = network?.observations
-            const pairedNetworkValid = network?.reason !== "host-reachable-sandbox-refused" || (
-              observations?.host_before?.result === "reachable" && observations.host_before.reason === "http-response" && observations.host_before.target === "https://example.com" &&
-              observations?.host_after?.result === "reachable" && observations.host_after.reason === "http-response" && observations.host_after.target === "https://example.com" &&
-              observations?.sandbox?.result === "indeterminate" && observations.sandbox.reason === "unclassified-error" && observations.sandbox.target === "https://example.com" &&
-              typeof observations.sandbox.detail === "string" && /\bConnectionRefused\b/.test(observations.sandbox.detail)
-            )
-            if (!workspace || workspace.status !== "passed" || workspace.thread_completed !== true || workspace.apply_patch !== "passed" || workspace.ordinary_repo_write !== "passed" || workspace.app_server_long_lived_secrets_absent !== "passed" || workspace.shell_capabilities_excluded !== "passed" || workspace.shell_snapshot_directory_absent !== "passed" || !network || network.result !== "policy-blocked" || !["proxy-structured-denial", "os-connect-denied", "host-reachable-sandbox-refused"].includes(network.reason) || !pairedNetworkValid || network.probe_target !== "https://example.com" || network.configured_enforcement !== "direct" || workspace.git_metadata_protected !== "passed" || workspace.agents_metadata_protected !== "passed" || workspace.configured_enforcement !== "direct") throw new Error(`invalid workspace-write capability artifact ${name}`)
-          }
-          NODE
-
-      - name: Upload Codex capability evidence
-        if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: codex-capability-${{ github.run_id }}-${{ github.run_attempt }}
-          path: artifacts/codex-capability/${{ github.run_id }}-${{ github.run_attempt }}
-          if-no-files-found: error
-          retention-days: 14
-
-  pre-cutover-acceptance:
-    name: pre-cutover acceptance matrix
-    needs: [test, codex-contract]
-    # Hosted-only acceptance still runs for fork PRs, where the privileged
-    # production-parity capability job is intentionally skipped.
-    if: >-
-      always() &&
-      needs.test.result == 'success' &&
-      (
-        needs.codex-contract.result == 'success' ||
-        (
-          github.event_name == 'pull_request' &&
-          github.event.pull_request.head.repo.full_name != github.repository &&
-          needs.codex-contract.result == 'skipped'
-        )
-      )
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - name: Checkout
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-        with:
-          persist-credentials: false
-
-      - name: Install Bun
-        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
-        with:
-          bun-version-file: .bun-version
-
-      - name: Install dependencies
-        run: bun install --frozen-lockfile
-
-      - name: Run caller, provider, route and lifecycle acceptance
-        env:
-          CCHP_ARTIFACT_RUN_ID: ${{ github.run_id }}-${{ github.run_attempt }}
-          CCHP_ACCEPTANCE_ARTIFACT_DIR: artifacts/pre-cutover/${{ github.run_id }}-${{ github.run_attempt }}
-        run: bash scripts/pre-cutover-acceptance.sh
-
-      - name: Validate pre-cutover evidence ownership
-        id: validate-pre-cutover-evidence
-        if: always()
-        env:
-          CCHP_ARTIFACT_RUN_ID: ${{ github.run_id }}-${{ github.run_attempt }}
-          CCHP_ACCEPTANCE_ARTIFACT_DIR: artifacts/pre-cutover/${{ github.run_id }}-${{ github.run_attempt }}
-        run: |
-          node - <<'NODE'
-          const fs = require("node:fs")
-          const path = `${process.env.CCHP_ACCEPTANCE_ARTIFACT_DIR}/summary.json`
-          const summary = JSON.parse(fs.readFileSync(path, "utf8"))
-          if (summary.run_id !== process.env.CCHP_ARTIFACT_RUN_ID) throw new Error("pre-cutover evidence belongs to another run")
-          if (summary.schema_version !== 1 || summary.stage !== "completed" || summary.status !== "passed") throw new Error("pre-cutover evidence is not a complete passed run")
-          if (summary.caller_abi_unchanged !== true) throw new Error("caller ABI evidence is incomplete")
-          if (JSON.stringify(summary.collaboration_modes) !== JSON.stringify(["native-v2", "explicit-exec"])) throw new Error("collaboration mode evidence is incomplete")
-          if (JSON.stringify(summary.provider_formats) !== JSON.stringify(["openai-responses", "openai-compatible", "anthropic"])) throw new Error("provider format evidence is incomplete")
-          const directory = process.env.CCHP_ACCEPTANCE_ARTIFACT_DIR
-          const matrix = fs.statSync(`${directory}/matrix.txt`)
-          if (!matrix.isFile() || matrix.size === 0) throw new Error("missing pre-cutover acceptance matrix")
-          for (const name of ["tests.txt", "typecheck.txt", "prepare-codex-env.txt", "run-codex.txt", "cleanup.txt"]) {
-            const stat = fs.statSync(`${directory}/${name}`)
-            if (!stat.isFile() || stat.size === 0) throw new Error(`missing pre-cutover evidence ${name}`)
-          }
-          if (!summary.phases || JSON.stringify(summary.phases) !== JSON.stringify({ tests: "passed", typecheck: "passed", prepare_codex_env: "passed", run_codex: "passed", cleanup: "passed" })) throw new Error("pre-cutover phases are incomplete")
-          NODE
-
-      - name: Upload pre-cutover evidence
-        if: always() && steps.validate-pre-cutover-evidence.outcome == 'success'
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: pre-cutover-acceptance-${{ github.run_id }}-${{ github.run_attempt }}
-          path: artifacts/pre-cutover/${{ github.run_id }}-${{ github.run_attempt }}
-          if-no-files-found: error
-          retention-days: 14
+      - name: Type-check Pi runtime
+        run: bunx tsc --noEmit
 
   actionlint:
     name: actionlint
@@ -222,7 +78,6 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
-
       - name: Lint workflows
         uses: raven-actions/actionlint@3d39aea434753780c3b3d4a1a31c854b4dbf49d7 # v2.2.0
 
@@ -234,13 +89,6 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
-
-      # run.yml already carries an inline `# zizmor: ignore[unpinned-uses]` for its
-      # intentional `@latest` self-reference, so no extra suppression is needed here.
-      # Gate on medium+: the only remaining low notes are template-injection on
-      # `env.ENGINE_DIR` (a github.workspace-derived path, not attacker-controllable).
-      # advanced-security:false + annotations:true keeps this job to `contents: read`
-      # (no SARIF upload / security-events:write).
       - name: Audit workflows
         uses: zizmorcore/zizmor-action@6599ee8b7a49aef6a770f63d261d214911a7ce02 # v0.6.0
         with:
@@ -248,16 +96,3 @@ jobs:
           min-severity: medium
           advanced-security: false
           annotations: true
-
-  codex-removal:
-    name: Gate G - Codex-only production paths
-    needs: [pre-cutover-acceptance, actionlint, zizmor]
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-        with:
-          persist-credentials: false
-
-      - name: Verify legacy engine removal
-        run: bash scripts/codex-removal-gate.sh

@@ -216,9 +216,6 @@ export function parseProviders(input: ProviderInput): ProviderSet {
 
   const main = modelRef(input.model.trim(), providers, "CCHP_BOT_MODEL")
   if (!main.reasoning) throw new Error("CCHP_BOT_MODEL must reference a reasoning model")
-  if (!/(^|\/)gpt-5\.6-sol($|[-/])/.test(main.upstreamId)) {
-    throw new Error("CCHP_BOT_MODEL must resolve to gpt-5.6-sol")
-  }
   const small = input.smallModel?.trim()
     ? modelRef(input.smallModel.trim(), providers, "CCHP_BOT_SMALL_MODEL")
     : main

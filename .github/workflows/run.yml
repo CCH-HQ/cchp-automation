@@ -25,7 +25,7 @@
 #
 # TRUST MODEL: this workflow checks out only the pinned ENGINE code. It never
 # checks out untrusted PR head code; fork PR handling reads trusted context only
-# (see scripts/prepare-codex-env.sh). Consumer overlay files are read as repo-relative
+# (see scripts/prepare-pi-env.sh). Consumer overlay files are read as repo-relative
 # paths inside the trusted REPO_DIR clone.
 name: cchp-automation
 
@@ -89,8 +89,8 @@ jobs:
           token: ${{ steps.base.outputs.token }}
           persist-credentials: false
 
-      # Consumer overlay files (e.g. roadmap-policy.md) are consumed as repo-
-      # relative paths inside the trusted REPO_DIR clone made by the Codex prepare step;
+# Consumer overlay files (e.g. roadmap-policy.md) are consumed as repo-
+# relative paths inside the trusted REPO_DIR clone made by the Pi preparation step;
       # no separate overlay checkout is needed.
 
       - name: Bot identity + isolated workdir
@@ -172,7 +172,7 @@ jobs:
           output_commit="$(mktemp "$staging/.github-output.XXXXXX")"
           printf 'CCHP_PROCESS_RECORD_HMAC_KEY=%s\n' "$record_key" > "$env_commit"
           printf 'dir=%s\nworkdir_identity=%s\nprocess_file=%s\ncleanup_complete=%s\n' \
-            "$staging" "$identity" "$staging/codex-app-server-process.json" "$staging/cleanup-complete.json" \
+            "$staging" "$identity" "$staging/pi-process.json" "$staging/cleanup-complete.json" \
             > "$output_commit"
           cat "$env_commit" >> "$GITHUB_ENV"
           cat "$output_commit" >> "$GITHUB_OUTPUT"
@@ -252,22 +252,22 @@ jobs:
           CCHP_ROUTE_ACK: "1"
         run: bun src/cli.ts
 
-      - name: Install Codex CLI
-        id: install_codex
+      - name: Install Pi
+        id: install_pi
         if: steps.route.outputs.act == 'true'
         env:
           GH_TOKEN: ${{ steps.base.outputs.token }}
         run: |
           set -euo pipefail
-          bash "$ENGINE_DIR/scripts/install-codex.sh"
+          bash "$ENGINE_DIR/scripts/install-pi.sh"
 
-      - name: Prepare isolated Codex environment
-        id: prepare_codex
+      - name: Prepare isolated Pi environment
+        id: prepare_pi
         if: steps.route.outputs.act == 'true'
         env:
           BOT_TOKEN: ${{ steps.write.outputs.token || steps.interaction.outputs.token }}
           HEROUI_AUTH_TOKEN: ${{ secrets.heroui-token }}
-        run: bash "$ENGINE_DIR/scripts/prepare-codex-env.sh"
+        run: bash "$ENGINE_DIR/scripts/prepare-pi-env.sh"
 
       - name: External static analysis (trusted pre-review scan)
         id: external_scan
@@ -276,32 +276,33 @@ jobs:
           GH_TOKEN: ${{ steps.base.outputs.token }}
         run: bash "$ENGINE_DIR/scripts/external-scan.sh"
 
-      - name: Verify Codex capability gate
+      - name: Verify Pi capability gate
         id: capability_gate
         if: steps.route.outputs.act == 'true'
-        env:
-          CCHP_ARTIFACT_RUN_ID: ${{ github.run_id }}-${{ github.run_attempt }}
-          CCHP_CAPABILITY_ARTIFACT_DIR: ${{ env.BOT_WORKDIR }}/ctx/codex/capability-gate
-        run: bash "$ENGINE_DIR/scripts/verify-capability-gate.sh"
+        run: |
+          set -euo pipefail
+          test -x "$PI_BIN"
+          test -f "$ENGINE_DIR/pi/system-prompt.md"
+          test -f "$ENGINE_DIR/pi/extensions/cchp-todo.ts"
 
       # Run the agent. Model/provider VARIABLES are read straight from the caller's
       # `vars` context (unchanged); provider keys + SEE come from the passed secrets.
-      - name: Run Codex supervisor
-        id: codex_supervisor
+      - name: Run Pi supervisor
+        id: pi_supervisor
         if: steps.route.outputs.act == 'true'
         env:
           GH_TOKEN: ${{ steps.write.outputs.token || steps.interaction.outputs.token }}
           # Installation tokens hard-expire at 1h. The trusted runtime keeps the
           # current token only in memory, refreshes it with the App credentials and
-          # removes every raw credential before starting Codex/MCP children.
+          # removes every raw credential before starting Pi/MCP children.
           # CCHP_NEEDS_WRITE mirrors the write/interaction token choice above.
           CCHP_APP_CLIENT_ID: ${{ secrets.app-client-id }}
           CCHP_APP_PRIVATE_KEY: ${{ secrets.app-private-key }}
           CCHP_NEEDS_WRITE: ${{ steps.route.outputs.needs_write }}
           REPO_DIR: ${{ env.BOT_WORKDIR }}/repo
           BOT_PROMPT_FILE: ${{ env.BOT_WORKDIR }}/prompt.md
-          BOT_SYSTEM_PROMPT: ${{ env.ENGINE_DIR }}/codex/system-prompt.md
-          # System-prompt overlay values — the Codex runtime renders them from these
+          BOT_SYSTEM_PROMPT: ${{ env.ENGINE_DIR }}/pi/system-prompt.md
+          # System-prompt overlay values — the Pi runtime renders them from these
           # BOT_* names (BOT_DEFAULT_BRANCH / BOT_ROADMAP_PROJECT are job env).
           BOT_ROADMAP_POLICY: ${{ inputs.roadmap_policy }}
           BOT_SEMVER_WORKFLOW: ${{ inputs.semver_workflow }}
@@ -321,9 +322,8 @@ jobs:
           # The agent session may (re)install web deps (@heroui-pro registry) during
           # fix tasks — same job-level exposure the consumer workflow had.
           HEROUI_AUTH_TOKEN: ${{ secrets.heroui-token }}
-          CCHP_CODEX_PID_FILE: ${{ steps.lifecycle_staging.outputs.process_file }}
           CCHP_DEFER_SUCCESS_PUBLICATION: "true"
-        run: bash "$ENGINE_DIR/scripts/run-codex.sh"
+        run: bash "$ENGINE_DIR/scripts/run-pi.sh"
 
       # Runtime publication covers normal supervisor terminals. This independent
       # finalizer also runs when setup, preparation, static analysis, the
@@ -349,7 +349,7 @@ jobs:
         env:
           GH_TOKEN: ${{ steps.finalizer_token.outputs.token || steps.interaction.outputs.token }}
           CCHP_RUNTIME_SNAPSHOT_PATH: ${{ steps.lifecycle_staging.outputs.dir }}/runtime-snapshot.json
-        run: bun "$ENGINE_DIR/src/codex/workflow-runtime-snapshot.ts"
+        run: bun "$ENGINE_DIR/src/pi/workflow-runtime-snapshot.ts"
 
       - name: Finalize progress comment
         id: finalize_progress
@@ -359,18 +359,18 @@ jobs:
           GH_TOKEN: ${{ steps.finalizer_token.outputs.token || steps.interaction.outputs.token }}
           CCHP_WRITE_OUTCOME: ${{ steps.write.outcome }}
           CCHP_NEEDS_WRITE: ${{ steps.route.outputs.needs_write }}
-          CCHP_INSTALL_OUTCOME: ${{ steps.install_codex.outcome }}
-          CCHP_PREPARE_OUTCOME: ${{ steps.prepare_codex.outcome }}
+          CCHP_INSTALL_OUTCOME: ${{ steps.install_pi.outcome }}
+          CCHP_PREPARE_OUTCOME: ${{ steps.prepare_pi.outcome }}
           CCHP_SCAN_OUTCOME: ${{ steps.external_scan.outcome }}
           CCHP_CAPABILITY_OUTCOME: ${{ steps.capability_gate.outcome }}
-          CCHP_SUPERVISOR_OUTCOME: ${{ steps.codex_supervisor.outcome }}
+          CCHP_SUPERVISOR_OUTCOME: ${{ steps.pi_supervisor.outcome }}
           CCHP_JOB_CANCELLED: ${{ job.status == 'cancelled' }}
           CCHP_DEFER_SUCCESS_PUBLICATION: "true"
           CCHP_RUNTIME_SNAPSHOT_PATH: ${{ steps.runtime_snapshot.outputs.path }}
           CCHP_RUNTIME_SNAPSHOT_SHA256: ${{ steps.runtime_snapshot.outputs.sha256 }}
           CCHP_PROGRESS_PUBLICATION_PATH: ${{ steps.lifecycle_staging.outputs.dir || runner.temp }}/progress-publication.json
           CCHP_WORKFLOW_FINALIZATION_PATH: ${{ steps.lifecycle_staging.outputs.dir || runner.temp }}/workflow-finalization.json
-        run: bun "$ENGINE_DIR/src/codex/finalize-workflow-progress.ts"
+        run: bun "$ENGINE_DIR/src/pi/finalize-workflow-progress.ts"
 
       # Upload only a strict lifecycle projection: enums, counters, stable ids,
       # and usage totals. Raw prompts, TODO text, child output, diagnostics, and
@@ -387,15 +387,15 @@ jobs:
           CCHP_RUNTIME_SNAPSHOT_SHA256: ${{ steps.runtime_snapshot.outputs.sha256 }}
           CCHP_WRITE_OUTCOME: ${{ steps.write.outcome }}
           CCHP_NEEDS_WRITE: ${{ steps.route.outputs.needs_write }}
-          CCHP_INSTALL_OUTCOME: ${{ steps.install_codex.outcome }}
-          CCHP_PREPARE_OUTCOME: ${{ steps.prepare_codex.outcome }}
+          CCHP_INSTALL_OUTCOME: ${{ steps.install_pi.outcome }}
+          CCHP_PREPARE_OUTCOME: ${{ steps.prepare_pi.outcome }}
           CCHP_SCAN_OUTCOME: ${{ steps.external_scan.outcome }}
           CCHP_CAPABILITY_OUTCOME: ${{ steps.capability_gate.outcome }}
-          CCHP_SUPERVISOR_OUTCOME: ${{ steps.codex_supervisor.outcome }}
+          CCHP_SUPERVISOR_OUTCOME: ${{ steps.pi_supervisor.outcome }}
           CCHP_RUNTIME_SNAPSHOT_OUTCOME: ${{ steps.runtime_snapshot.outcome }}
           CCHP_FINALIZER_OUTCOME: ${{ steps.finalize_progress.outcome }}
           CCHP_JOB_CANCELLED: ${{ job.status == 'cancelled' }}
-        run: bun "$ENGINE_DIR/src/codex/lifecycle-artifact.ts"
+        run: bun "$ENGINE_DIR/src/pi/lifecycle-artifact.ts"
 
       - name: Cleanup isolated environment
         id: environment_cleanup
@@ -404,7 +404,6 @@ jobs:
         env:
           CCHP_WORKDIR_IDENTITY_PATH: ${{ steps.lifecycle_staging.outputs.workdir_identity }}
           CCHP_CLEANUP_COMPLETE_PATH: ${{ steps.lifecycle_staging.outputs.cleanup_complete }}
-          CCHP_CODEX_PID_FILE: ${{ steps.lifecycle_staging.outputs.process_file }}
         run: bash "$ENGINE_DIR/scripts/cleanup.sh"
 
       - name: Verify Actions lifecycle evidence
@@ -414,7 +413,7 @@ jobs:
         env:
           CCHP_LIFECYCLE_ARTIFACT_PATH: ${{ steps.lifecycle_evidence.outputs.path }}
           CCHP_LIFECYCLE_ARTIFACT_SHA256: ${{ steps.lifecycle_evidence.outputs.sha256 }}
-        run: bun "$ENGINE_DIR/src/codex/lifecycle-artifact.ts" --verify
+        run: bun "$ENGINE_DIR/src/pi/lifecycle-artifact.ts" --verify
 
       - name: Upload Actions lifecycle evidence
         id: upload_lifecycle_evidence
@@ -468,7 +467,7 @@ jobs:
         env:
           CCHP_LIFECYCLE_ARTIFACT_PATH: ${{ steps.lifecycle_roundtrip_staging.outputs.dir }}/${{ steps.lifecycle_evidence.outputs.filename }}
           CCHP_LIFECYCLE_ARTIFACT_SHA256: ${{ steps.lifecycle_evidence.outputs.sha256 }}
-        run: bun "$ENGINE_DIR/src/codex/lifecycle-artifact.ts" --verify
+        run: bun "$ENGINE_DIR/src/pi/lifecycle-artifact.ts" --verify
 
       - name: Mint App token (invalid primary artifact cleanup)
         id: invalid_primary_artifact_cleanup_token
@@ -519,11 +518,11 @@ jobs:
           GH_TOKEN: ${{ steps.finalizer_token.outputs.token || steps.interaction.outputs.token }}
           CCHP_WRITE_OUTCOME: ${{ steps.write.outcome }}
           CCHP_NEEDS_WRITE: ${{ steps.route.outputs.needs_write }}
-          CCHP_INSTALL_OUTCOME: ${{ steps.install_codex.outcome }}
-          CCHP_PREPARE_OUTCOME: ${{ steps.prepare_codex.outcome }}
+          CCHP_INSTALL_OUTCOME: ${{ steps.install_pi.outcome }}
+          CCHP_PREPARE_OUTCOME: ${{ steps.prepare_pi.outcome }}
           CCHP_SCAN_OUTCOME: ${{ steps.external_scan.outcome }}
           CCHP_CAPABILITY_OUTCOME: ${{ steps.capability_gate.outcome }}
-          CCHP_SUPERVISOR_OUTCOME: ${{ steps.codex_supervisor.outcome }}
+          CCHP_SUPERVISOR_OUTCOME: ${{ steps.pi_supervisor.outcome }}
           CCHP_LIFECYCLE_STAGING_OUTCOME: ${{ steps.lifecycle_staging.outcome }}
           CCHP_LIFECYCLE_EVIDENCE_OUTCOME: ${{ steps.lifecycle_evidence.outcome }}
           CCHP_VERIFY_LIFECYCLE_OUTCOME: ${{ steps.verify_lifecycle_evidence.outcome }}
@@ -543,7 +542,7 @@ jobs:
           CCHP_RUNTIME_SNAPSHOT_SHA256: ${{ steps.runtime_snapshot.outputs.sha256 }}
           CCHP_PROGRESS_PUBLICATION_PATH: ${{ steps.lifecycle_staging.outputs.dir || runner.temp }}/progress-publication.json
           CCHP_WORKFLOW_FINALIZATION_PATH: ${{ steps.lifecycle_staging.outputs.dir || runner.temp }}/workflow-finalization.json
-        run: bun "$ENGINE_DIR/src/codex/finalize-workflow-progress.ts"
+        run: bun "$ENGINE_DIR/src/pi/finalize-workflow-progress.ts"
 
       - name: Prepare final lifecycle evidence staging
         id: final_lifecycle_staging
@@ -568,11 +567,11 @@ jobs:
           CCHP_PROGRESS_PUBLICATION_PATH: ${{ steps.lifecycle_staging.outputs.dir || runner.temp }}/progress-publication.json
           CCHP_WRITE_OUTCOME: ${{ steps.write.outcome }}
           CCHP_NEEDS_WRITE: ${{ steps.route.outputs.needs_write }}
-          CCHP_INSTALL_OUTCOME: ${{ steps.install_codex.outcome }}
-          CCHP_PREPARE_OUTCOME: ${{ steps.prepare_codex.outcome }}
+          CCHP_INSTALL_OUTCOME: ${{ steps.install_pi.outcome }}
+          CCHP_PREPARE_OUTCOME: ${{ steps.prepare_pi.outcome }}
           CCHP_SCAN_OUTCOME: ${{ steps.external_scan.outcome }}
           CCHP_CAPABILITY_OUTCOME: ${{ steps.capability_gate.outcome }}
-          CCHP_SUPERVISOR_OUTCOME: ${{ steps.codex_supervisor.outcome }}
+          CCHP_SUPERVISOR_OUTCOME: ${{ steps.pi_supervisor.outcome }}
           CCHP_FINALIZER_OUTCOME: ${{ steps.reconcile_terminal.outcome }}
           CCHP_LIFECYCLE_STAGING_OUTCOME: ${{ steps.lifecycle_staging.outcome }}
           CCHP_LIFECYCLE_EVIDENCE_OUTCOME: ${{ steps.lifecycle_evidence.outcome }}
@@ -588,7 +587,7 @@ jobs:
           CCHP_INVALID_PRIMARY_ARTIFACT_CLEANUP_TOKEN_OUTCOME: ${{ steps.invalid_primary_artifact_cleanup_token.outcome }}
           CCHP_INVALID_PRIMARY_ARTIFACT_CLEANUP_OUTCOME: ${{ steps.delete_invalid_lifecycle_evidence.outcome }}
           CCHP_JOB_CANCELLED: ${{ job.status == 'cancelled' }}
-        run: bun "$ENGINE_DIR/src/codex/lifecycle-artifact.ts"
+        run: bun "$ENGINE_DIR/src/pi/lifecycle-artifact.ts"
 
       - name: Verify final Actions lifecycle evidence
         id: verify_final_lifecycle_evidence
@@ -597,7 +596,7 @@ jobs:
         env:
           CCHP_LIFECYCLE_ARTIFACT_PATH: ${{ steps.final_lifecycle_evidence.outputs.path }}
           CCHP_LIFECYCLE_ARTIFACT_SHA256: ${{ steps.final_lifecycle_evidence.outputs.sha256 }}
-        run: bun "$ENGINE_DIR/src/codex/lifecycle-artifact.ts" --verify
+        run: bun "$ENGINE_DIR/src/pi/lifecycle-artifact.ts" --verify
 
       - name: Upload final Actions lifecycle evidence
         id: upload_final_lifecycle_evidence
@@ -651,7 +650,7 @@ jobs:
         env:
           CCHP_LIFECYCLE_ARTIFACT_PATH: ${{ steps.final_lifecycle_roundtrip_staging.outputs.dir }}/${{ steps.final_lifecycle_evidence.outputs.filename }}
           CCHP_LIFECYCLE_ARTIFACT_SHA256: ${{ steps.final_lifecycle_evidence.outputs.sha256 }}
-        run: bun "$ENGINE_DIR/src/codex/lifecycle-artifact.ts" --verify
+        run: bun "$ENGINE_DIR/src/pi/lifecycle-artifact.ts" --verify
 
       - name: Mint App token (invalid artifact cleanup)
         id: invalid_artifact_cleanup_token
@@ -702,11 +701,11 @@ jobs:
           GH_TOKEN: ${{ steps.finalizer_token.outputs.token || steps.interaction.outputs.token }}
           CCHP_WRITE_OUTCOME: ${{ steps.write.outcome }}
           CCHP_NEEDS_WRITE: ${{ steps.route.outputs.needs_write }}
-          CCHP_INSTALL_OUTCOME: ${{ steps.install_codex.outcome }}
-          CCHP_PREPARE_OUTCOME: ${{ steps.prepare_codex.outcome }}
+          CCHP_INSTALL_OUTCOME: ${{ steps.install_pi.outcome }}
+          CCHP_PREPARE_OUTCOME: ${{ steps.prepare_pi.outcome }}
           CCHP_SCAN_OUTCOME: ${{ steps.external_scan.outcome }}
           CCHP_CAPABILITY_OUTCOME: ${{ steps.capability_gate.outcome }}
-          CCHP_SUPERVISOR_OUTCOME: ${{ steps.codex_supervisor.outcome }}
+          CCHP_SUPERVISOR_OUTCOME: ${{ steps.pi_supervisor.outcome }}
           CCHP_LIFECYCLE_STAGING_OUTCOME: ${{ steps.lifecycle_staging.outcome }}
           CCHP_LIFECYCLE_EVIDENCE_OUTCOME: ${{ steps.lifecycle_evidence.outcome }}
           CCHP_VERIFY_LIFECYCLE_OUTCOME: ${{ steps.verify_lifecycle_evidence.outcome }}
@@ -740,7 +739,7 @@ jobs:
           CCHP_PROGRESS_PUBLICATION_PATH: ${{ steps.lifecycle_staging.outputs.dir || runner.temp }}/progress-publication.json
           CCHP_WORKFLOW_FINALIZATION_PATH: ${{ steps.lifecycle_staging.outputs.dir || runner.temp }}/workflow-finalization.json
           CCHP_REVIEW_PUBLICATION_PATH: ${{ steps.lifecycle_staging.outputs.dir || runner.temp }}/review-publication.json
-        run: bun "$ENGINE_DIR/src/codex/finalize-workflow-progress.ts"
+        run: bun "$ENGINE_DIR/src/pi/finalize-workflow-progress.ts"
 
       - name: Enforce terminal workflow and final artifact transport
         if: always() && steps.route.outputs.act == 'true'

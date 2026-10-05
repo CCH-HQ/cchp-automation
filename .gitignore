@@ -2,6 +2,7 @@ node_modules/
 dist/
 *.log
 /artifacts/
+/.codex-tmp/
 
 # serena per-project workspace (created at runtime via --project-from-cwd)
 .serena/

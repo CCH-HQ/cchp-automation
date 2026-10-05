@@ -1,9 +1,10 @@
 # cchp-automation
 
-Runner-native GitHub App automation engine built on pinned Codex CLI 0.147.0,
-Codex app-server, and multi-agent v2. One isolated supervisor runs **per GitHub
-event inside a GitHub Actions runner** and is distributed as a reusable workflow.
-TypeScript + Octokit; no standalone server and no external durable-workflow engine.
+Runner-native GitHub App automation engine built on Pi 1.0 RPC, Pi's native MCP
+transport, and task-scoped TypeScript extensions. One isolated supervisor runs
+**per GitHub event inside a GitHub Actions runner** and is distributed as a
+reusable workflow. TypeScript + Octokit; no standalone server and no external
+durable-workflow engine.
 
 > **Status:** private, pre-release. MIT-licensed. The design record (glossary +
 > ADRs) is kept local during the private phase and is not yet published.
@@ -29,10 +30,10 @@ jobs:
       roadmap_project: "1"
 ```
 
-The Codex migration preserves the caller ABI. Existing callers continue to use
+The Pi migration preserves the caller ABI. Existing callers continue to use
 the same workflow reference, 7 inputs, 5 reusable-workflow secrets, and 6
-repository or organization variables. Callers do not provide an OpenAI/Codex API
-key, a Codex TOML file, or a Codex version.
+repository or organization variables. Callers do not provide a Pi installation
+path or Pi settings file.
 
 ### Inputs
 
@@ -57,24 +58,58 @@ key, a Codex TOML file, or a Codex version.
 | `see-api-key` | `SEE_API_KEY` | no |
 
 `provider-keys` remains one JSON object keyed by provider id. The engine parses
-the existing provider JSON and maps it into an isolated Codex provider config;
-raw provider keys are retained only by the loopback provider bridge and are not
-written to Codex config or inherited by Codex children.
+the provider JSON and writes an isolated Pi `models.json` with environment
+references for credentials. Raw provider keys are held in the run process and
+are never written to the generated configuration files.
 
 ### Variables
 
-- `CCHP_BOT_PROVIDERS` and `CCHP_BOT_MODEL` select the existing provider/model.
+- `CCHP_BOT_PROVIDERS` and `CCHP_BOT_MODEL` select the provider/model. The Pi
+  adapter accepts OpenAI Responses, OpenAI-compatible, Anthropic, and any Pi
+  API identifier supported by a custom provider extension.
 - `CCHP_BOT_SMALL_MODEL`, `CCHP_BOT_EXTRA_INSTRUCTIONS`, and
   `CCHP_DISABLE_AUTO_APPROVE` keep their existing behavior.
 - `CCHP_BOT_OPENCODE_VERSION` is retained as an ignored legacy no-op so existing
-  caller variable sets do not need to change. It never selects the Codex version.
+  caller variable sets do not need to change. It never selects the Pi version.
+
+The provider variable keeps the existing JSON boundary. A Pi-compatible example
+looks like this:
+
+```json
+{
+  "relay": {
+    "api": "openai-responses",
+    "base_url": "https://gateway.example/v1",
+    "models": {
+      "current": {
+        "upstream_id": "provider-model-id",
+        "context": 200000,
+        "output": 32768,
+        "reasoning": true
+      }
+    }
+  }
+}
+```
+
+Set `CCHP_BOT_MODEL=relay/current`. Provider keys stay in the existing
+`provider-keys` secret object.
+
+OpenAI Responses, OpenAI-compatible, and Anthropic providers use the run-owned
+loopback bridge, so Pi receives a bridge credential and the parent runtime keeps
+the upstream provider key. Pi-specific APIs can use a reviewed project
+extension through `.pi/extensions`.
 
 Requires a GitHub App with the permissions requested by the reusable workflow
-and a self-hosted runner matching `[self-hosted, linux, x64]`. Runtime deadlines,
-restart/resume behavior, the pinned CLI provenance, skills installation/fallback,
-and local verification commands are documented in
-[`docs/ci/agent-toolchain.md`](docs/ci/agent-toolchain.md).
+and a self-hosted runner matching `[self-hosted, linux, x64]`. The runner must
+provide Node.js 22.19 or newer for Pi 1.0. Pi's native MCP config, provider
+adapter, RPC lifecycle, skills installation/fallback, and local verification
+commands are documented in
+[`docs/ci/pi-agent-toolchain.md`](docs/ci/pi-agent-toolchain.md).
 
 Repo-specific config lives in the consumer under `.github/cchp-automation.yml`
 (scalars) and `.github/cchp-automation/` (prompts, policy, references), which
-overlay the engine defaults.
+overlay the engine defaults. The run creates a private Pi agent directory under
+the run-owned working directory, generates `models.json` and `mcp.json`, loads
+the CCHP Pi package from [`pi/package.json`](pi/package.json), and starts Pi
+with `--mode rpc`.
