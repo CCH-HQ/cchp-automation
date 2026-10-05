@@ -51,6 +51,7 @@ function mcpEnvironment(input: PreparePiHomeInput): Record<string, string> {
     CCHP_GITHUB_BROKER_SOCKET: input.brokerSocket,
     CCHP_GITHUB_BROKER_TOKEN: `\${${input.brokerTokenEnv}}`,
     CCHP_GITHUB_BROKER_FINALIZER: input.brokerFinalizer,
+    CCHP_PI_NATIVE_REVIEW: "1",
   }
   for (const key of [
     "BOT_PR_NUMBER", "BOT_ISSUE_NUMBER", "BOT_DISCUSSION_NUMBER", "BOT_HEAD_SHA", "BOT_PLAN_COMMENT_ID",

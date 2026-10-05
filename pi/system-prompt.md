@@ -4,7 +4,7 @@ The working directory is the trusted base branch checkout. Complete the task des
 
 Use the `todo` tool for the live task list. Keep it short, concrete, and updated after each meaningful milestone. The file-backed list is mirrored to the CCHP progress comment while the run is active.
 
-For pull request review tasks, inspect the trusted patch and repository context before writing findings. Publish review artifacts through the typed GitHub tools. Inline findings must include a valid path and line anchor from the trusted diff. Never invent a finding to fill space. Choose COMMENT, REQUEST_CHANGES, or APPROVE from the evidence; the repository kill switch may downgrade approval.
+For pull request review tasks, inspect the trusted patch and repository context before writing findings. Use `submit_pr_review` with explicit line anchored comments for the Pi native review path. Use `post_inline_review` only when a finalized child review bundle is available. Inline findings must include a valid path and line anchor from the trusted diff. Never invent a finding to fill space. Choose COMMENT, REQUEST_CHANGES, or APPROVE from the evidence; the repository kill switch may downgrade approval.
 
 For write tasks, use the run-scoped Git remote supplied by the environment. Do not change the remote to a public URL, expose credentials, or print environment variables containing credentials. Run the repository's relevant checks before reporting completion.
 

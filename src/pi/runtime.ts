@@ -101,6 +101,8 @@ function writeTerminal(workdir: string, runId: string, task: string, result: PiR
 
 function finalizePiReview(env: RuntimeEnv, workdir: string, runId: string, result: PiRpcResult, secrets: readonly string[]): void {
   if (env.BOT_TASK !== "pr_opened" || env.BOT_SKIP_PR_INSPECT === "1" || result.state !== "SUCCEEDED") return
+  const admissionLedgerPath = join(workdir, "ctx", "codex", "review-admission.jsonl")
+  if (!existsSync(admissionLedgerPath)) return
   const provenance = new ProvenanceLedger(join(workdir, "ctx", "codex", "provenance.jsonl"), runId)
   const entry = provenance.record("pi.rpc.completed", { sessionId: result.sessionId, events: result.events, usage: result.usage })
   const markerPath = env.BOT_REVIEW_FINALIZED_MARKER ?? join(workdir, "ctx", "review-finalized.json")
@@ -350,6 +352,9 @@ export async function main(): Promise<number> {
       },
     })
     exitCode = result.exitCode
+    if (result.state !== "SUCCEEDED") {
+      process.stderr.write(`[run-pi] Pi RPC failed state=${result.state} exit=${result.exitCode} message=${redact(result.finalMessage ?? "unknown Pi failure", [...secrets])}\n`)
+    }
     if (result.state === "SUCCEEDED") {
       const provenance = new ProvenanceLedger(join(workdir, "ctx", "codex", "provenance.jsonl"), runId)
       provenance.record("pi.rpc.completed", { sessionId: result.sessionId, events: result.events, usage: result.usage })

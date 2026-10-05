@@ -798,6 +798,9 @@ export function buildTools(deps: ServerDeps): ToolEntry[] {
       handler: async (a) => {
         assertOnlyArgs(a, ["fingerprints"])
         const finalized = finalizedReview()
+        if (!finalized && env.CCHP_PI_NATIVE_REVIEW === "1") {
+          throw new Error("Pi native review uses submit_pr_review with trusted line comments; no finalized child review bundle is loaded")
+        }
         if (!Array.isArray(a.fingerprints) || !a.fingerprints.every((value) => typeof value === "string" && value.length > 0)) {
           throw new Error("fingerprints must be a non-empty array of strings")
         }
