@@ -112,6 +112,8 @@ export async function runPiRpc(options: PiRpcOptions): Promise<PiRpcResult> {
   let usage = usageFrom(undefined)
   let events = 0
   let providerError = ""
+  let shutdownTimer: ReturnType<typeof setTimeout> | undefined
+  let killTimer: ReturnType<typeof setTimeout> | undefined
   const stdoutTask = readJsonLines(child.stdout, async (record) => {
     events++
     log(record)
@@ -131,11 +133,19 @@ export async function runPiRpc(options: PiRpcOptions): Promise<PiRpcResult> {
     if (record.type === "agent_settled" && !settled) {
       settled = true
       child.stdin.end()
+      shutdownTimer = setTimeout(() => {
+        try { child.kill("SIGTERM") } catch {}
+        killTimer = setTimeout(() => {
+          try { child.kill("SIGKILL") } catch {}
+        }, 5_000)
+      }, 5_000)
     }
   })
   await writeCommand(child.stdin, { id: "cchp-prompt", type: "prompt", message: options.prompt })
   const stderrTask = new Response(child.stderr).text()
   const exitCode = await child.exited
+  if (shutdownTimer) clearTimeout(shutdownTimer)
+  if (killTimer) clearTimeout(killTimer)
   await Promise.all([stdoutTask, stderrTask])
   const stderr = await stderrTask
   if (!settled) {
