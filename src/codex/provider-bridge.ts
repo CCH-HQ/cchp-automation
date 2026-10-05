@@ -227,7 +227,14 @@ function anthropicContent(value: unknown, label: string): JsonRecord[] {
 
 function responseItems(input: unknown): JsonRecord[] {
   if (typeof input === "string") return [{ type: "message", role: "user", content: input }]
-  return records(input, "input")
+  return records(input, "input").map((item) => {
+    // Pi and the OpenAI Responses API both allow message-shaped input items
+    // without the explicit `type: "message"` discriminator.
+    if (item.type === undefined && typeof item.role === "string" && item.content !== undefined) {
+      return { type: "message", ...item }
+    }
+    return item
+  })
 }
 
 interface BridgeTool {
@@ -1697,6 +1704,7 @@ async function handleProviderRequest(
   let callerModelKey = ""
   let responseModelKey = ""
   let effectiveProvider = provider
+  let transportProvider = provider
   let attribution: { threadId?: string; turnId?: string } | undefined
   let reservation: UsageReservationRef | undefined
   try {
@@ -1723,6 +1731,13 @@ async function handleProviderRequest(
       callerModelKey = leafModel.modelKey
       ;(raw as Record<string, unknown>).model = callerModelKey
     }
+    transportProvider = effectiveProvider
+    if (effectiveProvider.format === "openai-responses" && responseTools(raw as JsonRecord).length > 0) {
+      // Some gateway accounts expose Responses for ordinary requests while
+      // advertising tool support only through Chat Completions. Keep the Pi
+      // side on Responses and translate tool-bearing turns at this boundary.
+      transportProvider = { ...effectiveProvider, format: "openai-compatible" }
+    }
     if (maxOutputTokens !== undefined) {
       if (hasImageInput((raw as JsonRecord).input)) {
         throw new Error("short read-only token guard does not support image input")
@@ -1732,7 +1747,7 @@ async function handleProviderRequest(
         ? Math.min(requestedOutput, maxOutputTokens)
         : maxOutputTokens
     }
-    const translated = translateResponsesRequest(effectiveProvider, raw as Record<string, unknown>)
+    const translated = translateResponsesRequest(transportProvider, raw as Record<string, unknown>)
     body = translated.body
     if (onBeforeRequest) {
       const configured = effectiveProvider.models[callerModelKey]
@@ -1756,7 +1771,7 @@ async function handleProviderRequest(
             type: "token_budget_admission_denied",
             message: admission.reason ?? "provider request denied by runtime admission policy",
           },
-        }, { status: 429 }), effectiveProvider)
+        }, { status: 429 }), transportProvider)
       }
       reservation = admission.reservation
     }
@@ -1765,16 +1780,16 @@ async function handleProviderRequest(
     return scrubResponse(Response.json(
       { error: { type: "invalid_request_error", message: (error as Error).message } },
       { status: 400 },
-    ), effectiveProvider)
+    ), transportProvider)
   }
 
-  const target = `${effectiveProvider.baseUrl}/${upstreamPath(effectiveProvider)}`
+  const target = `${transportProvider.baseUrl}/${upstreamPath(transportProvider)}`
   let upstream: Response
   const requestAbort = upstreamAbort ?? new AbortController()
   try {
     upstream = await fetch(target, {
       method: "POST",
-      headers: upstreamHeaders(effectiveProvider, request),
+      headers: upstreamHeaders(transportProvider, request),
       body: JSON.stringify(body),
       signal: AbortSignal.any([request.signal, requestAbort.signal]),
       redirect: "error",
@@ -1786,12 +1801,12 @@ async function handleProviderRequest(
     return scrubResponse(Response.json(
       { error: { type: "upstream_transport_error", message: (error as Error).message } },
       { status: 502 },
-    ), effectiveProvider)
+    ), transportProvider)
   }
   try {
     return observeResponseUsage(
-      scrubResponse(await passthroughResponse(effectiveProvider, upstream, responseModelKey), effectiveProvider),
-      effectiveProvider,
+      scrubResponse(await passthroughResponse(transportProvider, upstream, responseModelKey), transportProvider),
+      transportProvider,
       callerModelKey,
       attribution,
       reservation,
@@ -1809,7 +1824,7 @@ async function handleProviderRequest(
     return scrubResponse(Response.json(
       { error: { type: "upstream_response_error", message: (error as Error).message } },
       { status: 502 },
-    ), effectiveProvider)
+    ), transportProvider)
   }
 }
 
