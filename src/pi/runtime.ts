@@ -100,7 +100,7 @@ function writeTerminal(workdir: string, runId: string, task: string, result: PiR
 }
 
 function finalizePiReview(env: RuntimeEnv, workdir: string, runId: string, result: PiRpcResult, secrets: readonly string[]): void {
-  if (env.BOT_TASK !== "pr_opened" || env.BOT_SKIP_PR_INSPECT === "1" || result.state !== "SUCCEEDED") return
+  if (env.CCHP_PI_NATIVE_REVIEW === "1" || env.BOT_TASK !== "pr_opened" || env.BOT_SKIP_PR_INSPECT === "1" || result.state !== "SUCCEEDED") return
   const admissionLedgerPath = join(workdir, "ctx", "codex", "review-admission.jsonl")
   if (!existsSync(admissionLedgerPath)) return
   const provenance = new ProvenanceLedger(join(workdir, "ctx", "codex", "provenance.jsonl"), runId)
@@ -223,6 +223,7 @@ export async function main(): Promise<number> {
   const engineDir = required("ENGINE_DIR")
   const repoDir = required("REPO_DIR")
   const env = process.env
+  env.CCHP_PI_NATIVE_REVIEW = "1"
   const permission = resolveRuntimePermission(env)
   const contract = parseCallerContract(env)
   const providerSet = parsePiProviders({
