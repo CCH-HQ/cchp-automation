@@ -16,6 +16,7 @@ test("defines a fail-closed Codex permission profile for every frozen task", () 
     sandboxMode: "read-only",
     allowRepositoryMutation: false,
     approvalPolicy: "never",
+    allowShell: true,
   })
   expect(profiles.lgtm_merge).toMatchObject({
     sandboxMode: "danger-full-access",

@@ -8,7 +8,7 @@ import { startGitHubBroker } from "../mcp/github-broker"
 import { reviewPublicationBundle } from "../mcp/server"
 import { finalizeReview } from "../review/finalize"
 import { writePreparedFinalizedReviewPublication } from "../publish/finalized-review"
-import { progressMarkerKey, renderProgress, trustedBotLogin, upsertSticky } from "../publish/sticky"
+import { progressMarkerKey, renderProgress, renderTerminalProgress, trustedBotLogin, upsertSticky } from "../publish/sticky"
 import { recordProgressPublication, tryRecordProgressPublication } from "../codex/progress-publication"
 import { cleanupRuntimeResources, configureGitRemote, createProgressPublisher, resolveRuntimeBrokerBindings, resolveRuntimePermission, settleRuntimeOutcome } from "../codex/runtime"
 import { loadExtraInstructions, renderCallerOverlay, renderInstructionOverlay } from "../codex/instructions"
@@ -138,6 +138,8 @@ function childEnvironment(input: {
   broker: { socketPath: string; token: string }
   providerSecrets: Record<string, string>
   runtimeEnv: RuntimeEnv
+  agentModel: string
+  piBin: string
 }): Record<string, string> {
   const blocked = new Set([
     "GH_TOKEN", "CCHP_GH_TOKEN_FILE", "CCHP_APP_CLIENT_ID", "CCHP_APP_PRIVATE_KEY", "CCHP_BOT_PROVIDER_KEYS",
@@ -155,6 +157,11 @@ function childEnvironment(input: {
     BOT_RUN_ID: input.runtimeEnv.BOT_RUN_ID ?? required("BOT_RUN_ID"),
     BOT_CAN_WRITE: input.runtimeEnv.BOT_CAN_WRITE ?? "0",
     PI_CODING_AGENT_DIR: input.agentDir,
+    PI_BIN: input.piBin,
+    CCHP_PI_AGENT_DEPTH: "0",
+    CCHP_PI_AGENT_MODEL: input.agentModel,
+    CCHP_PI_AGENT_ALLOW_SHELL: input.runtimeEnv.BOT_PR_IS_FORK !== "1" && (input.runtimeEnv.BOT_TASK === "pr_opened" || input.runtimeEnv.BOT_CAN_WRITE === "1") ? "1" : "0",
+    CCHP_PI_AGENT_SESSION_DIR: join(input.workdir, "ctx", "pi", "child-sessions"),
     PI_OFFLINE: "1",
     PI_SKIP_VERSION_CHECK: "1",
     PI_TELEMETRY: "0",
@@ -164,24 +171,18 @@ function childEnvironment(input: {
   }
 }
 
-async function publishPiTerminal(env: RuntimeEnv, octokit: GitHubClient, result: PiRpcResult, version: string, secrets: readonly string[]): Promise<void> {
+async function publishPiTerminal(env: RuntimeEnv, octokit: GitHubClient, result: PiRpcResult, secrets: readonly string[]): Promise<void> {
   const repo = env.BOT_REPO
   const target = env.BOT_PROGRESS_TARGET ?? env.BOT_PR_NUMBER ?? env.BOT_ISSUE_NUMBER
   if (!repo || !target || !/^[1-9][0-9]*$/.test(target)) return
   const issueNumber = Number(target)
   const task = env.BOT_TASK ?? "task"
   const runId = env.BOT_RUN_ID ?? env.GITHUB_RUN_ID ?? "unknown"
-  const body = [
-    "### CCHP Automation",
-    "",
-    `State: \`${result.state}\``,
-    `Run: \`${runId}\``,
-    `Pi: \`${version}\``,
-    "Mode: `rpc`",
-    `Tokens: ${result.usage.total.toLocaleString("en-US")}`,
-    ...(result.finalMessage ? ["", "<details>", "<summary>Response</summary>", "", redact(result.finalMessage, secrets).slice(-8000), "", "</details>"] : []),
-    `<!-- ${progressMarkerKey(task)} -->`,
-  ].join("\n")
+  const body = `${renderTerminalProgress(task, {
+    state: result.state,
+    runId,
+    finalMessage: result.finalMessage ? redact(result.finalMessage, secrets).slice(-16_000) : undefined,
+  })}\n<!-- ${progressMarkerKey(task)} -->`
   const prNumber = env.BOT_PR_NUMBER
   const guard = async (): Promise<boolean> => {
     if (!prNumber) return true
@@ -280,6 +281,13 @@ export async function main(): Promise<number> {
   const promptPath = env.BOT_PROMPT_FILE || join(workdir, "prompt.md")
   const taskPrompt = existsSync(promptPath) ? readFileSync(promptPath, "utf8") : ""
   const prompt = `${system}\n${renderInstructionOverlay(extra)}\n${taskPrompt}`
+  const piBin = required("PI_BIN")
+  const version = piVersion(piBin)
+  const childModel = piModelReference(
+    providerSet,
+    permission.reviewOnly && providerSet.smallModel ? providerSet.smallModel : providerSet.mainModel,
+    bridgeRouting,
+  )
   const prepared = preparePiHome({
     botWorkdir: workdir,
     engineDir,
@@ -293,14 +301,14 @@ export async function main(): Promise<number> {
     brokerFinalizer: env.BOT_REVIEW_FINALIZED_MARKER ?? join(workdir, "ctx", "review-finalized.json"),
     runtimeEnv: env,
     bunCommand: process.execPath,
+    agentModel: childModel,
+    agentAllowShell: permission.allowShell,
     seeServer: env.BOT_HAVE_SEE === "1" ? join(engineDir, "src", "mcp", "see-server.ts") : undefined,
     ...(providerBridge && bridgeRouting
       ? { bridge: { baseUrl: providerBridge.baseUrl, tokenEnv: "CCHP_PI_BRIDGE_TOKEN", providerIds: bridgeRouting.providerIds } }
       : {}),
   })
   mkdirSync(join(workdir, "ctx", "codex"), { recursive: true, mode: 0o700 })
-  const piBin = required("PI_BIN")
-  const version = piVersion(piBin)
   const bridgedSecretNames = new Set<string>()
   for (const provider of providerSet.providers) {
     if (!bridgeRouting?.providerIds.has(provider.id)) continue
@@ -311,7 +319,16 @@ export async function main(): Promise<number> {
     }
   }
   const directProviderSecrets = Object.fromEntries(Object.entries(providerSecrets).filter(([name]) => !bridgedSecretNames.has(name)))
-  const childEnv = childEnvironment({ workdir, repoDir, agentDir: prepared.agentDir, broker, providerSecrets: directProviderSecrets, runtimeEnv: env })
+  const childEnv = childEnvironment({
+    workdir,
+    repoDir,
+    agentDir: prepared.agentDir,
+    broker,
+    providerSecrets: directProviderSecrets,
+    runtimeEnv: env,
+    agentModel: childModel,
+    piBin,
+  })
   if (providerBridge) childEnv.CCHP_PI_BRIDGE_TOKEN = providerBridge.token
   delete process.env.GH_TOKEN
   delete process.env.CCHP_APP_CLIENT_ID
@@ -363,7 +380,7 @@ export async function main(): Promise<number> {
     writeTerminal(workdir, runId, permission.task, result, version)
     finalizePiReview(env, workdir, runId, result, [...secrets])
     if (publishProgress) await publishProgress(`${renderProgress([], permission.task)}\n\nPi ${version} run ${runId}`)
-    await publishPiTerminal(env, octokit, result, version, [...secrets])
+    await publishPiTerminal(env, octokit, result, [...secrets])
   } catch (error) {
     primaryError = error
     process.stderr.write(`[run-pi] error: ${redact(error instanceof Error ? error.stack ?? error.message : String(error), [...secrets])}\n`)

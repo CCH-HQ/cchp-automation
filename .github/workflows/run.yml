@@ -284,6 +284,7 @@ jobs:
           test -x "$PI_BIN"
           test -f "$ENGINE_DIR/pi/system-prompt.md"
           test -f "$ENGINE_DIR/pi/extensions/cchp-todo.ts"
+          test -f "$ENGINE_DIR/src/pi/agents-server.ts"
 
       # Run the agent. Model/provider VARIABLES are read straight from the caller's
       # `vars` context (unchanged); provider keys + SEE come from the passed secrets.

@@ -51,7 +51,7 @@ const cases: Case[] = [
     eventName: "pull_request_target",
     event: { action: "opened", pull_request: { number: 9, user: { login: "alice" }, base: { ref: "dev" }, head: { ref: "feature", sha: "sha-1", repo: { full_name: repo } } }, sender: { login: "alice" } },
     task: "pr_opened", canWrite: true, isFork: false,
-    sandbox: "read-only", shell: false, writeToken: true, prompt: /Bash is denied for all pr_opened reviews/,
+    sandbox: "read-only", shell: true, writeToken: true, prompt: /Bash is available for local validation/,
     env: { BOT_PR_NUMBER: "9", BOT_TARGET_BRANCH: "dev", BOT_PR_IS_FORK: "0" },
   },
   {

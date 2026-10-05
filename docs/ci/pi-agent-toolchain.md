@@ -12,11 +12,12 @@ flowchart TD
   F --> G[Pi models.json]
   F --> H[Pi native mcp.json]
   H --> I[cchp_github MCP]
-  I --> J[Octokit broker and rotating App token]
-  F --> K[cchp-todo extension]
-  K --> L[ctx/pi/todo.json]
-  L --> M[sticky progress comment]
-  F --> N[run-scoped Git proxy]
+  H --> J[agents MCP]
+  I --> K[Octokit broker and rotating App token]
+  F --> L[cchp-todo extension]
+  L --> M[ctx/pi/todo.json]
+  M --> N[sticky progress comment]
+  F --> O[run-scoped Git proxy]
 ```
 
 One GitHub event receives one run-owned directory. The workflow keeps ownership
@@ -86,12 +87,14 @@ stable.
 
 ## Native MCP and GitHub operations
 
-Pi reads a run-owned `mcp.json` containing the `cchp_github` stdio server. The
-server is the existing Octokit-backed CCHP MCP implementation. Its task allow
-list, trusted target binding, review finalization gate, fork restrictions,
-artifact validation, and token rotation remain in the server and broker. Pi's
-native MCP implementation exposes deferred tools through its `tool_search`
-surface and keeps the full tool result available to codemode scripts.
+Pi reads a run-owned `mcp.json` containing direct `cchp_github` and `agents`
+stdio servers. The first server is the existing Octokit-backed CCHP MCP
+implementation. Its task allow list, trusted target binding, review
+finalization gate, fork restrictions, artifact validation, and token rotation
+remain in the server and broker. The second server starts Pi child sessions for
+independent review and verification passes, records their terminal feedback,
+and enforces one delegation depth. Optional servers may use Pi's `tool_search`
+surface.
 
 The optional `see_upload` server uses the same broker token and run-owned paths.
 The Git proxy remains available for trusted write tasks, so Pi can push through
@@ -113,8 +116,10 @@ the agent is working. The ledger uses the existing `pending`, `in_progress`,
 `completed`, and `cancelled` statuses.
 
 The runtime writes a Pi terminal record and a compatibility projection consumed
-by the lifecycle finalizer. This keeps the caller workflow ABI and lifecycle
-artifact format stable while the active agent process is fully Pi-based.
+by the lifecycle finalizer. The final sticky comment uses the shared terminal
+renderer and omits token counters. Same-repository pull request reviews may
+run repository checks and tests in the trusted checkout; fork reviews use the
+pre-fetched context and typed tools.
 
 ## CCH integration path
 

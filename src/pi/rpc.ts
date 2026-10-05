@@ -8,12 +8,13 @@ export interface PiRpcOptions {
   prompt: string
   model: string
   thinking?: string
-  extensionPath: string
+  extensionPath?: string
   sessionDir: string
   sessionName: string
   sessionId: string
   eventLogPath: string
   allowShell: boolean
+  abortSignal?: AbortSignal
   onEvent?: (event: Record<string, unknown>) => void
 }
 
@@ -84,9 +85,6 @@ async function writeCommand(stdin: { write(value: string): void; flush(): Promis
 export async function runPiRpc(options: PiRpcOptions): Promise<PiRpcResult> {
   mkdirSync(dirname(options.eventLogPath), { recursive: true, mode: 0o700 })
   mkdirSync(options.sessionDir, { recursive: true, mode: 0o700 })
-  const tools = options.allowShell
-    ? "read,write,edit,bash,grep,find,ls,tool_search,codemode"
-    : "read,grep,find,ls,tool_search,codemode"
   const child = Bun.spawn([
     options.piBin,
     "--mode", "rpc",
@@ -96,8 +94,7 @@ export async function runPiRpc(options: PiRpcOptions): Promise<PiRpcResult> {
     "--session-id", options.sessionId,
     "--model", options.model,
     ...(options.thinking ? ["--thinking", options.thinking] : []),
-    "--tools", tools,
-    "--extension", options.extensionPath,
+    ...(options.extensionPath ? ["--extension", options.extensionPath] : []),
   ], {
     cwd: options.cwd,
     env: options.env,
@@ -112,8 +109,18 @@ export async function runPiRpc(options: PiRpcOptions): Promise<PiRpcResult> {
   let usage = usageFrom(undefined)
   let events = 0
   let providerError = ""
+  let aborted = Boolean(options.abortSignal?.aborted)
   let shutdownTimer: ReturnType<typeof setTimeout> | undefined
   let killTimer: ReturnType<typeof setTimeout> | undefined
+  const abort = () => {
+    aborted = true
+    try { child.kill("SIGTERM") } catch {}
+    killTimer = setTimeout(() => {
+      try { child.kill("SIGKILL") } catch {}
+    }, 5_000)
+  }
+  options.abortSignal?.addEventListener("abort", abort, { once: true })
+  if (options.abortSignal?.aborted) abort()
   const stdoutTask = readJsonLines(child.stdout, async (record) => {
     events++
     log(record)
@@ -144,10 +151,14 @@ export async function runPiRpc(options: PiRpcOptions): Promise<PiRpcResult> {
   await writeCommand(child.stdin, { id: "cchp-prompt", type: "prompt", message: options.prompt })
   const stderrTask = new Response(child.stderr).text()
   const exitCode = await child.exited
+  options.abortSignal?.removeEventListener("abort", abort)
   if (shutdownTimer) clearTimeout(shutdownTimer)
   if (killTimer) clearTimeout(killTimer)
   await Promise.all([stdoutTask, stderrTask])
   const stderr = await stderrTask
+  if (aborted) {
+    return { state: "CANCELLED", exitCode: exitCode || 1, ...(sessionId ? { sessionId } : {}), ...(finalMessage ? { finalMessage } : {}), usage, events }
+  }
   if (!settled) {
     const detail = providerError || stderr.trim() || `Pi exited before agent_settled with code ${exitCode}`
     return { state: "FAILED", exitCode: exitCode || 1, ...(sessionId ? { sessionId } : {}), ...(finalMessage ? { finalMessage } : { finalMessage: detail }), usage, events }

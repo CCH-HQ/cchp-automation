@@ -16,6 +16,8 @@ export interface PreparePiHomeInput {
   runtimeEnv: Record<string, string | undefined>
   bunCommand?: string
   seeServer?: string
+  agentModel?: string
+  agentAllowShell?: boolean
   bridge?: { baseUrl: string; tokenEnv: string; providerIds: ReadonlySet<string> }
 }
 
@@ -52,6 +54,13 @@ function mcpEnvironment(input: PreparePiHomeInput): Record<string, string> {
     CCHP_GITHUB_BROKER_TOKEN: `\${${input.brokerTokenEnv}}`,
     CCHP_GITHUB_BROKER_FINALIZER: input.brokerFinalizer,
     CCHP_PI_NATIVE_REVIEW: "1",
+    CCHP_PI_AGENT_DEPTH: `\${CCHP_PI_AGENT_DEPTH}`,
+    CCHP_PI_AGENT_MODEL: input.agentModel ?? "",
+    CCHP_PI_AGENT_ALLOW_SHELL: input.agentAllowShell ? "1" : "0",
+    PI_BIN: source.PI_BIN ?? "",
+    PI_CODING_AGENT_DIR: join(input.botWorkdir, "pi-home"),
+    CCHP_PI_AGENT_SESSION_DIR: join(input.botWorkdir, "ctx", "pi", "child-sessions"),
+    CCHP_PI_BRIDGE_TOKEN: `\${CCHP_PI_BRIDGE_TOKEN}`,
   }
   for (const key of [
     "BOT_PR_NUMBER", "BOT_ISSUE_NUMBER", "BOT_DISCUSSION_NUMBER", "BOT_HEAD_SHA", "BOT_PLAN_COMMENT_ID",
@@ -83,7 +92,15 @@ export function preparePiHome(input: PreparePiHomeInput): PreparedPiHome {
       cwd: input.repoDir,
       env: mcpEnvironment(input),
       description: "Trusted, task-scoped GitHub reads and mutations through the CCHP broker",
-      exposure: "deferred",
+      exposure: "direct",
+    },
+    agents: {
+      command: input.bunCommand ?? "bun",
+      args: [join(input.engineDir, "src", "pi", "agents-server.ts")],
+      cwd: input.repoDir,
+      env: mcpEnvironment(input),
+      description: "Pi-native task-scoped child agents for independent review and verification passes",
+      exposure: "direct",
     },
   }
   if (input.seeServer) {
@@ -105,7 +122,7 @@ export function preparePiHome(input: PreparePiHomeInput): PreparedPiHome {
   writePrivate(settingsPath, `${JSON.stringify({
     defaultProjectTrust: "always",
     enableInstallTelemetry: false,
-    defaultTools: ["read", "grep", "find", "ls", ...(input.runtimeEnv.BOT_CAN_WRITE === "1" ? ["write", "edit", "bash"] : []), "+tool_search"],
+    defaultTools: ["read", "grep", "find", "ls", "todo", ...(input.agentAllowShell ? ["write", "edit", "bash"] : []), "+tool_search"],
     sessionDir,
   }, null, 2)}\n`)
   writePrivate(join(agentDir, "APPEND_SYSTEM.md"), `${input.systemPrompt.trim()}\n\nRun id: ${input.runId}\nTask: ${input.task}\n`)

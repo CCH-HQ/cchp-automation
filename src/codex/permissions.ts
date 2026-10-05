@@ -41,8 +41,8 @@ export function permissionForTask(input: TaskPermissionInput): TaskPermissionPro
     approvalPolicy: "never",
     allowRepositoryMutation,
     hasWriteToken: trustedWrite,
-    // Fork and review-only tasks never receive a generic shell surface.
-    allowShell: allowRepositoryMutation,
+    // Same-repository reviews may run local read-only checks against the trusted checkout.
+    allowShell: allowRepositoryMutation || (input.task === "pr_opened" && input.canWrite && !input.isFork),
     reviewOnly,
   }
 }

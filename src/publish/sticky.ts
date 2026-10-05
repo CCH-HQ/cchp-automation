@@ -107,9 +107,6 @@ const TERMINAL_SUMMARY_COLLAPSE_THRESHOLD = 1_200
 export function renderTerminalProgress(task: string, terminal: TerminalProgress): string {
   void task
   const reason = sanitizeTodo(terminal.terminalReason)
-  const usage = terminal.consumedTokens == null
-    ? undefined
-    : `${terminal.consumedTokens.toLocaleString("en-US")}${terminal.tokenLimit == null ? "" : ` / ${terminal.tokenLimit.toLocaleString("en-US")}`} tokens`
   const finalMessage = sanitizeTerminalMessage(terminal.finalMessage)
   const mode = terminal.executionMode === "native_v2"
     ? "native-v2"
@@ -132,9 +129,6 @@ export function renderTerminalProgress(task: string, terminal: TerminalProgress)
   const details = [
     `State: \`${sanitizeTodo(terminal.state) || "UNKNOWN"}\``,
     `Run: \`${sanitizeTodo(terminal.runId) || "unknown"}\``,
-    ...(usage ? [`Usage: ${usage}`] : []),
-    ...(terminal.reservedTokens == null ? [] : [`Reserved: ${terminal.reservedTokens.toLocaleString("en-US")} tokens`]),
-    ...(terminal.responsesInFlight == null ? [] : [`In flight: ${terminal.responsesInFlight.toLocaleString("en-US")} responses`]),
     ...(terminal.codexVersion ? [`Codex: \`${sanitizeTodo(terminal.codexVersion)}\``] : []),
     ...(mode ? [`Mode: \`${mode}\``] : []),
     ...(terminal.cleanupOutcome ? [`Cleanup: \`${sanitizeTodo(terminal.cleanupOutcome)}\``] : []),
